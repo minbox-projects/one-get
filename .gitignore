@@ -1,3 +1,9 @@
 .ai-workflow/plans/
 .worktrees/
 localdocs/
+node_modules/
+dist/
+src-tauri/target/
+.signing/
+playwright-report/
+test-results/
