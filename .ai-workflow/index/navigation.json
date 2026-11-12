@@ -1,5 +1,633 @@
 {
   "version": 1,
-  "module_roots": [],
-  "features": []
+  "module_roots": [
+    {
+      "id": "e2e",
+      "path": "e2e",
+      "owner_role": "shared",
+      "responsibility": "Discovered typescript module at e2e",
+      "language": "typescript",
+      "entry_kinds": [
+        "exported-symbol"
+      ]
+    },
+    {
+      "id": "root",
+      "path": ".",
+      "owner_role": "shared",
+      "responsibility": "Discovered typescript module at .",
+      "language": "typescript",
+      "entry_kinds": [
+        "exported-symbol"
+      ]
+    },
+    {
+      "id": "scripts",
+      "path": "scripts",
+      "owner_role": "shared",
+      "responsibility": "Discovered typescript module at scripts",
+      "language": "typescript",
+      "entry_kinds": [
+        "exported-symbol"
+      ]
+    },
+    {
+      "id": "src",
+      "path": "src",
+      "owner_role": "shared",
+      "responsibility": "Discovered typescript module at src",
+      "language": "typescript",
+      "entry_kinds": [
+        "exported-symbol"
+      ]
+    }
+  ],
+  "features": [
+    {
+      "id": "e2e",
+      "name": "e2e",
+      "aliases": [],
+      "module_root": "e2e",
+      "entries": [
+        "e2e/app-shell.spec.ts",
+        "e2e/design-system.spec.ts",
+        "e2e/smoke.spec.ts"
+      ],
+      "symbols": [],
+      "related_files": [],
+      "tests": [],
+      "depends_on": [],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Discovered typescript module at e2e",
+      "read_scope": [
+        "e2e/app-shell.spec.ts",
+        "e2e/design-system.spec.ts",
+        "e2e/smoke.spec.ts"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "root",
+      "name": "root",
+      "aliases": [],
+      "module_root": "root",
+      "entries": [
+        "eslint.config.js",
+        "playwright.config.ts",
+        "vite.config.ts",
+        "vitest.config.ts"
+      ],
+      "symbols": [],
+      "related_files": [],
+      "tests": [],
+      "depends_on": [],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Discovered typescript module at .",
+      "read_scope": [
+        "eslint.config.js",
+        "playwright.config.ts",
+        "vite.config.ts",
+        "vitest.config.ts"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "scripts",
+      "name": "scripts",
+      "aliases": [],
+      "module_root": "scripts",
+      "entries": [
+        "scripts/check-direct-dependency-pins.mjs"
+      ],
+      "symbols": [],
+      "related_files": [],
+      "tests": [],
+      "depends_on": [],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Discovered typescript module at scripts",
+      "read_scope": [
+        "scripts/check-direct-dependency-pins.mjs"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "src",
+      "name": "src",
+      "aliases": [],
+      "module_root": "src",
+      "entries": [
+        "src/App.tsx",
+        "src/app/AppShell.tsx",
+        "src/app/ErrorBoundary.tsx",
+        "src/components/ui/Button.tsx",
+        "src/components/ui/Dialog.tsx",
+        "src/components/ui/Input.tsx",
+        "src/components/ui/index.ts",
+        "src/features/diagnostics/DiagnosticsPanel.tsx",
+        "src/lib/cn.ts",
+        "src/lib/events.ts",
+        "src/lib/tauri.ts",
+        "src/test/mocks/tauri.ts",
+        "src/types/app.ts"
+      ],
+      "symbols": [
+        {
+          "file": "src/App.tsx",
+          "name": "App",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/app/AppShell.tsx",
+          "name": "AppShell",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/app/ErrorBoundary.tsx",
+          "name": "ErrorBoundary",
+          "kind": "class",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Button.tsx",
+          "name": "Button",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Button.tsx",
+          "name": "ButtonProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Button.tsx",
+          "name": "ButtonVariant",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Dialog.tsx",
+          "name": "Dialog",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Dialog.tsx",
+          "name": "DialogProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Input.tsx",
+          "name": "Input",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Input.tsx",
+          "name": "InputProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "Button",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "ButtonProps",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "ButtonVariant",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "Dialog",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "DialogProps",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "Input",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "InputProps",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/diagnostics/DiagnosticsPanel.tsx",
+          "name": "DiagnosticsPanel",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/cn.ts",
+          "name": "ClassNameValue",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/cn.ts",
+          "name": "cn",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/events.ts",
+          "name": "DEEP_LINK_EVENT",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/events.ts",
+          "name": "Unsubscribe",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/events.ts",
+          "name": "subscribeToDeepLink",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/tauri.ts",
+          "name": "AppError",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/tauri.ts",
+          "name": "AppInfo",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/tauri.ts",
+          "name": "IpcResult",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/tauri.ts",
+          "name": "Settings",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/tauri.ts",
+          "name": "invokeCommand",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/tauri.ts",
+          "name": "isTauriRuntime",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/test/mocks/tauri.ts",
+          "name": "AppError",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/test/mocks/tauri.ts",
+          "name": "IpcResult",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/test/mocks/tauri.ts",
+          "name": "err",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/test/mocks/tauri.ts",
+          "name": "invokeCommand",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/test/mocks/tauri.ts",
+          "name": "isTauriRuntime",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/test/mocks/tauri.ts",
+          "name": "ok",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/test/mocks/tauri.ts",
+          "name": "resetTauriMocks",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/test/mocks/tauri.ts",
+          "name": "runtimeUnavailable",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "AppError",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "AppInfo",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "AutostartState",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "CommandArgs",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "CommandName",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "CommandResults",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "DeepLinkResult",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "IpcResult",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "LogLevel",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "NotificationStatus",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "QuitState",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "SecretRoundtripResult",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "SendNotificationResult",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "Settings",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "Theme",
+          "kind": "type",
+          "visibility": "public"
+        }
+      ],
+      "related_files": [
+        "src/main.tsx",
+        "src/test/setup.ts",
+        "src/vite-env.d.ts"
+      ],
+      "tests": [
+        "src/App.test.tsx",
+        "src/components/ui/button.test.tsx",
+        "src/components/ui/dialog.test.tsx",
+        "src/components/ui/input.test.tsx",
+        "src/features/diagnostics/DiagnosticsPanel.test.tsx"
+      ],
+      "depends_on": [],
+      "relations": [
+        {
+          "kind": "imports",
+          "from": "src/App.tsx#App",
+          "to": "src/app/AppShell.tsx#AppShell"
+        },
+        {
+          "kind": "imports",
+          "from": "src/App.tsx#App",
+          "to": "src/app/ErrorBoundary.tsx#ErrorBoundary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/components/ui/Dialog.tsx#Dialog"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/components/ui/Input.tsx#Input"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/types/app.ts#AppInfo"
+        },
+        {
+          "kind": "imports",
+          "from": "src/components/ui/Button.tsx#Button",
+          "to": "src/lib/cn.ts#cn"
+        },
+        {
+          "kind": "imports",
+          "from": "src/components/ui/Dialog.tsx#Dialog",
+          "to": "src/lib/cn.ts#cn"
+        },
+        {
+          "kind": "imports",
+          "from": "src/components/ui/Input.tsx#Input",
+          "to": "src/lib/cn.ts#cn"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/lib/events.ts#subscribeToDeepLink"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/types/app.ts#AppError"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/types/app.ts#AppInfo"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/types/app.ts#AutostartState"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/types/app.ts#DeepLinkResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/types/app.ts#LogLevel"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/types/app.ts#NotificationStatus"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/types/app.ts#QuitState"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/types/app.ts#SecretRoundtripResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/types/app.ts#SendNotificationResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/types/app.ts#Settings"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/types/app.ts#Theme"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/events.ts#subscribeToDeepLink",
+          "to": "src/lib/tauri.ts#isTauriRuntime"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/events.ts#subscribeToDeepLink",
+          "to": "src/types/app.ts#DeepLinkResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/tauri.ts#invokeCommand",
+          "to": "src/types/app.ts#IpcResult"
+        }
+      ],
+      "owner_role": "shared",
+      "responsibility": "Discovered typescript module at src",
+      "read_scope": [
+        "src/App.test.tsx",
+        "src/App.tsx",
+        "src/app/AppShell.tsx",
+        "src/app/ErrorBoundary.tsx",
+        "src/components/ui/Button.tsx",
+        "src/components/ui/Dialog.tsx",
+        "src/components/ui/Input.tsx",
+        "src/components/ui/button.test.tsx",
+        "src/components/ui/dialog.test.tsx",
+        "src/components/ui/index.ts",
+        "src/components/ui/input.test.tsx",
+        "src/features/diagnostics/DiagnosticsPanel.test.tsx",
+        "src/features/diagnostics/DiagnosticsPanel.tsx",
+        "src/lib/cn.ts",
+        "src/lib/events.ts",
+        "src/lib/tauri.ts",
+        "src/main.tsx",
+        "src/test/mocks/tauri.ts",
+        "src/test/setup.ts",
+        "src/types/app.ts",
+        "src/vite-env.d.ts"
+      ],
+      "shared_entry": false
+    }
+  ]
 }
