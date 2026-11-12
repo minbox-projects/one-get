@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     total_bytes INTEGER CHECK (total_bytes IS NULL OR total_bytes >= 0),
     expected_sha256 TEXT,
     actual_sha256 TEXT,
+    etag TEXT,
+    last_modified TEXT,
     error_code TEXT,
     error_message TEXT,
     created_at_ms INTEGER NOT NULL,

@@ -40,6 +40,10 @@ pub struct Task {
     pub expected_sha256: Option<String>,
     /// SHA-256 computed during finalization.
     pub actual_sha256: Option<String>,
+    /// Remote entity tag discovered during probing.
+    pub etag: Option<String>,
+    /// Remote last-modified value discovered during probing.
+    pub last_modified: Option<String>,
     /// Stable failure code.
     pub error_code: Option<String>,
     /// User-safe failure message.

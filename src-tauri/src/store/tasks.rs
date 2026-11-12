@@ -11,7 +11,7 @@ use crate::engine::error::EngineError;
 use crate::engine::state::TaskState;
 
 const TASK_COLUMNS: &str = "id, url, filename, part_path, state, downloaded_bytes, \
-     total_bytes, expected_sha256, actual_sha256, error_code, error_message, \
+     total_bytes, expected_sha256, actual_sha256, etag, last_modified, error_code, error_message, \
      created_at_ms, updated_at_ms";
 
 impl Database {
@@ -208,6 +208,96 @@ impl Database {
         Ok(())
     }
 
+    /// Persist a running task's segment progress and downloaded-byte snapshot.
+    ///
+    /// This never changes the task state. Only connecting, downloading, and
+    /// finalizing tasks accept progress so a worker cannot write after a task
+    /// was paused, cancelled, or completed.
+    pub fn persist_progress(
+        &self,
+        id: &str,
+        segments: &[SegmentProgressInput],
+        downloaded_bytes: u64,
+    ) -> Result<(), EngineError> {
+        let downloaded = offset_to_sql(downloaded_bytes)?;
+        let transaction = self.conn.unchecked_transaction()?;
+
+        let stored: Option<String> = transaction
+            .query_row(
+                "SELECT state FROM tasks WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(stored) = stored else {
+            return Err(task_not_found());
+        };
+        let stored = TaskState::parse(&stored)
+            .ok_or_else(|| EngineError::invalid_state("the stored task state is not recognized"))?;
+        if !matches!(
+            stored,
+            TaskState::Connecting | TaskState::Downloading | TaskState::Finalizing
+        ) {
+            return Err(EngineError::invalid_state(
+                "only a connecting, downloading, or finalizing task can persist progress",
+            ));
+        }
+
+        transaction.execute(
+            "UPDATE tasks SET downloaded_bytes = ?1, updated_at_ms = ?2 WHERE id = ?3",
+            params![downloaded, now_ms(), id],
+        )?;
+
+        for segment in segments {
+            transaction.execute(
+                "UPDATE segments SET downloaded_bytes = ?1 \
+                 WHERE task_id = ?2 AND segment_index = ?3",
+                params![
+                    offset_to_sql(segment.downloaded_bytes)?,
+                    id,
+                    offset_to_sql(u64::from(segment.segment_id))?,
+                ],
+            )?;
+        }
+
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Record the remote metadata discovered while probing without changing state.
+    pub fn record_discovered_metadata(
+        &self,
+        id: &str,
+        total_bytes: impl Into<Option<u64>>,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+    ) -> Result<(), EngineError> {
+        let total: Option<u64> = total_bytes.into();
+        let total = total.map(offset_to_sql).transpose()?;
+        let changed = self.conn.execute(
+            "UPDATE tasks SET total_bytes = ?1, etag = ?2, last_modified = ?3, updated_at_ms = ?4 \
+             WHERE id = ?5",
+            params![total, etag, last_modified, now_ms(), id],
+        )?;
+        if changed == 0 {
+            return Err(task_not_found());
+        }
+        Ok(())
+    }
+
+    /// Record the SHA-256 computed for a task without changing its state.
+    pub fn record_actual_hash(&self, id: &str, actual_sha256: &str) -> Result<(), EngineError> {
+        validate_hash(actual_sha256)?;
+        let changed = self.conn.execute(
+            "UPDATE tasks SET actual_sha256 = ?1, updated_at_ms = ?2 WHERE id = ?3",
+            params![actual_sha256, now_ms(), id],
+        )?;
+        if changed == 0 {
+            return Err(task_not_found());
+        }
+        Ok(())
+    }
+
     /// Mark a finalizing task completed once its actual SHA-256 is known.
     pub fn complete_task(&self, id: &str, actual_sha256: Option<&str>) -> Result<(), EngineError> {
         let hash = actual_sha256.ok_or_else(|| {
@@ -216,12 +306,7 @@ impl Database {
                 "a completed task requires its computed SHA-256 hash",
             )
         })?;
-        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(EngineError::new(
-                "CHECKSUM_INVALID",
-                "the computed SHA-256 hash is not a 64-character hexadecimal value",
-            ));
-        }
+        validate_hash(hash)?;
 
         let changed = self.conn.execute(
             "UPDATE tasks SET state = 'completed', actual_sha256 = ?1, \
@@ -266,10 +351,12 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         total_bytes: read_optional_u64(row, 6, "total_bytes")?,
         expected_sha256: row.get(7)?,
         actual_sha256: row.get(8)?,
-        error_code: row.get(9)?,
-        error_message: row.get(10)?,
-        created_at_ms: row.get(11)?,
-        updated_at_ms: row.get(12)?,
+        etag: row.get(9)?,
+        last_modified: row.get(10)?,
+        error_code: row.get(11)?,
+        error_message: row.get(12)?,
+        created_at_ms: row.get(13)?,
+        updated_at_ms: row.get(14)?,
     })
 }
 
@@ -305,4 +392,15 @@ pub(crate) fn offset_to_sql(value: u64) -> Result<i64, EngineError> {
 
 fn task_not_found() -> EngineError {
     EngineError::new("TASK_NOT_FOUND", "the requested task does not exist")
+}
+
+fn validate_hash(hash: &str) -> Result<(), EngineError> {
+    if hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(EngineError::new(
+            "CHECKSUM_INVALID",
+            "the computed SHA-256 hash is not a 64-character hexadecimal value",
+        ))
+    }
 }

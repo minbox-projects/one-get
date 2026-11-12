@@ -5,6 +5,7 @@
 //! targets are resolved and rejected when they escape the root, and writes or
 //! creates refuse a final symbolic link.
 
+use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -114,6 +115,39 @@ impl CapDir {
             .await
             .map_err(join_error)?
     }
+
+    /// Open an existing file for reading through the capability.
+    pub fn open_read(&self, path: &str) -> Result<File, PlatformError> {
+        self.inner.open_read(path)
+    }
+
+    /// Open an existing file for reading and writing through the capability.
+    pub fn open_rw(&self, path: &str) -> Result<File, PlatformError> {
+        self.inner.open_rw(path)
+    }
+
+    /// Open a file for reading and writing, creating it when it is absent.
+    pub fn open_rw_create(&self, path: &str) -> Result<File, PlatformError> {
+        self.inner.open_rw_create(path)
+    }
+
+    /// Extend or shrink a file to `len` bytes through the capability.
+    pub fn preallocate(&self, path: &str, len: u64) -> Result<(), PlatformError> {
+        self.inner.preallocate(path, len)
+    }
+
+    /// Flush the capability root directory to durable storage.
+    ///
+    /// On Unix this fsyncs the root directory. On Windows it is a best-effort
+    /// no-op because the platform does not expose a directory fsync.
+    pub fn sync_dir(&self) -> Result<(), PlatformError> {
+        self.inner.sync_dir()
+    }
+
+    /// Rename `source` over `destination` from synchronous code.
+    pub fn replace_blocking(&self, source: &str, destination: &str) -> Result<(), PlatformError> {
+        self.inner.replace(source, destination)
+    }
 }
 
 fn join_error(error: tokio::task::JoinError) -> PlatformError {
@@ -139,6 +173,74 @@ impl CapInner {
         self.dir
             .write(relative.as_path(), contents)
             .map_err(|error| map_io("write", raw, error))
+    }
+
+    fn open_read(&self, raw: &str) -> Result<File, PlatformError> {
+        let relative = self.validate(raw)?;
+        let resolved = self.resolve_existing(&relative, raw)?;
+        let metadata =
+            std::fs::metadata(&resolved).map_err(|error| map_io("open metadata", raw, error))?;
+        if metadata.is_dir() {
+            return Err(PlatformError::invalid_path(format!(
+                "path is a directory: {raw}"
+            )));
+        }
+        let file = self
+            .dir
+            .open(relative.as_path())
+            .map_err(|error| map_io("open", raw, error))?;
+        Ok(file.into_std())
+    }
+
+    fn open_rw(&self, raw: &str) -> Result<File, PlatformError> {
+        let relative = self.validate(raw)?;
+        self.prepare_write(&relative)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+        let file = self
+            .dir
+            .open_with(relative.as_path(), &options)
+            .map_err(|error| map_io("open", raw, error))?;
+        Ok(file.into_std())
+    }
+
+    fn open_rw_create(&self, raw: &str) -> Result<File, PlatformError> {
+        let relative = self.validate(raw)?;
+        self.prepare_write(&relative)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        let file = self
+            .dir
+            .open_with(relative.as_path(), &options)
+            .map_err(|error| map_io("open", raw, error))?;
+        Ok(file.into_std())
+    }
+
+    fn preallocate(&self, raw: &str, len: u64) -> Result<(), PlatformError> {
+        let relative = self.validate(raw)?;
+        self.prepare_write(&relative)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create(true);
+        let file = self
+            .dir
+            .open_with(relative.as_path(), &options)
+            .map_err(|error| map_io("preallocate", raw, error))?;
+        file.set_len(len)
+            .map_err(|error| map_io("preallocate", raw, error))
+    }
+
+    #[cfg(unix)]
+    fn sync_dir(&self) -> Result<(), PlatformError> {
+        let directory = std::fs::File::open(&self.root)
+            .map_err(|error| PlatformError::io_error("open capability root for sync", error))?;
+        directory
+            .sync_all()
+            .map_err(|error| PlatformError::io_error("sync capability root", error))
+    }
+
+    #[cfg(not(unix))]
+    fn sync_dir(&self) -> Result<(), PlatformError> {
+        Ok(())
     }
 
     fn read(&self, raw: &str) -> Result<Vec<u8>, PlatformError> {
@@ -353,6 +455,57 @@ impl CapInner {
         }
         Ok(())
     }
+}
+
+/// Write `bytes` at an absolute file offset without changing the cursor.
+///
+/// The platform-specific branch stays in this module: Unix uses `write_all_at`
+/// and Windows loops over `seek_write`.
+#[cfg(unix)]
+pub fn write_at(file: &File, offset: u64, bytes: &[u8]) -> Result<(), PlatformError> {
+    use std::os::unix::fs::FileExt;
+
+    file.write_all_at(bytes, offset)
+        .map_err(|error| PlatformError::io_error("write at offset", error))
+}
+
+/// Write `bytes` at an absolute file offset without changing the cursor.
+#[cfg(windows)]
+pub fn write_at(file: &File, offset: u64, bytes: &[u8]) -> Result<(), PlatformError> {
+    use std::io::ErrorKind;
+    use std::os::windows::fs::FileExt;
+
+    let mut written = 0usize;
+    while written < bytes.len() {
+        let position = offset + written as u64;
+        let count = file
+            .seek_write(&bytes[written..], position)
+            .map_err(|error| PlatformError::io_error("write at offset", error))?;
+        if count == 0 {
+            return Err(PlatformError::io_error(
+                "write at offset",
+                std::io::Error::new(ErrorKind::WriteZero, "the file accepted zero bytes"),
+            ));
+        }
+        written += count;
+    }
+    Ok(())
+}
+
+/// Write `bytes` at an absolute file offset without changing the cursor.
+#[cfg(not(any(unix, windows)))]
+pub fn write_at(file: &File, offset: u64, bytes: &[u8]) -> Result<(), PlatformError> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let mut handle = file
+        .try_clone()
+        .map_err(|error| PlatformError::io_error("clone file handle", error))?;
+    handle
+        .seek(SeekFrom::Start(offset))
+        .map_err(|error| PlatformError::io_error("seek file", error))?;
+    handle
+        .write_all(bytes)
+        .map_err(|error| PlatformError::io_error("write at offset", error))
 }
 
 fn validate_relative(raw: &str) -> Result<PathBuf, PlatformError> {
