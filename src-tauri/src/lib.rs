@@ -4,6 +4,7 @@ pub mod app_state;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod kernel;
 pub mod logging;
 pub mod platform;
 
