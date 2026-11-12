@@ -11,4 +11,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
+cap-std = "4.0.3"
 tauri = { version = "2.12.5", features = [] }
+tokio = { version = "1", features = ["rt"] }
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
