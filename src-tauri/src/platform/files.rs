@@ -14,6 +14,15 @@ use cap_std::fs::{Dir, OpenOptions};
 
 use super::PlatformError;
 
+/// Outcome of attempting a sparse preallocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SparsePreallocation {
+    /// The file was extended with a sparse allocation.
+    Sparse,
+    /// Sparse allocation was unavailable, so the file was extended normally.
+    Fallback,
+}
+
 /// Basic metadata for a file inside a [`CapDir`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileMetadata {
@@ -136,6 +145,20 @@ impl CapDir {
         self.inner.preallocate(path, len)
     }
 
+    /// Extend a file to `len` bytes, attempting a sparse allocation first.
+    ///
+    /// Existing bytes are never truncated. The returned outcome is
+    /// [`SparsePreallocation::Sparse`] when the platform marked the file sparse
+    /// and [`SparsePreallocation::Fallback`] when the file was extended without
+    /// sparse support.
+    pub fn preallocate_sparse(
+        &self,
+        path: &str,
+        len: u64,
+    ) -> Result<SparsePreallocation, PlatformError> {
+        self.inner.preallocate_sparse(path, len)
+    }
+
     /// Flush the capability root directory to durable storage.
     ///
     /// On Unix this fsyncs the root directory. On Windows it is a best-effort
@@ -227,6 +250,25 @@ impl CapInner {
             .map_err(|error| map_io("preallocate", raw, error))?;
         file.set_len(len)
             .map_err(|error| map_io("preallocate", raw, error))
+    }
+
+    fn preallocate_sparse(
+        &self,
+        raw: &str,
+        len: u64,
+    ) -> Result<SparsePreallocation, PlatformError> {
+        let relative = self.validate(raw)?;
+        self.prepare_write(&relative)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create(true);
+        let file = self
+            .dir
+            .open_with(relative.as_path(), &options)
+            .map_err(|error| map_io("preallocate", raw, error))?
+            .into_std();
+        let current = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        let target = current.max(len);
+        extend_sparse(&file, target).map_err(|error| map_io("preallocate", raw, error))
     }
 
     #[cfg(unix)]
@@ -506,6 +548,52 @@ pub fn write_at(file: &File, offset: u64, bytes: &[u8]) -> Result<(), PlatformEr
     handle
         .write_all(bytes)
         .map_err(|error| PlatformError::io_error("write at offset", error))
+}
+
+/// Extend `file` to `len` bytes using the platform's sparse support.
+#[cfg(unix)]
+fn extend_sparse(file: &File, len: u64) -> std::io::Result<SparsePreallocation> {
+    file.set_len(len)?;
+    Ok(SparsePreallocation::Sparse)
+}
+
+/// Mark `file` sparse when the filesystem supports it, then extend it.
+///
+/// `FSCTL_SET_SPARSE` is attempted before the length changes so a file that
+/// cannot become sparse is still extended and reported as a fallback.
+#[cfg(windows)]
+fn extend_sparse(file: &File, len: u64) -> std::io::Result<SparsePreallocation> {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::System::Ioctl::FSCTL_SET_SPARSE;
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+
+    let mut returned = 0u32;
+    let succeeded = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle(),
+            FSCTL_SET_SPARSE,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    } != 0;
+    file.set_len(len)?;
+    Ok(if succeeded {
+        SparsePreallocation::Sparse
+    } else {
+        SparsePreallocation::Fallback
+    })
+}
+
+/// Extend `file` to `len` bytes on platforms without sparse support.
+#[cfg(not(any(unix, windows)))]
+fn extend_sparse(file: &File, len: u64) -> std::io::Result<SparsePreallocation> {
+    file.set_len(len)?;
+    Ok(SparsePreallocation::Fallback)
 }
 
 fn validate_relative(raw: &str) -> Result<PathBuf, PlatformError> {

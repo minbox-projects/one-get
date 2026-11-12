@@ -229,3 +229,72 @@ async fn capdir_new_file_apis_reject_traversal_paths() {
     // preallocate should reject traversal; accept either Result::Err or a failed effect.
     let _ = prealloc; // must not create outside file (asserted above)
 }
+
+// Covers REQ-017/AC-030: sparse preallocation keeps the exact large length and
+// reports an explicit Sparse or Fallback outcome.
+#[test]
+fn preallocate_sparse_extends_file_to_exact_length_and_reports_outcome() {
+    use oneget_lib::platform::files::SparsePreallocation;
+    use std::fs;
+
+    const FIVE_GIB: u64 = 5 * 1024 * 1024 * 1024;
+
+    let root = tempdir().expect("tempdir");
+    let cap = CapDir::open(root.path()).expect("open capdir");
+
+    let outcome = cap
+        .preallocate_sparse("sparse.bin", FIVE_GIB)
+        .expect("sparse preallocation must extend the file");
+
+    #[cfg(target_os = "macos")]
+    assert!(
+        matches!(outcome, SparsePreallocation::Sparse),
+        "macOS preallocation must report Sparse"
+    );
+    #[cfg(windows)]
+    match outcome {
+        SparsePreallocation::Sparse => {}
+        SparsePreallocation::Fallback => {
+            eprintln!(
+                "compatibility result: sparse preallocation unavailable, explicit fallback recorded"
+            );
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    assert!(
+        matches!(
+            outcome,
+            SparsePreallocation::Sparse | SparsePreallocation::Fallback
+        ),
+        "preallocation must report an explicit outcome"
+    );
+
+    let metadata = fs::metadata(root.path().join("sparse.bin")).expect("metadata");
+    assert_eq!(
+        metadata.len(),
+        FIVE_GIB,
+        "the logical file length must stay exactly 5 GiB"
+    );
+}
+
+#[test]
+fn preallocate_sparse_rejects_traversal_without_outside_file() {
+    use std::fs;
+
+    let root = tempdir().expect("tempdir");
+    let cap = CapDir::open(root.path()).expect("open capdir");
+    let outside = root
+        .path()
+        .parent()
+        .expect("tempdir parent")
+        .join("oneget-sparse-traversal-probe");
+    let _ = fs::remove_file(&outside);
+
+    let result = cap.preallocate_sparse("../oneget-sparse-traversal-probe", 4096);
+
+    assert!(result.is_err(), "traversal path must be rejected");
+    assert!(
+        !outside.exists(),
+        "traversal attempt must not create a file outside the capability root"
+    );
+}

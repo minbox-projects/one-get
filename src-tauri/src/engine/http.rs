@@ -324,6 +324,41 @@ fn strip_sensitive_headers(headers: &mut HeaderMap) {
     }
 }
 
+/// Format inclusive byte bounds as a `Content-Range` header value.
+///
+/// The total length is unknown to this helper, so it emits `*`.
+pub fn format_content_range(start: u64, end: u64) -> String {
+    format!("bytes {start}-{end}/*")
+}
+
+/// Parse a `bytes start-end/total` Content-Range value into inclusive bounds.
+///
+/// Both bounds stay `u64` end to end, so offsets above 4 GiB are preserved.
+pub fn parse_content_range_value(value: &str) -> Result<(u64, u64), EngineError> {
+    let (unit, rest) = value
+        .trim()
+        .split_once(' ')
+        .ok_or_else(invalid_content_range)?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return Err(invalid_content_range());
+    }
+    let (range, _total) = rest
+        .trim()
+        .split_once('/')
+        .ok_or_else(invalid_content_range)?;
+    let (start, end) = range.split_once('-').ok_or_else(invalid_content_range)?;
+    let start: u64 = start.trim().parse().map_err(|_| invalid_content_range())?;
+    let end: u64 = end.trim().parse().map_err(|_| invalid_content_range())?;
+    if end < start {
+        return Err(invalid_content_range());
+    }
+    Ok((start, end))
+}
+
+fn invalid_content_range() -> EngineError {
+    EngineError::new("INVALID_RESPONSE", "the Content-Range value was malformed")
+}
+
 fn invalid_url(message: &str) -> EngineError {
     EngineError::new("INVALID_URL", message)
 }

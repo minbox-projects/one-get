@@ -14,7 +14,7 @@ use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
-use crate::platform::files::{write_at, CapDir};
+use crate::platform::files::{write_at, CapDir, SparsePreallocation};
 use crate::platform::PlatformError;
 
 use super::error::EngineError;
@@ -88,6 +88,7 @@ impl PartFileName {
 pub struct PartFile {
     file: std::fs::File,
     name: PartFileName,
+    preallocation: SparsePreallocation,
 }
 
 impl Deref for PartFile {
@@ -106,26 +107,22 @@ impl PartFile {
 
     /// Create or reopen the part file for `filename`.
     ///
-    /// A known total is preallocated with `set_len`, which produces a sparse
-    /// file on macOS. An unknown total is left empty until bytes arrive.
+    /// A known total is preallocated through the platform layer, which attempts
+    /// a sparse allocation and reports whether it succeeded. An unknown total
+    /// leaves the file empty until bytes arrive.
     pub fn create(cap: &CapDir, filename: &str, total: Option<u64>) -> Result<Self, EngineError> {
         let name = Self::part_name(filename);
         let file = cap.open_rw_create(&name).map_err(platform_error)?;
-        if let Some(len) = total {
-            file.set_len(len).map_err(|error| {
-                if error.kind() == std::io::ErrorKind::StorageFull {
-                    EngineError::disk_full()
-                } else {
-                    EngineError::new(
-                        "IO_ERROR",
-                        format!("the part file could not be sized: {error}"),
-                    )
-                }
-            })?;
-        }
+        let preallocation = match total {
+            Some(len) => cap
+                .preallocate_sparse(&name, len)
+                .map_err(map_preallocate_error)?,
+            None => SparsePreallocation::Fallback,
+        };
         Ok(Self {
             file,
             name: PartFileName(name),
+            preallocation,
         })
     }
 
@@ -136,7 +133,13 @@ impl PartFile {
         Ok(Self {
             file,
             name: PartFileName(name),
+            preallocation: SparsePreallocation::Fallback,
         })
+    }
+
+    /// How the part file was preallocated when it was created.
+    pub fn preallocation_outcome(&self) -> SparsePreallocation {
+        self.preallocation
     }
 
     /// Write `bytes` at an absolute offset in the part file.
@@ -241,6 +244,17 @@ impl PartFile {
 
 fn platform_error(error: PlatformError) -> EngineError {
     EngineError::new(error.code, error.message)
+}
+
+fn map_preallocate_error(error: PlatformError) -> EngineError {
+    if is_storage_error(&error.message) {
+        EngineError::disk_full()
+    } else {
+        EngineError::new(
+            "IO_ERROR",
+            format!("the part file could not be sized: {}", error.message),
+        )
+    }
 }
 
 fn map_write_error(error: PlatformError) -> EngineError {
