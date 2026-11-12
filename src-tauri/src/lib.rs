@@ -1,12 +1,16 @@
 //! OneGet desktop shell: plugins, runtime initialization, tray, and deep links.
 
+#![deny(dead_code, unused_imports)]
+
 pub mod app_state;
 pub mod commands;
 pub mod config;
+pub mod engine;
 pub mod error;
 pub mod kernel;
 pub mod logging;
 pub mod platform;
+pub mod store;
 
 use std::sync::Arc;
 
