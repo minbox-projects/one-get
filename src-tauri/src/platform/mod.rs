@@ -5,11 +5,15 @@
 //! Target-specific branches are confined to this module. Shared application
 //! code depends only on the interfaces re-exported here.
 
+pub mod autostart;
+pub mod deeplink;
 pub mod filename;
 pub mod files;
+pub mod notifications;
 pub mod paths;
 pub mod process;
 pub mod secrets;
+pub mod tray;
 
 pub use filename::{sanitize_filename, FilenameTarget};
 pub use files::{CapDir, FileMetadata};
