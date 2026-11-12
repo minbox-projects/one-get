@@ -1,16 +1,20 @@
 # OneGet Architecture
 
-This document describes the delivered OneGet desktop shell baseline. It covers the current layers, module boundaries, trust boundaries, platform differences, and verification baseline. It does not claim download, extension, video, updater, release, or telemetry capabilities that are not part of the shell.
+This document describes the delivered OneGet desktop shell and its headless download engine and durable task store. It covers the current layers, module boundaries, trust boundaries, platform differences, data semantics, and verification baseline. The desktop download UI, extension, video, HuggingFace, updater, release, and telemetry capabilities are not part of this delivery.
 
 ## Goals and target platforms
 
-The baseline provides a single-window desktop shell that:
+The delivered product provides a single-window desktop shell and a headless download engine that:
 
 - launches as one application instance and keeps a main window with a diagnostics surface;
 - accepts a narrow `oneget://` deep-link contract and reports accepted or rejected results to the UI;
 - integrates with a tray menu, login autostart, operating-system notifications, and the platform credential store;
 - confines file access to capability-scoped directories and sanitizes user-supplied filenames;
 - verifies signed component manifests without installing or executing components;
+- probes remote files without consuming the body, plans bounded segments, and downloads through a bounded worker pool;
+- persists tasks and segment progress in SQLite so pause, resume, cancel, and crash recovery survive a process restart;
+- finalizes downloads atomically with a streamed SHA-256 and a unique destination name;
+- enforces byte-rate limits, an HTTP proxy, scoped cookies, and safe custom headers without persisting secrets;
 - writes structured, redacted, rotating logs and durable typed settings;
 - builds with exact frontend and Rust dependencies and runs the same quality gates in CI;
 - ships no remote script sources, no analytics, and no telemetry.
@@ -20,15 +24,20 @@ The baseline provides a single-window desktop shell that:
 | macOS | arm64 and x86_64 | macOS 13 or later |
 | Windows | x64 | Windows 10 22H2 or Windows 11 |
 
-The shell is the current product surface. `localdocs/` is local reference material excluded from the bundle; it is not shipped product documentation.
+The shell is the current desktop surface and the engine is a library and harness surface; no download UI is wired to it yet. `localdocs/` is local reference material excluded from the bundle; it is not shipped product documentation.
 
 ## Repository layout
 
 | Path | Responsibility |
 | --- | --- |
 | `src/` | React 19 and TypeScript 6 user interface, design-system primitives, diagnostics surface, typed command wrapper, and deep-link event subscription. |
-| `src-tauri/src/` | Rust crate: Tauri runtime wiring, command layer, platform layer, manifest verifier, settings, logging, and typed errors. |
-| `src-tauri/tests/` | Rust integration suites for paths, filenames, files, processes, secrets, logging, settings, manifests, and the shell contract. |
+| `src-tauri/src/` | Rust crate: Tauri runtime wiring, command layer, platform layer, download engine, task store, manifest verifier, settings, logging, and typed errors. |
+| `src-tauri/src/engine/` | Probe, safe HTTP transport, planner, part file, worker pool, scheduler, retry, rate limiting, cookies, and state machines. |
+| `src-tauri/src/store/` | SQLite connection setup, schema migrations, task and segment records, and progress persistence. |
+| `src-tauri/src/bin/engine_harness.rs` | Command-line harness to add, run, inspect, pause, resume, and cancel one task without printing secrets. |
+| `src-tauri/tests/` | Rust integration suites for paths, filenames, files, processes, secrets, logging, settings, manifests, the shell contract, the store, the engine, and the soak. |
+| `src-tauri/tests/support/` | Deterministic local range, proxy, cookie, fault, and fixture helpers on ephemeral ports. |
+| `scripts/soak-test.sh` | macOS wrapper for the ignored long-running HTTP-only soak with a caller-supplied duration. |
 | `src-tauri/capabilities/` | Minimal Tauri capability for the main window. |
 | `src-tauri/tauri.conf.json` | Product identity, window, CSP, deep-link scheme, and bundle configuration. |
 | `scripts/` | Dependency-pin check and macOS local signing helpers. |
@@ -76,13 +85,25 @@ Rust payloads serialize camelCase. Errors use a typed `{ code, message }` shape.
 
 - application paths for data, cache, logs, downloads, and backups;
 - deterministic filename sanitization for macOS and Windows rules;
-- `CapDir`, the canonical capability root for asynchronous create, write, read, sync, metadata, and atomic replace;
+- `CapDir`, the canonical capability root for asynchronous create, read-write open, absolute-offset write, sparse preallocation, read, metadata, file and parent-directory sync, and atomic replace;
 - `ChildGuard`, which owns a Unix process group or Windows Job Object and supports whole-tree termination and timeouts;
 - the keyring-backed secret store and the in-memory fake;
 - deep-link parsing and runtime scheme registration;
 - the tray, autostart, and notification plugin adapters.
 
 Shared modules call these interfaces and do not branch on the target operating system. The platform layer exposes typed `PlatformError` values with stable codes.
+
+### Download engine
+
+`src-tauri/src/engine/` owns the headless download path. `probe.rs` classifies remote metadata without reading the body. `http.rs` validates URLs and custom headers, follows redirects manually, strips sensitive headers across origins, and builds the HTTP/1.1 client. `planner.rs` produces bounded half-open ranges. `part_file.rs` owns the sparse preallocated part file, absolute-offset writes, and streamed hashing, routing preallocation through `CapDir`. `worker.rs` runs the bounded pool, dynamic splitting, Range fallback, retry, and atomic finalization. `scheduler.rs` owns the FIFO queue, concurrency limit, pause, resume, cancel, retry, startup recovery, and reconciliation of controls applied through another engine instance. `retry.rs`, `rate_limit.rs`, and `cookies.rs` own the retry policy, byte pacing, and cookie scope. `error.rs` and `state.rs` own stable codes and checked transitions.
+
+`Engine::add_task` sanitizes the caller-supplied filename with the platform naming rules for the current target before it reaches the store or the in-memory spec, and part-file existence and removal go through the validated `CapDir::exists` and `CapDir::remove_file` operations.
+
+The engine exposes a library API rather than Tauri commands: `Engine::new`, `add_task`, `run`, `pause`, `resume`, `cancel`, `retry`, `recover`, `set_max_concurrent`, `set_proxy`, `set_cookie_file`, `set_task_rate_limit`, `set_global_rate_limit`, and `set_logger`. `src-tauri/src/bin/engine_harness.rs` is the command-line surface for manual checks; it supports `run`, `status`, `pause`, `resume`, and `cancel`, and prints no URL, cookie, proxy credential, or header value.
+
+### Durable task store
+
+`src-tauri/src/store/` owns SQLite. `Database::open` configures WAL, `synchronous=NORMAL`, foreign keys, and a five-second busy timeout; on Unix it restricts the database and its `-wal` and `-shm` sidecars to mode `0600`. `migrations.rs` creates schema version 1, backs up an existing non-empty database before a migration, applies the migration in one transaction, verifies the required indexes and constraints, and refuses a newer schema with a typed error. `tasks.rs` and `segments.rs` own task and segment persistence; `types.rs` exposes the public records.
 
 ### Kernel manifest verifier
 
@@ -96,7 +117,83 @@ Shared modules call these interfaces and do not branch on the target operating s
 
 ### Tests and quality tooling
 
-Frontend behavior tests live beside components and in `src/features/`. Browser checks live in `e2e/`. Rust integration suites live in `src-tauri/tests/`. `scripts/check-direct-dependency-pins.mjs` rejects floating direct npm versions. The macOS signing helpers are local verification tools, not release signing.
+Frontend behavior tests live beside components and in `src/features/`. Browser checks live in `e2e/`. Rust integration suites live in `src-tauri/tests/`. `scripts/check-direct-dependency-pins.mjs` rejects floating direct npm versions. `scripts/soak-test.sh` runs the ignored long soak for a caller-supplied duration. The macOS signing helpers are local verification tools, not release signing.
+
+## Download engine and task store
+
+### SQLite schema version 1
+
+The store opens with WAL journaling, `synchronous=NORMAL`, foreign-key enforcement, and a five-second busy timeout. A non-empty database is backed up beside itself before a migration. The migration runs in one transaction, records the version in `schema_meta`, verifies the required indexes and constraints, and refuses a schema newer than version 1 with a typed error. On Unix the database and its `-wal` and `-shm` sidecars are restricted to mode `0600`.
+
+| Table | Columns and constraints |
+| --- | --- |
+| `schema_meta` | `key` primary key and `value`; stores `schema_version`. |
+| `tasks` | `id` primary key, `url`, `filename`, nullable `part_path`, checked `state`, non-negative `downloaded_bytes`, nullable non-negative `total_bytes`, `expected_sha256`, `actual_sha256`, `etag`, `last_modified`, `error_code`, `error_message`, epoch-millisecond `created_at_ms` and `updated_at_ms`, positive `connections`, and `headers_json`. |
+| `segments` | Composite primary key `(task_id, segment_index)`, `start_offset` and `end_offset` with `end_offset > start_offset`, non-negative `downloaded_bytes` bounded by the range length, checked `state`, and a cascading foreign key to `tasks`. |
+
+Indexes cover `(state, created_at_ms)` for queue claims and `task_id` for segment lookup. Offsets use signed 64-bit columns whose non-negative range preserves every `u64` file position. The stored URL is a minimized form: userinfo, query, and fragment are removed before persistence, and the full URL stays in memory only. `headers_json` stores safe header names with empty values, never header values.
+
+### Task and segment state machines
+
+Task states are `queued`, `connecting`, `downloading`, `paused`, `finalizing`, `completed`, `failed`, and `cancelled`. The checked transitions are:
+
+- `queued` to `connecting`, `paused`, or `cancelled`;
+- `connecting` to `queued`, `downloading`, `paused`, `failed`, or `cancelled`;
+- `downloading` to `queued`, `paused`, `finalizing`, `failed`, or `cancelled`;
+- `paused` to `queued`, `failed`, or `cancelled`;
+- `finalizing` to `completed`, `failed`, or `cancelled`;
+- `failed` to `queued` or `cancelled`;
+- `cancelled` to `cancelled` only.
+
+Any other transition returns `INVALID_STATE` and leaves the row unchanged. `completed` requires a final file and a matching stored hash. `paused` preserves the part and segment progress. `cancelled` removes only the task's own part. `failed` preserves the part for retry. Segment states are `pending`, `active`, `done`, and `failed`, with `pending` to `active` or `failed`, `active` to `done`, `failed`, or `pending`, and `failed` to `pending`.
+
+### Queue, concurrency, and lifecycle controls
+
+The scheduler claims the oldest queued task and never exceeds the configured limit across `connecting`, `downloading`, and `finalizing` tasks. A paused task does not consume a slot; a finalizing task does. Completion, failure, cancellation, a limit change, and new work wake the scheduler through a notification. The limit can change without restarting the engine. Pause persists progress and stops workers promptly. Resume re-probes the remote file and rejects a changed ETag, Last-Modified, or total size with `FILE_CHANGED`; an unchanged task requeues and continues from persisted offsets. A missing part fails with `PART_MISSING`. Cancel is idempotent where defined, removes only the task's part, and never creates a final file.
+
+More than one `Engine` may open the same database. When one instance pauses or cancels a task that another instance is running, the running instance reloads the stored row on an `INVALID_STATE` transition or a control point and adopts the stored outcome: a concurrent pause finishes as `paused` and a concurrent cancel as `cancelled`, never `failed` or `INVALID_STATE`. Pause persistence does not overwrite a cancellation, a cancel during finalization removes the part and leaves no final file, and a finalizing replacement that loses the completion race removes the file it created.
+
+### Probe, redirects, and Range fallback
+
+A probe sends one ranged `GET` with `Range: bytes=0-0` and `Accept-Encoding: identity`, and classifies headers without reading the body. A valid `206` reports range support and the exact total; a `200` reports no range support with any Content-Length total; a `416` with a zero total yields an empty plan; a nonzero `416` safely retries without Range. HTML returns `HTML_RESPONSE` unless explicitly allowed. `401` and `403` map to `AUTH_REQUIRED`, `404` to `NOT_FOUND`, `429` to `RATE_LIMITED`, and `5xx` to `SERVER_ERROR`.
+
+The client is HTTP/1.1 only, never auto-follows redirects, and never negotiates compression. Redirects are followed manually up to ten hops; non-HTTP schemes, HTTPS-to-HTTP downgrade, credentialed targets, control characters, and URLs over 8 KiB are rejected. Cookies and sensitive headers are recomputed or stripped when a hop crosses origins, and the final URL is recorded.
+
+A probe result is advisory. After planning, the engine revalidates the first range with a small prefix request before starting the full pool. A `200` at that point with no bytes written discards the multi-connection plan and restarts as one connection from zero. A later `200` to a ranged request after bytes exist fails with `RANGE_IGNORED`, preserves the part, and creates no final file. A full `200` body is never written at a nonzero offset.
+
+### Segment planning, splitting, and part files
+
+The planner accepts 1 to 64 connections and creates `min(connections, max(1, total / 1 MiB))` non-overlapping, gap-free half-open segments that cover the whole known file. A zero total produces an empty ranged plan. An unknown length or a server without range support produces one open-ended segment. Segments smaller than 1 MiB appear only when the whole file is smaller or as a final remainder.
+
+Each task owns one part file named `<sanitized filename>.oneget.part` beside its destination; the filename is sanitized for the current target when the task is created. A known total is preallocated sparsely through `PartFile::preallocate`, which calls `CapDir::preallocate_sparse`; a full device maps to `DISK_FULL` and pauses the task, and an unknown total starts empty. Workers write at absolute `u64` offsets. Part existence and removal use the validated `CapDir::exists` and `CapDir::remove_file` operations, so a part that resolves outside the destination root is never inspected or removed. Progress is persisted in the database in short transactions, with segment rows as the progress truth and the part file as the byte truth. Each task's worker pool is bounded by its connection count.
+
+When an idle worker exists, the scheduler may split the active segment with the most remaining bytes, provided at least two minimum segments remain and the split depth is below two. A split point is set ahead of the current offset, the shortened segment and its tail are persisted in one transaction, and workers check the split point before every write. A split the worker has already passed is abandoned. The invariant stays non-overlapping, gap-free coverage of the whole file.
+
+### Finalization, hashing, and recovery
+
+Finalization stops workers, syncs the part file, streams SHA-256 over the bytes, and persists the computed hash before the rename. A supplied expected hash is compared case-insensitively. A unique final name is chosen when the destination exists; the capability-scoped replace refuses symbolic-link sources and destinations and never overwrites an existing file. The parent directory is synced after the rename, and only then does the task become `completed`. A checksum mismatch fails with `CHECKSUM_MISMATCH`, preserves the part, and creates no final file. A cancellation from another engine instance during finalization stays authoritative: the part is removed and no final file is left, and a completion that loses the state race removes the file it just renamed.
+
+Recovery is idempotent. Interrupted `connecting` or `downloading` tasks requeue when their part exists and fail with `PART_MISSING` otherwise. A `finalizing` task with only the final file is accepted when its stored hash matches, or, without a stored hash, when its size equals the recorded total and a configured expected hash matches; the recomputed hash is stored. A final-only mismatch fails with `CHECKSUM_MISMATCH` and preserves the final file. A part-only task re-finalizes. A cancelled task has only its own leftover part removed. Repeated finalization of a completed task returns the existing path without network access.
+
+### Retries, timeouts, and disk-full handling
+
+The client uses a 15-second connect timeout and a 30-second read timeout. Retryable transport, timeout, server, and rate-limit failures receive at most five attempts with exponential backoff and full jitter between 50 milliseconds and two seconds. An integer-seconds `Retry-After` is honored exactly; an HTTP-date or malformed value falls back to the exponential delay so a far-future date cannot stall a task. `401`, `403`, `404`, HTML, checksum failures, and a Range-ignored failure after data is written are not retried. A short body resumes from the persisted offset. An overlong body is truncated at the segment end. An invalid Content-Range start fails with `RANGE_MISMATCH` without writing. ENOSPC maps to `DISK_FULL` and pauses the task with the part preserved; resume continues when writes succeed again.
+
+### Rate limiting, proxy, cookies, and headers
+
+A byte-oriented leaky bucket paces each streamed chunk. Per-task and optional global limits share one schedule across a task's workers, so aggregate throughput stays at the configured bytes per second; zero or an absent limit is unlimited. The first chunk starts immediately.
+
+The HTTP proxy URL must not contain userinfo; optional basic authentication stays in memory and is applied by the transport so proxy credentials never reach the origin, the store, or the log. Netscape cookie files are parsed for domain, include-subdomains, path, secure, and expiry. Only matching host and path cookies are sent; expired and secure-over-HTTP cookies are skipped; cross-host redirects recompute the header for the target host; the file is reloaded at each task start or resume.
+
+Custom headers are validated before any request. The forbidden set is `Host`, `Authorization`, `Cookie`, `Range`, `Proxy-Authorization`, `Content-Length`, `Connection`, `Transfer-Encoding`, `Upgrade`, `TE`, `Trailer`, and `Set-Cookie`; CR or LF in a name or value is rejected. Header values are never persisted or logged. Safe header names may be stored with empty values so a fresh engine can report which headers were configured, but values are not replayable after the in-memory session.
+
+### Platform differences
+
+`PartFile::preallocate` delegates to the capability layer. On macOS and other Unix targets, `set_len` extends the part file and reports sparse preallocation. On Windows, `FSCTL_SET_SPARSE` is attempted before the length change; the result is reported as sparse or as an explicit fallback, and the file is still extended. The capability-scoped replace path is shared across targets and refuses link sources and destinations, and part existence and removal also stay behind `CapDir::exists` and `CapDir::remove_file`. The large-file suite uses a 5 GiB logical sparse part file and writes only head, middle, and tail ranges at absolute offsets; it does not download the full logical length.
+
+### Fixtures, harness, and soak
+
+Every network test uses a local ephemeral-port fixture. The range server covers normal ranged responses, ignore-range, a 206 probe with a later 200, an ignore-after-byte threshold, unknown length, HTML, truncation, redirects, authentication, rate limiting, server errors, 416, and a large sparse mode. Separate local fixtures cover proxy authentication and cookie files. The harness can run one task to completion and inspect, pause, resume, or cancel it using a shared database and destination. The short soak smoke runs in the normal test suite. The ignored soak repeats task creation, pause and resume, cancel, retry, and completion against the fixture, then verifies final hashes, `PRAGMA integrity_check`, orphan part files, and unhandled panics. Its summary contains counts and bytes only, never URLs, queries, cookies, or credentials.
 
 ## Trust boundaries
 
@@ -139,6 +236,8 @@ Settings are not a secret store. Logs pass every event and field string through 
 | Autostart | LaunchAgent through the autostart plugin | Run-key behavior through the autostart plugin |
 | Deep-link registration | Bundle `oneget` scheme and LaunchServices | Bundle scheme plus runtime registration of every configured scheme |
 | Notifications | Operating-system notification center; prompt behavior can depend on signature stability | Windows notification path requires the installed NSIS build, not the raw release binary |
+| Sparse preallocation | `set_len` extends the part file and reports sparse | `FSCTL_SET_SPARSE` is attempted first; an unavailable sparse mode is reported as an explicit fallback |
+| Atomic replace | Capability-scoped rename refuses link sources and destinations | The same capability-scoped replace path is used; no direct overwrite |
 | Bundle format | `.app` | NSIS installer |
 
 The non-macOS, non-Windows path code is a development fallback using XDG locations; it is not a shipped target.
@@ -151,13 +250,14 @@ The non-macOS, non-Windows path code is a development fallback using XDG locatio
 - `AppError` serializes as `{ code, message }`, with stable codes such as `settings_read_only` and `settings_serialize`.
 - Settings start at `schemaVersion: 1` with `theme` (`system`, `light`, `dark`) and `logLevel` (`error`, `warn`, `info`, `debug`, `trace`).
 - Unknown settings fields survive a save. A future schema is never overwritten. A corrupt document is backed up before defaults are restored.
-- There is no database, migration, or other persistent product data in the baseline.
+- The download engine adds one persistent product database at schema version 1. It is not a settings store and holds only task recovery fields: minimized URLs, filenames, task and segment state, byte progress, remote metadata, hashes, error codes, connection counts, and safe header names with empty values.
+- Engine log events carry lifecycle names, task and segment identifiers, byte counts, and stable error codes. They never carry URLs with queries, cookie values, proxy credentials, authorization values, or custom header values.
 
 ## Test and CI baseline
 
-Local macOS arm64 evidence covers `npm ci`, the exact-pin check, typecheck, lint, 20 Vitest tests, the production build, and 8 Playwright checks across light and dark projects. Rust evidence covers `cargo check`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`, with 51 integration tests across nine suites. The Tauri application bundle builds locally.
+Local macOS arm64 evidence covers `npm ci`, the exact-pin check, typecheck, lint, 20 Vitest tests, the production build, and 8 Playwright checks across light and dark projects. Rust evidence covers `cargo check --locked`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and the locked test suites: store 10, probe 12, download 9, segments 6, queue 13, recovery 8, network 23, redaction 2, large-file 4, platform filenames 2, platform files 7, and the short soak smoke 1. The Tauri application bundle builds locally.
 
-The CI workflow defines a frontend job, Rust quality gates on `macos-15` and `windows-2025`, a build matrix for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`, and a macOS signing dry-run job that creates, imports, signs, verifies, and cleans up an ephemeral identity and fails closed on missing inputs. The hosted workflow has one successful run on the implementation branch: all seven jobs passed and it uploaded the three build artifacts. Manual platform acceptance, Windows install checks, and the macOS x86_64 Intel launch remain pending.
+The CI workflow defines a frontend job, Rust quality gates on `macos-15` and `windows-2025`, a build matrix for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`, and a macOS signing dry-run job that creates, imports, signs, verifies, and cleans up an ephemeral identity and fails closed on missing inputs. The hosted workflow has one successful run on the implementation branch: all seven jobs passed and it uploaded the three build artifacts. That run is the shell baseline; no Windows run of the engine suites is claimed. Manual platform acceptance, Windows install checks, and the macOS x86_64 Intel launch remain pending.
 
 ## Security invariants
 
@@ -170,6 +270,11 @@ The CI workflow defines a frontend job, Rust quality gates on `macos-15` and `wi
 7. Platform-specific code stays under `src-tauri/src/platform/`; shared modules do not branch on the target operating system.
 8. Settings and logs are redacted or typed and never become a secondary secret store.
 9. The main window hides on close, the tray provides Show and Quit, and graceful quit records a shutdown event before exiting with code 0.
+10. The task store is the progress authority and the part file is the byte authority. A completed task has a final file and a matching stored hash; a partially written final file is never produced.
+11. Cookie values, proxy credentials, authorization values, URL query tokens, and custom header values never enter the store or the log. The stored URL removes userinfo, query, and fragment.
+12. The engine rejects non-HTTP schemes, credentialed targets, HTTPS-to-HTTP redirects, URLs over 8 KiB, forbidden headers, and CRLF-bearing header values before a request.
+13. A ranged request that receives a full `200` after data exists fails with `RANGE_IGNORED` and never writes the body at a nonzero offset.
+14. The engine makes no analytics, telemetry, remote reporting, system-proxy discovery, SOCKS5, browser-cookie-extraction, or HuggingFace request.
 
 ## Open risks
 
@@ -181,4 +286,9 @@ The CI workflow defines a frontend job, Rust quality gates on `macos-15` and `wi
 - The `macos-15-intel` runner is expected to remain available until August 2027; retirement would require cross-compilation or local Intel hardware and a revised risk record.
 - macOS deep links depend on LaunchServices registration from a built application.
 - Keychain and notification permission prompts can vary on unsigned local builds.
-- No P0 failure was observed in the local arm64 or hosted CI evidence, but phase exit is incomplete until the manual acceptance matrix is recorded.
+- The 24-hour soak has not run; only the short smoke and a 2-second ignored-path check have been exercised.
+- Windows x64 sparse preallocation and offsets above 4 GiB remain a recorded pending compatibility result, as do the full Rust engine gates and the short soak smoke. The macOS large-file result does not prove the Windows behavior.
+- The retained large-file evidence preserves the intermediate failing revision and the post-fix green transcript for the corrected suite; the accepted macOS arm64 transcript passes the large-file and platform-file suites, and the corrected suite remains the accepted large-file result.
+- The manual platform acceptance matrix remains pending. No P0 failure was observed in the local arm64 or hosted CI evidence, but exit is incomplete until the manual matrix and the 24-hour soak are recorded or explicitly waived.
+- The engine keeps full URLs and header values in memory only, so a process restart cannot replay a query-bearing URL or a custom header value; callers must re-supply them for a new session.
+- Dynamic splitting, SQLite write contention, and crash recovery are exercised by short local tests and the soak harness, but long-run behavior under sustained load is not yet measured.

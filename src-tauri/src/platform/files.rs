@@ -5,6 +5,7 @@
 //! targets are resolved and rejected when they escape the root, and writes or
 //! creates refuse a final symbolic link.
 
+use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -12,6 +13,15 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 
 use super::PlatformError;
+
+/// Outcome of attempting a sparse preallocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SparsePreallocation {
+    /// The file was extended with a sparse allocation.
+    Sparse,
+    /// Sparse allocation was unavailable, so the file was extended normally.
+    Fallback,
+}
 
 /// Basic metadata for a file inside a [`CapDir`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +41,14 @@ pub struct CapDir {
 struct CapInner {
     dir: Dir,
     root: PathBuf,
+}
+
+impl std::fmt::Debug for CapDir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CapDir")
+            .field("root", &self.inner.root)
+            .finish()
+    }
 }
 
 impl CapDir {
@@ -105,6 +123,24 @@ impl CapDir {
             .map_err(join_error)?
     }
 
+    /// Remove a file through the capability.
+    ///
+    /// The path is validated like every other operation, the parent must stay
+    /// inside the canonical root, and a symbolic-link target is refused. A
+    /// missing file returns a `not_found` error so callers can choose to treat
+    /// removal as idempotent.
+    pub fn remove_file(&self, path: &str) -> Result<(), PlatformError> {
+        self.inner.remove_file(path)
+    }
+
+    /// Whether `path` resolves to an entry inside the capability root.
+    ///
+    /// Invalid paths and links that resolve outside the root report `false`
+    /// rather than leaking an error.
+    pub fn exists(&self, path: &str) -> bool {
+        self.inner.exists(path)
+    }
+
     /// Rename `source` over `destination`, replacing an existing destination.
     pub async fn replace(&self, source: &str, destination: &str) -> Result<(), PlatformError> {
         let inner = Arc::clone(&self.inner);
@@ -113,6 +149,53 @@ impl CapDir {
         tokio::task::spawn_blocking(move || inner.replace(&source, &destination))
             .await
             .map_err(join_error)?
+    }
+
+    /// Open an existing file for reading through the capability.
+    pub fn open_read(&self, path: &str) -> Result<File, PlatformError> {
+        self.inner.open_read(path)
+    }
+
+    /// Open an existing file for reading and writing through the capability.
+    pub fn open_rw(&self, path: &str) -> Result<File, PlatformError> {
+        self.inner.open_rw(path)
+    }
+
+    /// Open a file for reading and writing, creating it when it is absent.
+    pub fn open_rw_create(&self, path: &str) -> Result<File, PlatformError> {
+        self.inner.open_rw_create(path)
+    }
+
+    /// Extend or shrink a file to `len` bytes through the capability.
+    pub fn preallocate(&self, path: &str, len: u64) -> Result<(), PlatformError> {
+        self.inner.preallocate(path, len)
+    }
+
+    /// Extend a file to `len` bytes, attempting a sparse allocation first.
+    ///
+    /// Existing bytes are never truncated. The returned outcome is
+    /// [`SparsePreallocation::Sparse`] when the platform marked the file sparse
+    /// and [`SparsePreallocation::Fallback`] when the file was extended without
+    /// sparse support.
+    pub fn preallocate_sparse(
+        &self,
+        path: &str,
+        len: u64,
+    ) -> Result<SparsePreallocation, PlatformError> {
+        self.inner.preallocate_sparse(path, len)
+    }
+
+    /// Flush the capability root directory to durable storage.
+    ///
+    /// On Unix this fsyncs the root directory. On Windows it is a best-effort
+    /// no-op because the platform does not expose a directory fsync.
+    pub fn sync_dir(&self) -> Result<(), PlatformError> {
+        self.inner.sync_dir()
+    }
+
+    /// Rename `source` over `destination` from synchronous code.
+    pub fn replace_blocking(&self, source: &str, destination: &str) -> Result<(), PlatformError> {
+        self.inner.replace(source, destination)
     }
 }
 
@@ -139,6 +222,93 @@ impl CapInner {
         self.dir
             .write(relative.as_path(), contents)
             .map_err(|error| map_io("write", raw, error))
+    }
+
+    fn open_read(&self, raw: &str) -> Result<File, PlatformError> {
+        let relative = self.validate(raw)?;
+        let resolved = self.resolve_existing(&relative, raw)?;
+        let metadata =
+            std::fs::metadata(&resolved).map_err(|error| map_io("open metadata", raw, error))?;
+        if metadata.is_dir() {
+            return Err(PlatformError::invalid_path(format!(
+                "path is a directory: {raw}"
+            )));
+        }
+        let file = self
+            .dir
+            .open(relative.as_path())
+            .map_err(|error| map_io("open", raw, error))?;
+        Ok(file.into_std())
+    }
+
+    fn open_rw(&self, raw: &str) -> Result<File, PlatformError> {
+        let relative = self.validate(raw)?;
+        self.prepare_write(&relative)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+        let file = self
+            .dir
+            .open_with(relative.as_path(), &options)
+            .map_err(|error| map_io("open", raw, error))?;
+        Ok(file.into_std())
+    }
+
+    fn open_rw_create(&self, raw: &str) -> Result<File, PlatformError> {
+        let relative = self.validate(raw)?;
+        self.prepare_write(&relative)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        let file = self
+            .dir
+            .open_with(relative.as_path(), &options)
+            .map_err(|error| map_io("open", raw, error))?;
+        Ok(file.into_std())
+    }
+
+    fn preallocate(&self, raw: &str, len: u64) -> Result<(), PlatformError> {
+        let relative = self.validate(raw)?;
+        self.prepare_write(&relative)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create(true);
+        let file = self
+            .dir
+            .open_with(relative.as_path(), &options)
+            .map_err(|error| map_io("preallocate", raw, error))?;
+        file.set_len(len)
+            .map_err(|error| map_io("preallocate", raw, error))
+    }
+
+    fn preallocate_sparse(
+        &self,
+        raw: &str,
+        len: u64,
+    ) -> Result<SparsePreallocation, PlatformError> {
+        let relative = self.validate(raw)?;
+        self.prepare_write(&relative)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create(true);
+        let file = self
+            .dir
+            .open_with(relative.as_path(), &options)
+            .map_err(|error| map_io("preallocate", raw, error))?
+            .into_std();
+        let current = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        let target = current.max(len);
+        extend_sparse(&file, target).map_err(|error| map_io("preallocate", raw, error))
+    }
+
+    #[cfg(unix)]
+    fn sync_dir(&self) -> Result<(), PlatformError> {
+        let directory = std::fs::File::open(&self.root)
+            .map_err(|error| PlatformError::io_error("open capability root for sync", error))?;
+        directory
+            .sync_all()
+            .map_err(|error| PlatformError::io_error("sync capability root", error))
+    }
+
+    #[cfg(not(unix))]
+    fn sync_dir(&self) -> Result<(), PlatformError> {
+        Ok(())
     }
 
     fn read(&self, raw: &str) -> Result<Vec<u8>, PlatformError> {
@@ -177,6 +347,39 @@ impl CapInner {
             len: metadata.len(),
             is_file: metadata.is_file(),
         })
+    }
+
+    fn remove_file(&self, raw: &str) -> Result<(), PlatformError> {
+        let relative = self.validate(raw)?;
+        self.resolve_parent(&relative, raw)?;
+        let candidate = self.root.join(&relative);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => Err(PlatformError::link_escape(
+                format!("refusing to remove symbolic link: {raw}"),
+            )),
+            Ok(metadata) if metadata.is_dir() => Err(PlatformError::invalid_path(format!(
+                "path is a directory: {raw}"
+            ))),
+            Ok(_) => std::fs::remove_file(&candidate).map_err(|error| map_io("remove", raw, error)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(
+                PlatformError::not_found(format!("remove {raw}: path does not exist")),
+            ),
+            Err(error) => Err(PlatformError::io_error(
+                format!("inspect remove target {raw}"),
+                error,
+            )),
+        }
+    }
+
+    fn exists(&self, raw: &str) -> bool {
+        let Ok(relative) = self.validate(raw) else {
+            return false;
+        };
+        let candidate = self.root.join(relative);
+        let Ok(resolved) = std::fs::canonicalize(candidate) else {
+            return false;
+        };
+        resolved.starts_with(&self.root)
     }
 
     fn replace(&self, source: &str, destination: &str) -> Result<(), PlatformError> {
@@ -286,6 +489,54 @@ impl CapInner {
         self.ensure_parent(relative)
     }
 
+    fn resolve_parent(&self, relative: &Path, raw: &str) -> Result<(), PlatformError> {
+        let parent_relative = relative.parent().unwrap_or(Path::new(""));
+        if parent_relative.as_os_str().is_empty() {
+            return Ok(());
+        }
+
+        let parent_absolute = self.root.join(parent_relative);
+        let mut existing = parent_absolute.as_path();
+        loop {
+            match std::fs::symlink_metadata(existing) {
+                Ok(metadata) => {
+                    if !metadata.is_dir() && !metadata.file_type().is_symlink() {
+                        return Err(PlatformError::invalid_path(format!(
+                            "parent component is not a directory: {}",
+                            existing.display()
+                        )));
+                    }
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    existing = existing.parent().ok_or_else(|| {
+                        PlatformError::invalid_path(format!(
+                            "path has no existing ancestor: {}",
+                            relative.display()
+                        ))
+                    })?;
+                }
+                Err(error) => {
+                    return Err(PlatformError::io_error(
+                        format!("inspect parent {}", existing.display()),
+                        error,
+                    ));
+                }
+            }
+        }
+
+        let resolved = std::fs::canonicalize(existing).map_err(|error| {
+            PlatformError::io_error(format!("canonicalize parent {}", existing.display()), error)
+        })?;
+        if !resolved.starts_with(&self.root) {
+            return Err(PlatformError::link_escape(format!(
+                "parent escapes capability root for {raw}: {}",
+                existing.display()
+            )));
+        }
+        Ok(())
+    }
+
     fn ensure_parent(&self, relative: &Path) -> Result<(), PlatformError> {
         let parent_relative = relative.parent().unwrap_or(Path::new(""));
         if parent_relative.as_os_str().is_empty() {
@@ -353,6 +604,103 @@ impl CapInner {
         }
         Ok(())
     }
+}
+
+/// Write `bytes` at an absolute file offset without changing the cursor.
+///
+/// The platform-specific branch stays in this module: Unix uses `write_all_at`
+/// and Windows loops over `seek_write`.
+#[cfg(unix)]
+pub fn write_at(file: &File, offset: u64, bytes: &[u8]) -> Result<(), PlatformError> {
+    use std::os::unix::fs::FileExt;
+
+    file.write_all_at(bytes, offset)
+        .map_err(|error| PlatformError::io_error("write at offset", error))
+}
+
+/// Write `bytes` at an absolute file offset without changing the cursor.
+#[cfg(windows)]
+pub fn write_at(file: &File, offset: u64, bytes: &[u8]) -> Result<(), PlatformError> {
+    use std::io::ErrorKind;
+    use std::os::windows::fs::FileExt;
+
+    let mut written = 0usize;
+    while written < bytes.len() {
+        let position = offset + written as u64;
+        let count = file
+            .seek_write(&bytes[written..], position)
+            .map_err(|error| PlatformError::io_error("write at offset", error))?;
+        if count == 0 {
+            return Err(PlatformError::io_error(
+                "write at offset",
+                std::io::Error::new(ErrorKind::WriteZero, "the file accepted zero bytes"),
+            ));
+        }
+        written += count;
+    }
+    Ok(())
+}
+
+/// Write `bytes` at an absolute file offset without changing the cursor.
+#[cfg(not(any(unix, windows)))]
+pub fn write_at(file: &File, offset: u64, bytes: &[u8]) -> Result<(), PlatformError> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let mut handle = file
+        .try_clone()
+        .map_err(|error| PlatformError::io_error("clone file handle", error))?;
+    handle
+        .seek(SeekFrom::Start(offset))
+        .map_err(|error| PlatformError::io_error("seek file", error))?;
+    handle
+        .write_all(bytes)
+        .map_err(|error| PlatformError::io_error("write at offset", error))
+}
+
+/// Extend `file` to `len` bytes using the platform's sparse support.
+#[cfg(unix)]
+fn extend_sparse(file: &File, len: u64) -> std::io::Result<SparsePreallocation> {
+    file.set_len(len)?;
+    Ok(SparsePreallocation::Sparse)
+}
+
+/// Mark `file` sparse when the filesystem supports it, then extend it.
+///
+/// `FSCTL_SET_SPARSE` is attempted before the length changes so a file that
+/// cannot become sparse is still extended and reported as a fallback.
+#[cfg(windows)]
+fn extend_sparse(file: &File, len: u64) -> std::io::Result<SparsePreallocation> {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::System::Ioctl::FSCTL_SET_SPARSE;
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+
+    let mut returned = 0u32;
+    let succeeded = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle(),
+            FSCTL_SET_SPARSE,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    } != 0;
+    file.set_len(len)?;
+    Ok(if succeeded {
+        SparsePreallocation::Sparse
+    } else {
+        SparsePreallocation::Fallback
+    })
+}
+
+/// Extend `file` to `len` bytes on platforms without sparse support.
+#[cfg(not(any(unix, windows)))]
+fn extend_sparse(file: &File, len: u64) -> std::io::Result<SparsePreallocation> {
+    file.set_len(len)?;
+    Ok(SparsePreallocation::Fallback)
 }
 
 fn validate_relative(raw: &str) -> Result<PathBuf, PlatformError> {
