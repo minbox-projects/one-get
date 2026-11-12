@@ -12,17 +12,10 @@ use reqwest::header::{
 use reqwest::{Response, StatusCode};
 use url::Url;
 
-use crate::platform::{sanitize_filename, FilenameTarget};
+use crate::platform::{current_target, sanitize_filename};
 
 use super::error::EngineError;
 use super::http::{build_client, get_following_redirects};
-
-/// Platform naming rules applied to a probed filename.
-#[cfg(windows)]
-const FILENAME_TARGET: FilenameTarget = FilenameTarget::Windows;
-/// Platform naming rules applied to a probed filename.
-#[cfg(not(windows))]
-const FILENAME_TARGET: FilenameTarget = FilenameTarget::MacOs;
 
 /// Options that control how a probe classifies a response.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -177,7 +170,7 @@ fn header_text(response: &Response, name: HeaderName) -> Option<String> {
         .map(str::to_string)
 }
 
-fn is_html(content_type: &str) -> bool {
+pub(crate) fn is_html(content_type: &str) -> bool {
     content_type
         .split(';')
         .next()
@@ -190,7 +183,7 @@ fn resolve_filename(content_disposition: Option<&str>, final_url: &Url) -> Strin
         .and_then(disposition_filename)
         .unwrap_or_else(|| url_filename(final_url));
     let component = single_component(&candidate);
-    let mut sanitized = sanitize_filename(&component, FILENAME_TARGET);
+    let mut sanitized = sanitize_filename(&component, current_target());
 
     if sanitized.starts_with("..") {
         sanitized = sanitized.trim_start_matches('.').to_string();
@@ -305,6 +298,6 @@ fn single_component(value: &str) -> String {
         .to_string()
 }
 
-fn invalid_response() -> EngineError {
+pub(crate) fn invalid_response() -> EngineError {
     EngineError::new("INVALID_RESPONSE", "the server response was malformed")
 }

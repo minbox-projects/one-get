@@ -43,6 +43,14 @@ struct CapInner {
     root: PathBuf,
 }
 
+impl std::fmt::Debug for CapDir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CapDir")
+            .field("root", &self.inner.root)
+            .finish()
+    }
+}
+
 impl CapDir {
     /// Open (creating if needed) and canonicalize `root` as a capability.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, PlatformError> {
@@ -113,6 +121,24 @@ impl CapDir {
         tokio::task::spawn_blocking(move || inner.metadata(&path))
             .await
             .map_err(join_error)?
+    }
+
+    /// Remove a file through the capability.
+    ///
+    /// The path is validated like every other operation, the parent must stay
+    /// inside the canonical root, and a symbolic-link target is refused. A
+    /// missing file returns a `not_found` error so callers can choose to treat
+    /// removal as idempotent.
+    pub fn remove_file(&self, path: &str) -> Result<(), PlatformError> {
+        self.inner.remove_file(path)
+    }
+
+    /// Whether `path` resolves to an entry inside the capability root.
+    ///
+    /// Invalid paths and links that resolve outside the root report `false`
+    /// rather than leaking an error.
+    pub fn exists(&self, path: &str) -> bool {
+        self.inner.exists(path)
     }
 
     /// Rename `source` over `destination`, replacing an existing destination.
@@ -323,6 +349,39 @@ impl CapInner {
         })
     }
 
+    fn remove_file(&self, raw: &str) -> Result<(), PlatformError> {
+        let relative = self.validate(raw)?;
+        self.resolve_parent(&relative, raw)?;
+        let candidate = self.root.join(&relative);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => Err(PlatformError::link_escape(
+                format!("refusing to remove symbolic link: {raw}"),
+            )),
+            Ok(metadata) if metadata.is_dir() => Err(PlatformError::invalid_path(format!(
+                "path is a directory: {raw}"
+            ))),
+            Ok(_) => std::fs::remove_file(&candidate).map_err(|error| map_io("remove", raw, error)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(
+                PlatformError::not_found(format!("remove {raw}: path does not exist")),
+            ),
+            Err(error) => Err(PlatformError::io_error(
+                format!("inspect remove target {raw}"),
+                error,
+            )),
+        }
+    }
+
+    fn exists(&self, raw: &str) -> bool {
+        let Ok(relative) = self.validate(raw) else {
+            return false;
+        };
+        let candidate = self.root.join(relative);
+        let Ok(resolved) = std::fs::canonicalize(candidate) else {
+            return false;
+        };
+        resolved.starts_with(&self.root)
+    }
+
     fn replace(&self, source: &str, destination: &str) -> Result<(), PlatformError> {
         let source_rel = self.validate(source)?;
         let destination_rel = self.validate(destination)?;
@@ -428,6 +487,54 @@ impl CapInner {
             }
         }
         self.ensure_parent(relative)
+    }
+
+    fn resolve_parent(&self, relative: &Path, raw: &str) -> Result<(), PlatformError> {
+        let parent_relative = relative.parent().unwrap_or(Path::new(""));
+        if parent_relative.as_os_str().is_empty() {
+            return Ok(());
+        }
+
+        let parent_absolute = self.root.join(parent_relative);
+        let mut existing = parent_absolute.as_path();
+        loop {
+            match std::fs::symlink_metadata(existing) {
+                Ok(metadata) => {
+                    if !metadata.is_dir() && !metadata.file_type().is_symlink() {
+                        return Err(PlatformError::invalid_path(format!(
+                            "parent component is not a directory: {}",
+                            existing.display()
+                        )));
+                    }
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    existing = existing.parent().ok_or_else(|| {
+                        PlatformError::invalid_path(format!(
+                            "path has no existing ancestor: {}",
+                            relative.display()
+                        ))
+                    })?;
+                }
+                Err(error) => {
+                    return Err(PlatformError::io_error(
+                        format!("inspect parent {}", existing.display()),
+                        error,
+                    ));
+                }
+            }
+        }
+
+        let resolved = std::fs::canonicalize(existing).map_err(|error| {
+            PlatformError::io_error(format!("canonicalize parent {}", existing.display()), error)
+        })?;
+        if !resolved.starts_with(&self.root) {
+            return Err(PlatformError::link_escape(format!(
+                "parent escapes capability root for {raw}: {}",
+                existing.display()
+            )));
+        }
+        Ok(())
     }
 
     fn ensure_parent(&self, relative: &Path) -> Result<(), PlatformError> {

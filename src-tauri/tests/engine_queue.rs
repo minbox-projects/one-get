@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use oneget_lib::engine::error::EngineError;
+use oneget_lib::engine::part_file::PartFile;
 use oneget_lib::engine::scheduler::{Engine, EngineOptions};
 use oneget_lib::engine::state::{SegmentState, TaskState};
 use oneget_lib::engine::worker::DownloadSpec;
@@ -1105,5 +1106,388 @@ async fn retry_failed_task_with_part_requeues_and_completes() {
             );
             let _ = had_part;
         }
+    );
+}
+
+fn prepare_finalizing_task(
+    store: &Database,
+    dest: &Path,
+    filename: &str,
+    body: &[u8],
+    expected_sha256: Option<&str>,
+) -> String {
+    let id = store
+        .create_task("http://127.0.0.1/finalize", filename)
+        .expect("create finalizing task");
+    store
+        .record_connections(&id, 1)
+        .expect("record connections");
+    store
+        .record_discovered_metadata(&id, Some(body.len() as u64), None, None)
+        .expect("record metadata");
+    if let Some(expected) = expected_sha256 {
+        store
+            .record_expected_sha256(&id, expected)
+            .expect("record expected hash");
+    }
+    let part_name = PartFile::part_name(filename);
+    std::fs::write(dest.join(&part_name), body).expect("write complete part");
+    store
+        .record_part_path(&id, &part_name)
+        .expect("record part path");
+    store
+        .transition_task(&id, TaskState::Queued, TaskState::Connecting)
+        .expect("queued to connecting");
+    store
+        .transition_task(&id, TaskState::Connecting, TaskState::Downloading)
+        .expect("connecting to downloading");
+    store
+        .transition_task(&id, TaskState::Downloading, TaskState::Finalizing)
+        .expect("downloading to finalizing");
+    id
+}
+
+#[tokio::test]
+async fn cancel_during_finalization_removes_part_without_invalid_state() {
+    let body = pattern_bytes(201, 256 * 1024);
+    let hash = sha256_hex(&body);
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let store = open_store(&store_dir);
+    let id = prepare_finalizing_task(&store, dest.path(), "finalizing.bin", &body, Some(&hash));
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    let part = part_path(dest.path(), "finalizing.bin");
+    assert!(
+        part.exists(),
+        "a finalizing task must own its complete part"
+    );
+
+    engine
+        .cancel(&id)
+        .await
+        .expect("cancelling a finalizing task must succeed");
+
+    let task = engine.store().task(&id).unwrap().unwrap();
+    assert_eq!(task.state, TaskState::Cancelled);
+    assert_ne!(
+        task.error_code.as_deref(),
+        Some("INVALID_STATE"),
+        "a finalizing cancel must not be treated as a completed-task invalid state, got {:?}",
+        task.error_message
+    );
+    assert!(!part.exists(), "cancel must remove the finalizing part");
+    assert!(
+        !dest.path().join("finalizing.bin").exists(),
+        "cancel must not create a final file"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_racing_finalization_ends_completed_or_cancelled_only() {
+    let body = pattern_bytes(202, 4 * 1024 * 1024);
+    let hash = sha256_hex(&body);
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let db_path = store_dir.path().join("tasks.db");
+    let store = open_store(&store_dir);
+    let id = prepare_finalizing_task(&store, dest.path(), "race-finalize.bin", &body, Some(&hash));
+    // A second store handle over the same database lets the run and cancel
+    // operations execute concurrently rather than sharing one non-Sync
+    // rusqlite connection.
+    let engine = Engine::new(
+        Database::open(&db_path).expect("open run store"),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let canceller = Engine::new(
+        Database::open(&db_path).expect("open cancel store"),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    let run = async { engine.run().await };
+    let cancel = async {
+        sleep(Duration::from_millis(1)).await;
+        canceller.cancel(&id).await
+    };
+    let (run_result, cancel_result) = tokio::join!(run, cancel);
+    run_result.expect("engine run must not fail");
+    if let Err(error) = cancel_result {
+        assert_code(&error, "INVALID_STATE");
+    }
+
+    let task = engine.store().task(&id).unwrap().unwrap();
+    let part = part_path(dest.path(), "race-finalize.bin");
+    let final_path = dest.path().join("race-finalize.bin");
+    match task.state {
+        TaskState::Completed => {
+            assert!(final_path.exists(), "completed race must keep the final file");
+            assert!(!part.exists(), "completed race must remove the part");
+            assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+            assert_eq!(read_file(&final_path), body, "final bytes must match");
+        }
+        TaskState::Cancelled => {
+            assert!(!final_path.exists(), "cancelled race must not leave a final file");
+            assert!(!part.exists(), "cancelled race must remove the part");
+            assert_ne!(
+                task.error_code.as_deref(),
+                Some("INVALID_STATE"),
+                "cancelled race must not record an invalid-state error, got {:?}",
+                task.error_message
+            );
+        }
+        other => panic!(
+            "cancel/finalization race must end completed or cancelled, got {other:?} (error={:?} {:?})",
+            task.error_code, task.error_message
+        ),
+    }
+}
+
+#[tokio::test]
+async fn cross_engine_pause_preserves_part_and_resume_completes() {
+    let body = pattern_bytes(211, 1024 * 1024);
+    let hash = sha256_hex(&body);
+    let server = RangeServer::start(slow_body_config(body.clone()));
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let db_path = store_dir.path().join("tasks.db");
+    let engine_a = Engine::new(
+        Database::open(&db_path).expect("open engine A store"),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let engine_b = Engine::new(
+        Database::open(&db_path).expect("open engine B store"),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let id = engine_a
+        .add_task(make_spec(
+            server.url("/cross-engine-pause"),
+            "cross-engine-pause.bin",
+            1,
+            Some(hash.clone()),
+        ))
+        .expect("add task");
+
+    let (_, pause_result) = tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine_a.run())
+                .await
+                .expect("run timeout")
+                .expect("run engine A");
+        },
+        async {
+            wait_for_progress(engine_a.store(), &id, 64 * 1024, WAIT_TIMEOUT).await;
+            engine_b.pause(&id).await
+        }
+    );
+    pause_result.expect("a second engine must be able to pause the running task");
+
+    let task = engine_a.store().task(&id).unwrap().unwrap();
+    assert_eq!(
+        task.state,
+        TaskState::Paused,
+        "cross-engine pause must stop the task as paused, got {:?} (error={:?} {:?})",
+        task.state,
+        task.error_code,
+        task.error_message
+    );
+    assert_ne!(
+        task.error_code.as_deref(),
+        Some("INVALID_STATE"),
+        "cross-engine pause must not record INVALID_STATE"
+    );
+    let part = part_path(dest.path(), "cross-engine-pause.bin");
+    assert!(part.exists(), "cross-engine pause must preserve the part");
+
+    engine_a.resume(&id).await.expect("resume paused task");
+    let (_, state) = tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine_a.run())
+                .await
+                .expect("resume run timeout")
+                .expect("resume run");
+        },
+        wait_for_state(engine_a.store(), &id, TaskState::Completed, WAIT_TIMEOUT,),
+    );
+    assert_eq!(state, TaskState::Completed);
+    let task = engine_a.store().task(&id).unwrap().unwrap();
+    assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+    assert_eq!(read_file(&dest.path().join("cross-engine-pause.bin")), body);
+    assert!(!part.exists());
+}
+
+#[tokio::test]
+async fn cross_engine_cancel_ends_cancelled_without_invalid_state() {
+    let body = pattern_bytes(212, 768 * 1024);
+    let server = RangeServer::start(slow_body_config(body.clone()));
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let db_path = store_dir.path().join("tasks.db");
+    let engine_a = Engine::new(
+        Database::open(&db_path).expect("open engine A store"),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let engine_b = Engine::new(
+        Database::open(&db_path).expect("open engine B store"),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let id = engine_a
+        .add_task(make_spec(
+            server.url("/cross-engine-cancel"),
+            "cross-engine-cancel.bin",
+            1,
+            None,
+        ))
+        .expect("add task");
+
+    let (_, cancel_result) = tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine_a.run())
+                .await
+                .expect("run timeout")
+                .expect("run engine A");
+        },
+        async {
+            wait_for_progress(engine_a.store(), &id, 64 * 1024, WAIT_TIMEOUT).await;
+            engine_b.cancel(&id).await
+        }
+    );
+    cancel_result.expect("a second engine must be able to cancel the running task");
+
+    let task = engine_a.store().task(&id).unwrap().unwrap();
+    assert_eq!(
+        task.state,
+        TaskState::Cancelled,
+        "cross-engine cancel must end cancelled, got {:?} (error={:?} {:?})",
+        task.state,
+        task.error_code,
+        task.error_message
+    );
+    assert_ne!(
+        task.error_code.as_deref(),
+        Some("INVALID_STATE"),
+        "cross-engine cancel must not record INVALID_STATE"
+    );
+    assert_ne!(task.state, TaskState::Failed);
+    assert!(
+        !part_path(dest.path(), "cross-engine-cancel.bin").exists(),
+        "cross-engine cancel must remove the part"
+    );
+    assert!(
+        !dest.path().join("cross-engine-cancel.bin").exists(),
+        "cross-engine cancel must not create a final file"
+    );
+}
+
+/// A filename carrying a parent component must never make a part or final file
+/// resolve outside the destination directory.
+#[tokio::test]
+async fn add_task_rejects_parent_component_filename_and_cancel_spares_outside_part() {
+    let server = RangeServer::start(FixtureConfig {
+        body: pattern_bytes(241, 16 * 1024),
+        ..Default::default()
+    });
+    let outer = tempdir().expect("outer");
+    let dest = outer.path().join("dest");
+    std::fs::create_dir(&dest).expect("create destination");
+    let outside_part = outer.path().join("outside.oneget.part");
+    let sealed = b"outside part owned by another process".to_vec();
+    std::fs::write(&outside_part, &sealed).expect("write outside part");
+
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.clone(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    let added = engine.add_task(make_spec(
+        server.url("/parent-traversal"),
+        "../outside",
+        1,
+        None,
+    ));
+
+    match added {
+        Err(error) => {
+            assert!(
+                matches!(
+                    error.code(),
+                    "INVALID_FILENAME" | "INVALID_PATH" | "INVALID_PATH_COMPONENT" | "invalid_path"
+                ),
+                "a traversal filename must fail with a typed path or filename error, got {error}"
+            );
+            assert!(
+                engine.store().list_tasks().expect("list tasks").is_empty(),
+                "a rejected task must not be persisted"
+            );
+        }
+        Ok(id) => {
+            let task = engine
+                .store()
+                .task(&id)
+                .expect("load task")
+                .expect("task exists");
+            let stored = task.filename.clone();
+            engine
+                .cancel(&id)
+                .await
+                .expect("cancel task accepted by add_task");
+            assert!(
+                outside_part.exists(),
+                "cancel must not remove a part resolved outside the destination root"
+            );
+            assert_eq!(
+                read_file(&outside_part),
+                sealed,
+                "cancel must leave a file outside the destination root unchanged"
+            );
+            let stored_path = Path::new(&stored);
+            assert!(
+                stored_path.components().count() == 1
+                    && matches!(
+                        stored_path.components().next(),
+                        Some(std::path::Component::Normal(_))
+                    ),
+                "an accepted filename must be a single normal component, got {stored:?}"
+            );
+        }
+    }
+
+    let mut siblings: Vec<String> = std::fs::read_dir(outer.path())
+        .expect("read outer")
+        .map(|entry| {
+            entry
+                .expect("outer entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    siblings.sort();
+    assert_eq!(
+        siblings,
+        vec!["dest".to_string(), "outside.oneget.part".to_string()],
+        "add_task and cancel must not create a part or final file outside the destination root"
+    );
+    assert!(
+        std::fs::read_dir(&dest)
+            .expect("read destination")
+            .next()
+            .is_none(),
+        "add_task and cancel must not leave part or final files inside the destination"
+    );
+    assert!(
+        server.served_ranges().is_empty(),
+        "a traversal filename must not cause any request to the fixture"
     );
 }

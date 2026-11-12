@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -20,18 +20,19 @@ use reqwest::Client;
 use tokio::sync::Notify;
 
 use crate::logging::{LogLevel, Logger};
+use crate::platform::{current_target, sanitize_filename};
 use crate::store::types::Task;
 use crate::store::Database;
 
 use super::cookies::CookieJar;
 use super::error::EngineError;
 use super::http::{self, ProxyConfig};
-use super::part_file::PartFile;
 use super::rate_limit::RateLimiter;
 use super::state::TaskState;
 use super::worker::{
-    cancel_task, download_task_with_network, finalize_task, mark_failed, persist_pause,
-    remote_metadata, DownloadSpec, NetworkContext, TaskControl, TaskRunOutcome,
+    cancel_task, download_task_with_network, finalize_task, load_task, mark_failed, part_exists,
+    part_missing, persist_pause, remote_metadata, DownloadSpec, NetworkContext, TaskControl,
+    TaskRunOutcome,
 };
 
 /// How long the scheduler waits for newly added work before it stops.
@@ -141,7 +142,9 @@ impl Engine {
 
     /// Pace every task's downloads at a shared bytes-per-second limit.
     ///
-    /// `None` or zero removes the limit without restarting the engine.
+    /// `None` or zero removes the limit without restarting the engine. A
+    /// running task keeps the limiter captured when its network context started;
+    /// changes apply to task starts (including a later resume) after this call.
     pub fn set_global_rate_limit(&self, bytes_per_second: Option<u64>) {
         *self
             .global_rate
@@ -152,7 +155,9 @@ impl Engine {
 
     /// Pace one task's workers at a shared bytes-per-second limit.
     ///
-    /// `None` or zero removes the limit without restarting the engine.
+    /// `None` or zero removes the limit without restarting the engine. A
+    /// running task keeps the limiter captured when its network context started;
+    /// changes apply to task starts (including a later resume) after this call.
     pub fn set_task_rate_limit(&self, task_id: &str, bytes_per_second: Option<u64>) {
         let mut limits = self
             .task_rates
@@ -179,8 +184,14 @@ impl Engine {
     }
 
     /// Create a queued task and persist its connection and hash settings.
+    ///
+    /// The filename is sanitized with the current platform's naming rules
+    /// before it reaches the store or the in-memory spec, so a caller cannot
+    /// introduce a path component that later escapes the destination root.
     pub fn add_task(&self, spec: DownloadSpec) -> Result<String, EngineError> {
         http::validate_extra_headers(&spec.extra_headers)?;
+        let mut spec = spec;
+        spec.filename = sanitize_filename(&spec.filename, current_target());
 
         let stored_url = http::storage_url(&spec.url);
         let id = self.store.create_task(&stored_url, &spec.filename)?;
@@ -626,24 +637,43 @@ impl Engine {
                 Ok(())
             }
             Err(error) => {
-                if let Ok(Some(task)) = self.store.task(&task_id) {
-                    if task.state.can_transition_to(TaskState::Failed) {
-                        let _ = self
-                            .store
-                            .transition_task(&task_id, task.state, TaskState::Failed);
+                let state = self
+                    .store
+                    .task(&task_id)
+                    .ok()
+                    .flatten()
+                    .map(|task| task.state);
+                let stopped = matches!(state, Some(TaskState::Paused | TaskState::Cancelled));
+                if !stopped {
+                    if let Some(state) = state {
+                        if state.can_transition_to(TaskState::Failed) {
+                            let _ = self
+                                .store
+                                .transition_task(&task_id, state, TaskState::Failed);
+                        }
+                        let _ = self.store.update_task_error(
+                            &task_id,
+                            error.code(),
+                            &error.to_string(),
+                        );
                     }
-                    let _ =
-                        self.store
-                            .update_task_error(&task_id, error.code(), &error.to_string());
                 }
-                self.log(
-                    LogLevel::Warn,
-                    "engine.task.failed",
-                    serde_json::json!({
-                        "task_id": task_id,
-                        "error_code": error.code(),
-                    }),
-                );
+                if stopped {
+                    self.log(
+                        LogLevel::Info,
+                        "engine.task.stopped",
+                        serde_json::json!({ "task_id": task_id }),
+                    );
+                } else {
+                    self.log(
+                        LogLevel::Warn,
+                        "engine.task.failed",
+                        serde_json::json!({
+                            "task_id": task_id,
+                            "error_code": error.code(),
+                        }),
+                    );
+                }
                 if error.code() == "DATABASE_ERROR" {
                     return Err(error);
                 }
@@ -668,21 +698,4 @@ fn spec_from_task(task: &Task) -> DownloadSpec {
         expected_sha256: task.expected_sha256.clone(),
         extra_headers: Vec::new(),
     }
-}
-
-fn load_task(store: &Database, id: &str) -> Result<Task, EngineError> {
-    store
-        .task(id)?
-        .ok_or_else(|| EngineError::new("TASK_NOT_FOUND", "the requested task does not exist"))
-}
-
-fn part_exists(dest_dir: &Path, filename: &str) -> bool {
-    std::fs::symlink_metadata(dest_dir.join(PartFile::part_name(filename))).is_ok()
-}
-
-fn part_missing() -> EngineError {
-    EngineError::new(
-        "PART_MISSING",
-        "the task's part file is missing and cannot be resumed",
-    )
 }

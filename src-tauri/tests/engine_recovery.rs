@@ -716,8 +716,232 @@ async fn resume_missing_part_fails_with_part_missing() {
     assert_eq!(task.error_code.as_deref(), Some("PART_MISSING"));
 }
 
+async fn wait_for_downloading_progress(
+    store: &Database,
+    id: &str,
+    min_bytes: u64,
+    deadline: Duration,
+) -> u64 {
+    let start = std::time::Instant::now();
+    loop {
+        let task = store.task(id).expect("load task").expect("task exists");
+        if task.state == TaskState::Downloading && task.downloaded_bytes >= min_bytes {
+            return task.downloaded_bytes;
+        }
+        if matches!(task.state, TaskState::Failed | TaskState::Cancelled) {
+            panic!(
+                "task {id} reached terminal state {:?} while waiting for progress, error={:?} {:?}",
+                task.state, task.error_code, task.error_message
+            );
+        }
+        if start.elapsed() > deadline {
+            panic!(
+                "timed out waiting for task {id} progress >= {min_bytes}, current {:?} {}",
+                task.state, task.downloaded_bytes
+            );
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
+#[tokio::test]
+async fn resume_with_missing_cookie_file_fails_with_cookie_file_error_and_keeps_part() {
+    let body = pattern_bytes(151, 768 * 1024);
+    let server = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        range_mode: RangeMode::HonorRange,
+        stream_delay: Some(Duration::from_millis(12)),
+        stream_chunk_size: 16 * 1024,
+        ..Default::default()
+    });
+    let url = server.url("/missing-cookie.bin");
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let cookie_dir = tempdir().expect("cookies");
+    let cookie_path = cookie_dir.path().join("cookies.txt");
+    std::fs::write(&cookie_path, b"").expect("write empty cookie file");
+
+    let engine = make_engine(open_store(&store_dir), dest.path());
+    engine.set_cookie_file(Some(cookie_path.clone()));
+    let id = engine
+        .store()
+        .create_task(&url, "missing-cookie.bin")
+        .unwrap();
+    engine.store().record_connections(&id, 1).unwrap();
+
+    tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine.run())
+                .await
+                .expect("run timeout")
+                .expect("run");
+        },
+        async {
+            wait_for_downloading_progress(engine.store(), &id, 64 * 1024, WAIT_TIMEOUT).await;
+            engine.pause(&id).await.expect("pause downloading task");
+            let state = wait_for_terminal_async(engine.store(), &id, WAIT_TIMEOUT).await;
+            assert_eq!(state, TaskState::Paused, "task must pause before resume");
+        }
+    );
+
+    let part = dest.path().join(PartFile::part_name("missing-cookie.bin"));
+    assert!(
+        part.exists(),
+        "paused task must keep its part before resume"
+    );
+    std::fs::remove_file(&cookie_path).expect("delete the cookie file");
+
+    engine.resume(&id).await.expect("resume paused task");
+    timeout(WAIT_TIMEOUT, engine.run())
+        .await
+        .expect("resume run timeout")
+        .expect("resume run");
+
+    let state = wait_for_terminal_async(engine.store(), &id, WAIT_TIMEOUT).await;
+    assert!(
+        matches!(state, TaskState::Failed | TaskState::Paused),
+        "missing cookie file must end failed or paused, got {state:?}"
+    );
+    let task = engine.store().task(&id).unwrap().unwrap();
+    assert_eq!(
+        task.error_code.as_deref(),
+        Some("COOKIE_FILE_ERROR"),
+        "missing cookie file must report the typed cookie error, got {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert!(
+        part.exists(),
+        "the part must be preserved on a cookie error"
+    );
+    assert!(
+        !dest.path().join("missing-cookie.bin").exists(),
+        "no final file may appear on a cookie error"
+    );
+}
+
 fn harness_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_engine_harness"))
+}
+
+fn run_harness(args: &[&str], deadline: Duration) -> (std::process::ExitStatus, String, String) {
+    let mut child = Command::new(harness_exe())
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn engine harness");
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().expect("poll harness") {
+            let mut stdout = String::new();
+            child
+                .stdout
+                .take()
+                .expect("harness stdout")
+                .read_to_string(&mut stdout)
+                .expect("read harness stdout");
+            let mut stderr = String::new();
+            child
+                .stderr
+                .take()
+                .expect("harness stderr")
+                .read_to_string(&mut stderr)
+                .expect("read harness stderr");
+            return (status, stdout, stderr);
+        }
+        if start.elapsed() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("harness command {args:?} exceeded the {deadline:?} bound");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn assert_harness_status(args: &[&str], expected_state: &str) -> String {
+    let (status, stdout, stderr) = run_harness(args, Duration::from_secs(15));
+    assert!(
+        status.success(),
+        "harness {args:?} must exit successfully, status={status:?}, stdout={stdout}, stderr={stderr}"
+    );
+    let line = stdout.trim();
+    assert!(
+        line.starts_with(&format!("state {expected_state} downloaded ")),
+        "status must print a bounded state line for {expected_state}, got {line:?}"
+    );
+    assert!(
+        line.len() < 200 && line.lines().count() == 1,
+        "status output must stay bounded, got {line:?}"
+    );
+    line.to_string()
+}
+
+fn assert_harness_control(args: &[&str]) {
+    let (status, stdout, stderr) = run_harness(args, Duration::from_secs(15));
+    assert!(
+        status.success(),
+        "harness {args:?} must exit successfully, status={status:?}, stdout={stdout}, stderr={stderr}"
+    );
+}
+
+#[test]
+fn harness_status_pause_resume_cancel_controls_persist_transitions() {
+    let store_dir = tempdir().expect("store");
+    let db_path = store_dir.path().join("tasks.db");
+    let db_path_text = db_path.to_string_lossy().to_string();
+    let id = {
+        let db = Database::open(&db_path).expect("open store");
+        let id = db
+            .create_task(
+                "http://127.0.0.1:9/harness-control.bin",
+                "harness-control.bin",
+            )
+            .expect("seed queued task");
+        db.record_connections(&id, 1).expect("record connections");
+        id
+    };
+
+    let status_args = ["status", "--db", db_path_text.as_str(), "--id", id.as_str()];
+    assert_harness_status(&status_args, "queued");
+
+    assert_harness_control(&["pause", "--db", db_path_text.as_str(), "--id", id.as_str()]);
+    let state = Database::open(&db_path)
+        .expect("reopen store")
+        .task(&id)
+        .expect("load task")
+        .expect("task")
+        .state;
+    assert_eq!(
+        state,
+        TaskState::Paused,
+        "pause must persist the paused state"
+    );
+    assert_harness_status(&status_args, "paused");
+
+    assert_harness_control(&["resume", "--db", db_path_text.as_str(), "--id", id.as_str()]);
+    let state = Database::open(&db_path)
+        .expect("reopen store")
+        .task(&id)
+        .expect("load task")
+        .expect("task")
+        .state;
+    assert_eq!(state, TaskState::Queued, "resume must requeue the task");
+    assert_harness_status(&status_args, "queued");
+
+    assert_harness_control(&["cancel", "--db", db_path_text.as_str(), "--id", id.as_str()]);
+    let state = Database::open(&db_path)
+        .expect("reopen store")
+        .task(&id)
+        .expect("load task")
+        .expect("task")
+        .state;
+    assert_eq!(
+        state,
+        TaskState::Cancelled,
+        "cancel must persist the cancelled state"
+    );
+    assert_harness_status(&status_args, "cancelled");
 }
 
 fn read_progress_until(child: &mut Child, target_downloaded: u64, timeout_dur: Duration) -> u64 {

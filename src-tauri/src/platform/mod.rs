@@ -15,7 +15,7 @@ pub mod process;
 pub mod secrets;
 pub mod tray;
 
-pub use filename::{sanitize_filename, FilenameTarget};
+pub use filename::{current_target, sanitize_filename, FilenameTarget};
 pub use files::{CapDir, FileMetadata};
 pub use paths::AppPaths;
 pub use process::ChildGuard;

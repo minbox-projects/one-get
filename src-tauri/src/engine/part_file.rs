@@ -89,6 +89,7 @@ pub struct PartFile {
     file: std::fs::File,
     name: PartFileName,
     preallocation: SparsePreallocation,
+    cap: CapDir,
 }
 
 impl Deref for PartFile {
@@ -123,6 +124,7 @@ impl PartFile {
             file,
             name: PartFileName(name),
             preallocation,
+            cap: cap.clone(),
         })
     }
 
@@ -134,12 +136,23 @@ impl PartFile {
             file,
             name: PartFileName(name),
             preallocation: SparsePreallocation::Fallback,
+            cap: cap.clone(),
         })
     }
 
     /// How the part file was preallocated when it was created.
     pub fn preallocation_outcome(&self) -> SparsePreallocation {
         self.preallocation
+    }
+
+    /// Extend the part file to `total` bytes through the capability.
+    ///
+    /// The platform attempts a sparse allocation first. A full destination
+    /// device maps to `DISK_FULL`; other failures map to `IO_ERROR`.
+    pub fn preallocate(&self, total: u64) -> Result<SparsePreallocation, EngineError> {
+        self.cap
+            .preallocate_sparse(self.name.part_name(), total)
+            .map_err(map_preallocate_error)
     }
 
     /// Write `bytes` at an absolute offset in the part file.

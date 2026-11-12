@@ -40,6 +40,36 @@
       "entry_kinds": [
         "exported-symbol"
       ]
+    },
+    {
+      "id": "engine",
+      "path": "src-tauri/src/engine",
+      "owner_role": "shared",
+      "responsibility": "Headless download engine: probe, transport, planner, part file, workers, scheduler, retry, rate limiting, cookies, and state machines",
+      "language": "rust",
+      "entry_kinds": [
+        "file"
+      ]
+    },
+    {
+      "id": "store",
+      "path": "src-tauri/src/store",
+      "owner_role": "shared",
+      "responsibility": "Durable SQLite task store: connection setup, schema migration, task and segment records, and progress persistence",
+      "language": "rust",
+      "entry_kinds": [
+        "file"
+      ]
+    },
+    {
+      "id": "engine-harness",
+      "path": "src-tauri/src/bin",
+      "owner_role": "shared",
+      "responsibility": "Command-line harness for adding, running, inspecting, pausing, resuming, and cancelling one task",
+      "language": "rust",
+      "entry_kinds": [
+        "file"
+      ]
     }
   ],
   "features": [
@@ -631,6 +661,235 @@
         "src/test/setup.ts",
         "src/types/app.ts",
         "src/vite-env.d.ts"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "engine",
+      "name": "engine",
+      "aliases": [],
+      "module_root": "engine",
+      "entries": [
+        "src-tauri/src/engine/scheduler.rs",
+        "src-tauri/src/engine/cookies.rs",
+        "src-tauri/src/engine/error.rs",
+        "src-tauri/src/engine/http.rs",
+        "src-tauri/src/engine/mod.rs",
+        "src-tauri/src/engine/part_file.rs",
+        "src-tauri/src/engine/planner.rs",
+        "src-tauri/src/engine/probe.rs",
+        "src-tauri/src/engine/rate_limit.rs",
+        "src-tauri/src/engine/retry.rs",
+        "src-tauri/src/engine/state.rs",
+        "src-tauri/src/engine/worker.rs"
+      ],
+      "symbols": [
+        {
+          "file": "src-tauri/src/engine/scheduler.rs",
+          "name": "Engine",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/engine/scheduler.rs",
+          "name": "EngineOptions",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/engine/worker.rs",
+          "name": "DownloadSpec",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/engine/worker.rs",
+          "name": "DownloadOutcome",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/engine/worker.rs",
+          "name": "FinalizeOutcome",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/engine/part_file.rs",
+          "name": "PartFile",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/engine/probe.rs",
+          "name": "ProbeOutcome",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/engine/planner.rs",
+          "name": "plan_segments",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/engine/error.rs",
+          "name": "EngineError",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/engine/state.rs",
+          "name": "TaskState",
+          "kind": "enum",
+          "visibility": "public"
+        }
+      ],
+      "related_files": [],
+      "tests": [
+        "src-tauri/tests/engine_download.rs",
+        "src-tauri/tests/engine_large.rs",
+        "src-tauri/tests/engine_network.rs",
+        "src-tauri/tests/engine_probe.rs",
+        "src-tauri/tests/engine_queue.rs",
+        "src-tauri/tests/engine_recovery.rs",
+        "src-tauri/tests/engine_redaction.rs",
+        "src-tauri/tests/engine_segments.rs",
+        "src-tauri/tests/soak.rs"
+      ],
+      "depends_on": [
+        "store"
+      ],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Headless download engine: probe, transport, planner, part file, workers, scheduler, retry, rate limiting, cookies, and state machines",
+      "read_scope": [
+        "src-tauri/src/engine/cookies.rs",
+        "src-tauri/src/engine/error.rs",
+        "src-tauri/src/engine/http.rs",
+        "src-tauri/src/engine/mod.rs",
+        "src-tauri/src/engine/part_file.rs",
+        "src-tauri/src/engine/planner.rs",
+        "src-tauri/src/engine/probe.rs",
+        "src-tauri/src/engine/rate_limit.rs",
+        "src-tauri/src/engine/retry.rs",
+        "src-tauri/src/engine/scheduler.rs",
+        "src-tauri/src/engine/state.rs",
+        "src-tauri/src/engine/worker.rs",
+        "src-tauri/tests/engine_download.rs",
+        "src-tauri/tests/engine_large.rs",
+        "src-tauri/tests/engine_network.rs",
+        "src-tauri/tests/engine_probe.rs",
+        "src-tauri/tests/engine_queue.rs",
+        "src-tauri/tests/engine_recovery.rs",
+        "src-tauri/tests/engine_redaction.rs",
+        "src-tauri/tests/engine_segments.rs",
+        "src-tauri/tests/soak.rs"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "store",
+      "name": "store",
+      "aliases": [],
+      "module_root": "store",
+      "entries": [
+        "src-tauri/src/store/db.rs",
+        "src-tauri/src/store/migrations.rs",
+        "src-tauri/src/store/mod.rs",
+        "src-tauri/src/store/segments.rs",
+        "src-tauri/src/store/tasks.rs",
+        "src-tauri/src/store/types.rs"
+      ],
+      "symbols": [
+        {
+          "file": "src-tauri/src/store/db.rs",
+          "name": "Database",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/store/types.rs",
+          "name": "Task",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/store/types.rs",
+          "name": "Segment",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/store/types.rs",
+          "name": "SegmentInput",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/store/types.rs",
+          "name": "SegmentProgressInput",
+          "kind": "struct",
+          "visibility": "public"
+        }
+      ],
+      "related_files": [],
+      "tests": [
+        "src-tauri/tests/store.rs"
+      ],
+      "depends_on": [],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Durable SQLite task store: connection setup, schema migration, task and segment records, and progress persistence",
+      "read_scope": [
+        "src-tauri/src/store/db.rs",
+        "src-tauri/src/store/migrations.rs",
+        "src-tauri/src/store/mod.rs",
+        "src-tauri/src/store/segments.rs",
+        "src-tauri/src/store/tasks.rs",
+        "src-tauri/src/store/types.rs",
+        "src-tauri/tests/store.rs"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "engine-harness",
+      "name": "engine-harness",
+      "aliases": [],
+      "module_root": "engine-harness",
+      "entries": [
+        "src-tauri/src/bin/engine_harness.rs"
+      ],
+      "symbols": [
+        {
+          "file": "src-tauri/src/bin/engine_harness.rs",
+          "name": "main",
+          "kind": "function",
+          "visibility": "private"
+        },
+        {
+          "file": "src-tauri/src/bin/engine_harness.rs",
+          "name": "run_command",
+          "kind": "function",
+          "visibility": "private"
+        }
+      ],
+      "related_files": [],
+      "tests": [
+        "src-tauri/tests/engine_recovery.rs",
+        "src-tauri/tests/engine_queue.rs"
+      ],
+      "depends_on": [
+        "engine",
+        "store"
+      ],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Command-line harness for adding, running, inspecting, pausing, resuming, and cancelling one task",
+      "read_scope": [
+        "src-tauri/src/bin/engine_harness.rs",
+        "src-tauri/tests/engine_queue.rs",
+        "src-tauri/tests/engine_recovery.rs"
       ],
       "shared_entry": false
     }

@@ -6,7 +6,7 @@
 //! malformed value falls back to the short exponential delay so a far-future
 //! date can never stall a task.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 
@@ -66,16 +66,11 @@ fn exponential_jitter_ms(attempt: usize) -> u64 {
     full_jitter_ms(cap)
 }
 
-/// A time-derived jitter source keeps the hot path dependency-free while still
-/// spreading concurrent retries instead of synchronizing them.
+/// Full jitter spread retries uniformly over the whole exponential window so
+/// concurrent failures do not synchronize on the same retry instant.
 fn full_jitter_ms(cap: u64) -> u64 {
     if cap == 0 {
         return 0;
     }
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.subsec_nanos() as u64)
-        .unwrap_or(0);
-    let seed = nanos ^ (std::process::id() as u64).rotate_left(17);
-    seed % (cap + 1)
+    rand::random_range(0..=cap)
 }

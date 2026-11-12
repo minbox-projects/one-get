@@ -113,7 +113,7 @@ Phase exit is not claimed. The baseline remains incomplete until the manual acce
 | --- | --- | --- |
 | P0 | No failure observed in automated evidence | No required behavior failed in the local macOS arm64 automated evidence or the hosted CI run. |
 | P1 | Pending | Hosted CI is green; manual macOS arm64 acceptance, Windows install and platform checks, and the macOS x86_64 Intel launch remain pending. |
-| P2 | Open with mitigation | Self-signed certificate trust prompts are expected locally; Windows notifications require the installed NSIS build; the Intel runner is available only until its announced retirement; unsigned local builds can change keychain and notification prompt behavior; macOS deep links require LaunchServices registration from a built app. |
+| P2 | Open with mitigation | Self-signed certificate trust prompts are expected locally; Windows notifications require the installed NSIS build; the Intel runner is available only until its announced retirement; unsigned local builds can change keychain and notification prompt behavior; macOS deep links require LaunchServices registration from a built app; the context indexer discovers only TypeScript, so the Rust engine, store, and harness navigation entries are hand-maintained and a rebuild would drop them. |
 
 The P0 statement is limited to automated evidence. It is not a phase-exit approval and does not cover the pending manual, Windows install, or Intel results.
 
@@ -154,8 +154,11 @@ Test commands ran in `src-tauri/` against local ephemeral-port fixtures; the for
 | `cargo fmt -- --check` | Passed: exit 0. |
 | `cargo check --locked` | Passed: exit 0. |
 | `cargo clippy --all-targets -- -D warnings` | Passed: exit 0. |
+| Repair green transcript (full suite) | Passed: 143 tests across 19 suites with 1 ignored 24-hour soak, exit 0, and `fmt=0 clippy=0 check=0` from `repair-green.log`. New tests cover a missing cookie file, unavailable proxy credentials, cancel during finalization and the finalization race, cross-engine pause and cancel, every harness command, and filename traversal rejection. |
 
 The 2-second ignored-path run is not 24-hour evidence. No public-network dependency is used; every network test reaches a local fixture, proxy, or cookie fixture.
+
+Dependency compatibility: `rand` 0.10.3 and `bytes` 1.12.1 are exact direct pins in `src-tauri/Cargo.toml` (`=0.10.3` and `=1.12.1`) resolved through the committed `Cargo.lock`, and every Rust gate runs with `--locked`. `rand` supplies the full-jitter retry delay and `bytes` supplies the streamed chunk type; neither is an accidental transitive addition.
 
 ### Acceptance criteria
 
@@ -177,10 +180,10 @@ Every criterion below is recorded with its status and the behavior test or recor
 | AC-012 | Passed | `store` task and segment transitions, invalid ranges, and part preservation rules. |
 | AC-013 | Passed | `engine_queue` FIFO at limits one and two, paused slot release, finalizing slot use, and live limit change. |
 | AC-014 | Passed | `engine_queue` pause and resume progress, no rerequest, no-op and invalid-state cases. |
-| AC-015 | Passed | `engine_recovery` changed ETag, Last-Modified, or size, and missing part. |
+| AC-015 | Passed | `engine_recovery` changed ETag, Last-Modified, or size and missing part; `resume_with_missing_cookie_file_fails_with_cookie_file_error_and_keeps_part` and `engine_redaction` `resume_without_proxy_credentials_fails_with_proxy_auth_and_keeps_part` fail with their typed codes and keep the part. |
 | AC-016 | Passed | `engine_recovery` harness kill and restart with bounded re-download and no orphans. |
 | AC-017 | Passed | `engine_recovery` final-only, part-only, neither-file, and leftover cancelled-part cases. |
-| AC-018 | Passed | `engine_queue` and `engine_recovery` cancel scope, repeated cancel, and finalization race. |
+| AC-018 | Passed | `engine_queue` and `engine_recovery` cancel scope, repeated cancel, `cancel_during_finalization_removes_part_without_invalid_state`, and `cancel_racing_finalization_ends_completed_or_cancelled_only`, whose race outcomes are only `completed` or `cancelled`. |
 | AC-019 | Passed | `engine_network` fresh task falls back to one connection after a post-plan 200. |
 | AC-020 | Passed | `engine_network` and `engine_segments` ignore-after-bytes failure with preserved part. |
 | AC-021 | Passed | `engine_network` transient 500, integer `Retry-After`, HTTP-date fallback, and bounded persistent failure. |
@@ -193,9 +196,9 @@ Every criterion below is recorded with its status and the behavior test or recor
 | AC-028 | Passed | `engine_network` truncated body retries from the persisted offset; persistent truncation stops. |
 | AC-029 | Passed | `engine_download` HTML rejection and allowance; checksum mismatch preserves the part and writes no final file. |
 | AC-030 | Passed (macOS, accepted result); Windows compatibility pending | `engine_large` 5 GiB sparse part file with head, middle, and tail writes plus 64-segment arithmetic above 4 GiB; the post-fix green transcript shows 4 `engine_large` and 7 `platform_files` tests passing with exit 0. |
-| AC-031 | Passed | Local range fixture modes, proxy and cookie fixtures, harness commands, and the short soak smoke; no public host. |
+| AC-031 | Passed | Local range fixture modes, proxy and cookie fixtures, all five harness commands (`run`, `status`, `pause`, `resume`, `cancel`) through `harness_status_pause_resume_cancel_controls_persist_transitions`, cross-engine pause and cancel, and the short soak smoke; no public host. |
 | AC-032 | Passed | `engine_redaction` scans logs, the SQLite text dump, and user-facing errors for query tokens, cookies, proxy credentials, and header values; no telemetry destination. |
-| AC-033 | Passed | This section, `MEMORY.md`, `docs/architecture.md`, the implemented architecture note triplet, and navigation validation record completion separately from exit. |
+| AC-033 | Passed | This section, `MEMORY.md`, `docs/architecture.md`, the implemented architecture note triplet, and the validated `engine`, `store`, and `engine-harness` navigation entries record completion separately from exit. The context indexer discovers only TypeScript files, so the Rust entries are maintained by hand and a future `context rebuild` would drop them, requiring them to be reapplied. |
 
 ### AC-026 and AC-032 conflict resolution
 

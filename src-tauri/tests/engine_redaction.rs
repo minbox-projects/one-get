@@ -105,6 +105,34 @@ async fn wait_for_terminal(store: &Database, id: &str, deadline: Duration) -> Ta
     }
 }
 
+async fn wait_for_downloading_progress(
+    store: &Database,
+    id: &str,
+    min_bytes: u64,
+    deadline: Duration,
+) -> u64 {
+    let start = Instant::now();
+    loop {
+        let task = store.task(id).expect("load task").expect("task exists");
+        if task.state == TaskState::Downloading && task.downloaded_bytes >= min_bytes {
+            return task.downloaded_bytes;
+        }
+        if matches!(task.state, TaskState::Failed | TaskState::Cancelled) {
+            panic!(
+                "task {id} reached terminal state {:?} while waiting for progress, error={:?} {:?}",
+                task.state, task.error_code, task.error_message
+            );
+        }
+        if start.elapsed() > deadline {
+            panic!(
+                "timed out waiting for task {id} progress >= {min_bytes}, current {:?} {}",
+                task.state, task.downloaded_bytes
+            );
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
 async fn run_engine_to_terminal(engine: &Engine, store: &Database, id: &str) -> TaskState {
     let ((), state) = tokio::join!(
         async {
@@ -387,4 +415,111 @@ async fn logs_store_and_errors_redact_query_cookies_proxy_and_header_secrets() {
             "the origin must never observe proxy credentials"
         );
     }
+}
+
+#[tokio::test]
+async fn resume_without_proxy_credentials_fails_with_proxy_auth_and_keeps_part() {
+    const PROXY_USER: &str = "oneget-resume-proxy-user";
+    const PROXY_PASSWORD: &str = "oneget-resume-proxy-password-secret";
+
+    let body = non_periodic_bytes(1024 * 1024);
+    let hash = sha256_hex(&body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        ..Default::default()
+    });
+    let proxy = ProxyServer::start(Some(ProxyCredentials {
+        username: PROXY_USER.to_string(),
+        password: PROXY_PASSWORD.to_string(),
+    }));
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    engine
+        .set_proxy(Some(ProxyConfig {
+            url: proxy.url(),
+            username: Some(PROXY_USER.to_string()),
+            password: Some(PROXY_PASSWORD.to_string()),
+        }))
+        .expect("configure the authenticated proxy");
+
+    let id = engine
+        .add_task(make_spec(
+            fixture.url("/proxy-resume.bin"),
+            "proxy-resume.bin",
+            1,
+            Some(hash.clone()),
+            Vec::new(),
+        ))
+        .expect("add task");
+    engine.set_task_rate_limit(&id, Some(256 * 1024));
+
+    tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine.run())
+                .await
+                .expect("run timeout")
+                .expect("run");
+        },
+        async {
+            wait_for_downloading_progress(engine.store(), &id, 64 * 1024, WAIT_TIMEOUT).await;
+            engine.pause(&id).await.expect("pause downloading task");
+            let state = wait_for_terminal(engine.store(), &id, WAIT_TIMEOUT).await;
+            assert_eq!(state, TaskState::Paused, "task must pause before resume");
+        }
+    );
+
+    let part = dest.path().join("proxy-resume.bin.oneget.part");
+    assert!(
+        part.exists(),
+        "paused task must keep its part before resume"
+    );
+    sleep(Duration::from_millis(100)).await;
+    let origin_requests_before = fixture.requests().len();
+
+    engine
+        .set_proxy(Some(ProxyConfig {
+            url: proxy.url(),
+            username: None,
+            password: None,
+        }))
+        .expect("reconfigure the proxy without credentials");
+    engine.resume(&id).await.expect("resume paused task");
+
+    let state = run_engine_to_terminal(&engine, engine.store(), &id).await;
+    assert!(
+        matches!(state, TaskState::Failed | TaskState::Paused),
+        "a proxy that requires authentication must fail or pause the task, got {state:?}"
+    );
+    let task = engine
+        .store()
+        .task(&id)
+        .expect("load task")
+        .expect("task exists");
+    assert_eq!(
+        task.error_code.as_deref(),
+        Some("PROXY_AUTH_REQUIRED"),
+        "missing proxy credentials must report the typed proxy error, got {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert!(
+        part.exists(),
+        "the part must be preserved when proxy authentication is unavailable"
+    );
+    assert!(
+        !dest.path().join("proxy-resume.bin").exists(),
+        "no final file may appear when proxy authentication is unavailable"
+    );
+
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        fixture.requests().len(),
+        origin_requests_before,
+        "the origin fixture must not receive requests after proxy credentials are removed"
+    );
 }

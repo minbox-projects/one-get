@@ -14,6 +14,18 @@ pub enum FilenameTarget {
 /// Maximum sanitized filename length in UTF-8 bytes.
 pub const MAX_FILENAME_BYTES: usize = 200;
 
+/// Naming rules for the target this build runs on.
+#[cfg(windows)]
+pub fn current_target() -> FilenameTarget {
+    FilenameTarget::Windows
+}
+
+/// Naming rules for the target this build runs on.
+#[cfg(not(windows))]
+pub fn current_target() -> FilenameTarget {
+    FilenameTarget::MacOs
+}
+
 /// Normalize and sanitize a user-supplied filename for `target`.
 ///
 /// The result is never empty, never a dot segment, never contains a path

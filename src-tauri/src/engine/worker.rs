@@ -28,7 +28,7 @@ use super::error::EngineError;
 use super::http::{build_client, get_following_redirects_with_cookies};
 use super::part_file::PartFile;
 use super::planner::{plan_segments, SegmentPlan, MIN_SEGMENT_BYTES};
-use super::probe::{probe, ProbeOptions, ProbeOutcome};
+use super::probe::{invalid_response, is_html, probe, ProbeOptions, ProbeOutcome};
 use super::rate_limit::RateLimiter;
 use super::retry;
 use super::state::{SegmentState, TaskState};
@@ -544,6 +544,44 @@ fn persist_target_progress(
     }
 }
 
+/// Map an `INVALID_STATE` failure to the interruption a control from another
+/// engine connection caused.
+///
+/// A second connection can move the task to paused or cancelled while this
+/// engine's workers still hold the row's previous state. Reloading the row
+/// distinguishes that expected race from a real state error.
+fn interruption_flow(
+    store: &Database,
+    task_id: &str,
+    error: &EngineError,
+) -> Result<Option<WorkerFlow>, EngineError> {
+    if error.code() != "INVALID_STATE" {
+        return Ok(None);
+    }
+    Ok(match load_task(store, task_id)?.state {
+        TaskState::Paused => Some(WorkerFlow::Paused),
+        TaskState::Cancelled => Some(WorkerFlow::Cancelled),
+        _ => None,
+    })
+}
+
+/// Persist progress, converting a cross-connection state change into a flow.
+fn persist_target_progress_or_flow(
+    store: &Database,
+    task_id: &str,
+    target: &WriteTarget<'_>,
+    position: u64,
+    segment_start: u64,
+) -> Result<Option<WorkerFlow>, EngineError> {
+    match persist_target_progress(store, task_id, target, position, segment_start) {
+        Ok(()) => Ok(None),
+        Err(error) => match interruption_flow(store, task_id, &error)? {
+            Some(flow) => Ok(Some(flow)),
+            None => Err(error),
+        },
+    }
+}
+
 /// Split the active segment with the most remaining bytes, persist the
 /// shortened segment and its tail in one transaction, and return the tail
 /// index for an idle worker.
@@ -859,15 +897,36 @@ pub(crate) async fn download_task_with_network(
 
     let stored = load_task(store, task_id)?;
     if stored.state == TaskState::Queued {
-        store.transition_task(task_id, TaskState::Queued, TaskState::Connecting)?;
+        if let Err(error) = store.transition_task(task_id, TaskState::Queued, TaskState::Connecting)
+        {
+            let flow = interruption_flow(store, task_id, &error)?;
+            drop(part);
+            if let Some(flow) = flow {
+                return finish_interruption(store, task_id, dest_dir, flow);
+            }
+            return Err(error);
+        }
     }
     let stored = load_task(store, task_id)?;
     if stored.state == TaskState::Connecting {
-        store.transition_task(task_id, TaskState::Connecting, TaskState::Downloading)?;
+        if let Err(error) =
+            store.transition_task(task_id, TaskState::Connecting, TaskState::Downloading)
+        {
+            let flow = interruption_flow(store, task_id, &error)?;
+            drop(part);
+            if let Some(flow) = flow {
+                return finish_interruption(store, task_id, dest_dir, flow);
+            }
+            return Err(error);
+        }
     } else if stored.state != TaskState::Downloading {
-        return Err(EngineError::invalid_state(
-            "only a connecting task can start downloading",
-        ));
+        let error = EngineError::invalid_state("only a connecting task can start downloading");
+        let flow = interruption_flow(store, task_id, &error)?;
+        drop(part);
+        if let Some(flow) = flow {
+            return finish_interruption(store, task_id, dest_dir, flow);
+        }
+        return Err(error);
     }
 
     if let Some(flow) = requested_flow(control) {
@@ -960,12 +1019,13 @@ pub(crate) async fn download_task_with_network(
             metadata.last_modified.as_deref(),
         )?;
         if let Some(total) = metadata.total_bytes {
-            part.file().set_len(total).map_err(|error| {
-                EngineError::new(
-                    "IO_ERROR",
-                    format!("the part file could not be sized: {error}"),
-                )
-            })?;
+            if let Err(error) = part.preallocate(total) {
+                drop(part);
+                if error.code() == "DISK_FULL" {
+                    return pause_disk_full(store, task_id, error);
+                }
+                return Err(mark_failed(store, task_id, error));
+            }
         }
 
         let mut rows = segment_inputs(&plan, metadata.total_bytes);
@@ -1046,23 +1106,30 @@ pub(crate) async fn download_task_with_network(
                 let rows = plain_segment_rows(metadata.total_bytes);
                 store.replace_segments(task_id, &rows)?;
                 if let Some(total) = metadata.total_bytes {
-                    part.file().set_len(total).map_err(|error| {
-                        EngineError::new(
-                            "IO_ERROR",
-                            format!("the part file could not be sized: {error}"),
-                        )
-                    })?;
+                    if let Err(error) = part.preallocate(total) {
+                        drop(part);
+                        if error.code() == "DISK_FULL" {
+                            return pause_disk_full(store, task_id, error);
+                        }
+                        return Err(mark_failed(store, task_id, error));
+                    }
                 }
                 plain = true;
             }
             Err(error) if error.code() == "DISK_FULL" => {
                 // A full device is recoverable: keep the part and progress and
                 // leave the task paused so a later resume can finish the file.
-                persist_pause(store, task_id)?;
-                store.update_task_error(task_id, error.code(), &error.to_string())?;
-                return Ok(TaskRunOutcome::Paused);
+                return pause_disk_full(store, task_id, error);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                let flow = interruption_flow(store, task_id, &error)?;
+                if let Some(flow) = flow {
+                    drop(part);
+                    return finish_interruption(store, task_id, dest_dir, flow);
+                }
+                drop(part);
+                return Err(error);
+            }
         }
     }
 
@@ -1073,10 +1140,28 @@ pub(crate) async fn download_task_with_network(
 
     part.sync_all()
         .map_err(|error| mark_failed(store, task_id, error))?;
-    store.transition_task(task_id, TaskState::Downloading, TaskState::Finalizing)?;
+    if let Err(error) =
+        store.transition_task(task_id, TaskState::Downloading, TaskState::Finalizing)
+    {
+        let flow = interruption_flow(store, task_id, &error)?;
+        drop(part);
+        if let Some(flow) = flow {
+            return finish_interruption(store, task_id, dest_dir, flow);
+        }
+        return Err(error);
+    }
     drop(part);
 
-    let finalized = finalize_task(store, task_id, dest_dir, spec.expected_sha256.as_deref())?;
+    let finalized = match finalize_task(store, task_id, dest_dir, spec.expected_sha256.as_deref()) {
+        Ok(finalized) => finalized,
+        Err(error) => {
+            let flow = interruption_flow(store, task_id, &error)?;
+            if let Some(flow) = flow {
+                return finish_interruption(store, task_id, dest_dir, flow);
+            }
+            return Err(error);
+        }
+    };
     let task = load_task(store, task_id)?;
     let actual_sha256 = task.actual_sha256.ok_or_else(|| {
         EngineError::new(
@@ -1136,11 +1221,14 @@ fn plain_segment_rows(total: Option<u64>) -> Vec<SegmentInput> {
     }
 }
 
-fn part_exists(dest_dir: &Path, filename: &str) -> bool {
-    std::fs::symlink_metadata(dest_dir.join(PartFile::part_name(filename))).is_ok()
+pub(crate) fn part_exists(dest_dir: &Path, filename: &str) -> bool {
+    let Ok(cap) = CapDir::open(dest_dir) else {
+        return false;
+    };
+    cap.exists(&PartFile::part_name(filename))
 }
 
-fn part_missing() -> EngineError {
+pub(crate) fn part_missing() -> EngineError {
     EngineError::new(
         "PART_MISSING",
         "the task's part file is missing and cannot be resumed",
@@ -1156,21 +1244,42 @@ fn finish_interruption(
     match flow {
         WorkerFlow::Paused => {
             persist_pause(store, task_id)?;
+            if load_task(store, task_id)?.state == TaskState::Cancelled {
+                cancel_task(store, task_id, dest_dir)?;
+                return Ok(TaskRunOutcome::Cancelled);
+            }
             Ok(TaskRunOutcome::Paused)
         }
         WorkerFlow::Cancelled => {
             cancel_task(store, task_id, dest_dir)?;
             Ok(TaskRunOutcome::Cancelled)
         }
-        WorkerFlow::Complete => Ok(TaskRunOutcome::Paused),
-        WorkerFlow::RangeFallback => Err(EngineError::new(
+        // `Complete` is never passed here: callers only forward a requested or
+        // interrupted flow. `RangeFallback` is resolved by the pool before an
+        // interruption is reported, so both arms are defensive only.
+        WorkerFlow::Complete | WorkerFlow::RangeFallback => Err(EngineError::new(
             "INTERNAL_ERROR",
-            "a range fallback was not applied before the task finished",
+            "an interruption flow was reported with a non-interruption outcome",
         )),
     }
 }
 
+fn pause_disk_full(
+    store: &Database,
+    task_id: &str,
+    error: EngineError,
+) -> Result<TaskRunOutcome, EngineError> {
+    persist_pause(store, task_id)?;
+    store.update_task_error(task_id, error.code(), &error.to_string())?;
+    Ok(TaskRunOutcome::Paused)
+}
+
 pub(crate) fn persist_pause(store: &Database, task_id: &str) -> Result<(), EngineError> {
+    // A control request from another engine connection may already have moved
+    // the row to cancelled; pausing must not overwrite that decision.
+    if load_task(store, task_id)?.state == TaskState::Cancelled {
+        return Ok(());
+    }
     let segments = store.segments_for_task(task_id)?;
     let inputs: Vec<SegmentProgressInput> = segments
         .iter()
@@ -1189,16 +1298,12 @@ pub(crate) fn cancel_task(
     dest_dir: &Path,
 ) -> Result<(), EngineError> {
     let task = load_task(store, task_id)?;
+    let cap = CapDir::open(dest_dir).map_err(platform_error)?;
     let part_name = PartFile::part_name(&task.filename);
-    match std::fs::remove_file(dest_dir.join(&part_name)) {
+    match cap.remove_file(&part_name) {
         Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(EngineError::new(
-                "IO_ERROR",
-                format!("the part file could not be removed: {error}"),
-            ))
-        }
+        Err(error) if error.code == "not_found" => {}
+        Err(error) => return Err(platform_error(error)),
     }
 
     let task = load_task(store, task_id)?;
@@ -1320,11 +1425,29 @@ pub fn finalize_task(
     }
 
     let chosen = unique_final_name(&cap, &task.filename);
-    cap.replace_blocking(&part_name, &chosen)
-        .map_err(platform_error)
-        .map_err(|error| mark_failed(store, task_id, error))?;
+    if let Err(error) = cap.replace_blocking(&part_name, &chosen) {
+        // A cancel from another engine connection may remove the part after it
+        // was hashed. The cancellation stays authoritative and no file is left.
+        if load_task(store, task_id)?.state == TaskState::Cancelled {
+            let _ = cap.remove_file(&part_name);
+            return Err(EngineError::invalid_state(
+                "the task was cancelled during finalization",
+            ));
+        }
+        return Err(mark_failed(store, task_id, platform_error(error)));
+    }
     cap.sync_dir().map_err(platform_error)?;
-    store.complete_task(task_id, Some(&actual))?;
+    if let Err(error) = store.complete_task(task_id, Some(&actual)) {
+        if error.code() == "INVALID_STATE"
+            && load_task(store, task_id)?.state == TaskState::Cancelled
+        {
+            // The rename won the race but the row was cancelled before it could
+            // be marked completed, so undo the final file this call created.
+            let _ = cap.remove_file(&chosen);
+            let _ = cap.remove_file(&part_name);
+        }
+        return Err(error);
+    }
 
     Ok(FinalizeOutcome {
         final_path: dest_dir.join(chosen),
@@ -1665,7 +1788,11 @@ async fn stream_request(
 
     loop {
         if let Some(flow) = requested_flow(control) {
-            persist_target_progress(store, task_id, target, position, segment_start)?;
+            if let Some(flow) =
+                persist_target_progress_or_flow(store, task_id, target, position, segment_start)?
+            {
+                return Ok((position, flow, range_total));
+            }
             return Ok((position, flow, range_total));
         }
         if matches!(request, RequestShape::Plain) {
@@ -1704,7 +1831,15 @@ async fn stream_request(
         } = current
         {
             if start >= end {
-                persist_target_progress(store, task_id, target, position, segment_start)?;
+                if let Some(flow) = persist_target_progress_or_flow(
+                    store,
+                    task_id,
+                    target,
+                    position,
+                    segment_start,
+                )? {
+                    return Ok((position, flow, range_total));
+                }
                 return Ok((position, WorkerFlow::Complete, range_total));
             }
         }
@@ -1712,7 +1847,15 @@ async fn stream_request(
         let mut send_attempts = 0usize;
         let response = loop {
             if let Some(flow) = requested_flow(control) {
-                persist_target_progress(store, task_id, target, position, segment_start)?;
+                if let Some(flow) = persist_target_progress_or_flow(
+                    store,
+                    task_id,
+                    target,
+                    position,
+                    segment_start,
+                )? {
+                    return Ok((position, flow, range_total));
+                }
                 return Ok((position, flow, range_total));
             }
             send_attempts += 1;
@@ -1795,22 +1938,29 @@ async fn stream_request(
         let mut interrupted = false;
         loop {
             if let Some(flow) = requested_flow(control) {
-                persist_target_progress(store, task_id, target, position, segment_start)?;
+                if let Some(flow) = persist_target_progress_or_flow(
+                    store,
+                    task_id,
+                    target,
+                    position,
+                    segment_start,
+                )? {
+                    return Ok((position, flow, range_total));
+                }
                 return Ok((position, flow, range_total));
             }
             let Some(chunk) = body.next().await else {
                 break;
             };
-            let Ok(chunk) = chunk else {
-                interrupted = true;
-                break;
+            let chunk: bytes::Bytes = match chunk {
+                Ok(chunk) => chunk,
+                Err(_) => {
+                    interrupted = true;
+                    break;
+                }
             };
             match target {
-                WriteTarget::Static {
-                    progress,
-                    progress_index,
-                    limit_end,
-                } => {
+                WriteTarget::Static { limit_end, .. } => {
                     let mut bytes: &[u8] = &chunk;
                     if let Some(end) = limit_end {
                         let remaining = end.saturating_sub(position);
@@ -1824,20 +1974,30 @@ async fn stream_request(
                     if !bytes.is_empty() {
                         network.pace(bytes.len()).await;
                         if let Err(error) = part.write_at(position, bytes) {
-                            persist_target_progress(
+                            if let Some(flow) = persist_target_progress_or_flow(
                                 store,
                                 task_id,
                                 target,
                                 position,
                                 segment_start,
-                            )?;
+                            )? {
+                                return Ok((position, flow, range_total));
+                            }
                             return Err(error);
                         }
                         position += bytes.len() as u64;
                     }
                     let downloaded = position.saturating_sub(segment_start);
                     if downloaded >= last_persisted + PROGRESS_INTERVAL {
-                        persist_progress(store, task_id, progress, *progress_index, downloaded)?;
+                        if let Some(flow) = persist_target_progress_or_flow(
+                            store,
+                            task_id,
+                            target,
+                            position,
+                            segment_start,
+                        )? {
+                            return Ok((position, flow, range_total));
+                        }
                         last_persisted = downloaded;
                     }
                     if limit_end.is_some_and(|end| position >= end) {
@@ -1854,13 +2014,15 @@ async fn stream_request(
                         {
                             Ok(write) => write,
                             Err(error) => {
-                                persist_target_progress(
+                                if let Some(flow) = persist_target_progress_or_flow(
                                     store,
                                     task_id,
                                     target,
                                     position,
                                     segment_start,
-                                )?;
+                                )? {
+                                    return Ok((position, flow, range_total));
+                                }
                                 return Err(error);
                             }
                         };
@@ -1870,7 +2032,15 @@ async fn stream_request(
                             position += take as u64;
                             let downloaded = position.saturating_sub(segment_start);
                             if downloaded >= last_persisted + PROGRESS_INTERVAL {
-                                persist_registry_progress(store, task_id, registry)?;
+                                if let Some(flow) = persist_target_progress_or_flow(
+                                    store,
+                                    task_id,
+                                    target,
+                                    position,
+                                    segment_start,
+                                )? {
+                                    return Ok((position, flow, range_total));
+                                }
                                 last_persisted = downloaded;
                             }
                             if truncated {
@@ -1886,7 +2056,11 @@ async fn stream_request(
             }
         }
 
-        persist_target_progress(store, task_id, target, position, segment_start)?;
+        if let Some(flow) =
+            persist_target_progress_or_flow(store, task_id, target, position, segment_start)?
+        {
+            return Ok((position, flow, range_total));
+        }
 
         if !interrupted {
             let limit = match target {
@@ -2234,14 +2408,6 @@ fn header_text(response: &reqwest::Response, name: reqwest::header::HeaderName) 
         .map(str::to_string)
 }
 
-fn is_html(content_type: &str) -> bool {
-    content_type
-        .split(';')
-        .next()
-        .map(|value| value.trim().eq_ignore_ascii_case("text/html"))
-        .unwrap_or(false)
-}
-
 fn status_error(status: StatusCode) -> EngineError {
     match status.as_u16() {
         401 | 403 => EngineError::new("AUTH_REQUIRED", "the server requires authorization"),
@@ -2264,10 +2430,6 @@ fn response_status_error(response: &reqwest::Response) -> EngineError {
     error
 }
 
-fn invalid_response() -> EngineError {
-    EngineError::new("INVALID_RESPONSE", "the server response was malformed")
-}
-
 fn checksum_mismatch(message: &str) -> EngineError {
     EngineError::new("CHECKSUM_MISMATCH", message)
 }
@@ -2286,7 +2448,7 @@ pub(crate) fn mark_failed(store: &Database, task_id: &str, error: EngineError) -
     error
 }
 
-fn load_task(store: &Database, task_id: &str) -> Result<Task, EngineError> {
+pub(crate) fn load_task(store: &Database, task_id: &str) -> Result<Task, EngineError> {
     store
         .task(task_id)?
         .ok_or_else(|| EngineError::new("TASK_NOT_FOUND", "the requested task does not exist"))
@@ -2351,7 +2513,7 @@ fn split_filename(filename: &str) -> (String, String) {
 }
 
 fn exists(cap: &CapDir, name: &str) -> bool {
-    std::fs::symlink_metadata(cap.root().join(name)).is_ok()
+    cap.exists(name)
 }
 
 fn file_len(cap: &CapDir, name: &str) -> Result<u64, EngineError> {
