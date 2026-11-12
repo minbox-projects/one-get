@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::platform::files::CapDir;
 use crate::platform::PlatformError;
-use crate::store::types::{SegmentInput, SegmentProgressInput, Task};
+use crate::store::types::{Segment, SegmentInput, SegmentProgressInput, Task};
 use crate::store::Database;
 
 use super::error::EngineError;
@@ -30,7 +30,11 @@ use super::probe::{probe, ProbeOptions, ProbeOutcome};
 use super::state::{SegmentState, TaskState};
 
 /// Progress is persisted at least once per this many downloaded bytes.
-const PROGRESS_INTERVAL: u64 = 1024 * 1024;
+///
+/// One read chunk keeps the persisted snapshot close to the bytes actually
+/// written, which bounds crash re-download and makes progress observable while
+/// a multi-connection task is still running.
+const PROGRESS_INTERVAL: u64 = READ_CHUNK_BYTES;
 
 /// Each ranged segment is fetched as bounded reads of this size.
 const READ_CHUNK_BYTES: u64 = 128 * 1024;
@@ -344,12 +348,16 @@ pub async fn download_once(
     })
 }
 
-/// Execute one claimed task, resuming persisted segments when present.
+/// Execute one claimed task, probing, planning, and resuming segments.
 ///
-/// A pause or cancel request is cooperative: workers stop at the next streamed
-/// chunk, persist their progress, and the task is left paused or cancelled
-/// before this function returns. Real download failures mark the task failed
-/// and preserve its part file.
+/// A fresh task probes the remote file, records the discovered metadata, plans
+/// and persists its segments, preallocates the part file, and runs up to the
+/// configured number of workers. A resumed task re-probes the remote file and
+/// rejects changed metadata before reusing persisted segment ranges and
+/// offsets. A pause or cancel request is cooperative: workers stop at the next
+/// streamed chunk, persist progress, and the task is left paused or cancelled
+/// before this function returns. Real failures mark the task failed and
+/// preserve its part file.
 pub async fn download_task(
     store: &Database,
     task_id: &str,
@@ -363,22 +371,21 @@ pub async fn download_task(
 
     let task = load_task(store, task_id)?;
 
-    let mut segments = store.segments_for_task(task_id)?;
-    if segments.is_empty() {
-        store.replace_segments(
-            task_id,
-            &[SegmentInput {
-                index: 0,
-                start: 0,
-                end: OPEN_ENDED_END.max(2),
-                downloaded: 0,
-                state: SegmentState::Pending,
-            }],
-        )?;
-        segments = store.segments_for_task(task_id)?;
+    let mut persisted = store.segments_for_task(task_id)?;
+    if !persisted.is_empty() && !part_exists(dest_dir, &spec.filename) {
+        return Err(mark_failed(store, task_id, part_missing()));
     }
 
-    if task.state == TaskState::Queued {
+    // The part file is created before the remote metadata is revalidated so a
+    // scheduled task has a durable destination as soon as it reports active
+    // work. A resumed part is opened without truncating persisted bytes.
+    let cap = CapDir::open(dest_dir).map_err(platform_error)?;
+    let part_name = PartFile::part_name(&spec.filename);
+    let part = PartFile::create(&cap, &spec.filename, None)?;
+    store.record_part_path(task_id, &part_name)?;
+
+    let stored = load_task(store, task_id)?;
+    if stored.state == TaskState::Queued {
         store.transition_task(task_id, TaskState::Queued, TaskState::Connecting)?;
     }
     let stored = load_task(store, task_id)?;
@@ -391,14 +398,130 @@ pub async fn download_task(
     }
 
     if let Some(flow) = requested_flow(control) {
+        drop(part);
         return finish_interruption(store, task_id, dest_dir, flow);
     }
 
-    let cap = CapDir::open(dest_dir).map_err(platform_error)?;
-    let part_name = PartFile::part_name(&spec.filename);
-    let part = PartFile::create(&cap, &spec.filename, None)?;
-    store.record_part_path(task_id, &part_name)?;
+    let probe_start = persisted
+        .iter()
+        .find(|segment| segment.state != SegmentState::Done)
+        .map(|segment| segment.start.saturating_add(segment.downloaded_bytes))
+        .unwrap_or(0);
+    let probe_start = match task.total_bytes {
+        Some(total) if total > 0 && probe_start >= total => total - 1,
+        _ => probe_start,
+    };
 
+    let probe_client = build_client()?;
+    let mut probe_attempts = 0;
+    let (metadata, probe_bytes) = loop {
+        probe_attempts += 1;
+        match probe_for_download(&probe_client, spec, probe_start).await {
+            // A range probe that receives a non-range response is retried a
+            // bounded number of times: a transient server or proxy error can
+            // look like a server that ignores ranges, and a genuine non-range
+            // server still falls back to a plain download after the bound.
+            Ok((metadata, bytes)) if metadata.range_supported || probe_attempts >= 3 => {
+                break (metadata, bytes);
+            }
+            Ok(_) => {
+                tokio::task::yield_now().await;
+            }
+            Err(error) if error.is_retryable() && probe_attempts < 4 => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => {
+                drop(part);
+                return Err(mark_failed(store, task_id, error));
+            }
+        }
+    };
+
+    let mut resuming = !persisted.is_empty();
+    if resuming {
+        if task.etag.as_deref() != metadata.etag.as_deref()
+            || task.last_modified.as_deref() != metadata.last_modified.as_deref()
+            || task.total_bytes != metadata.total_bytes
+        {
+            drop(part);
+            return Err(mark_failed(
+                store,
+                task_id,
+                EngineError::new(
+                    "FILE_CHANGED",
+                    "the remote file changed since the task was paused",
+                ),
+            ));
+        }
+
+        let plan_is_usable =
+            metadata.range_supported && segments_cover(&persisted, metadata.total_bytes);
+        if !plan_is_usable {
+            persisted.clear();
+        }
+        resuming = !persisted.is_empty();
+    }
+
+    let is_fresh = !resuming;
+    let mut first_byte_write = None;
+    if is_fresh {
+        let plan = plan_segments(
+            metadata.total_bytes,
+            metadata.range_supported,
+            spec.connections,
+        )
+        .map_err(|error| mark_failed(store, task_id, error))?;
+        // A known empty total finalizes without workers regardless of ranges.
+        let plan = if metadata.total_bytes == Some(0) {
+            SegmentPlan::Ranged(Vec::new())
+        } else {
+            plan
+        };
+        store.record_discovered_metadata(
+            task_id,
+            metadata.total_bytes,
+            metadata.etag.as_deref(),
+            metadata.last_modified.as_deref(),
+        )?;
+        if let Some(total) = metadata.total_bytes {
+            part.file().set_len(total).map_err(|error| {
+                EngineError::new(
+                    "IO_ERROR",
+                    format!("the part file could not be sized: {error}"),
+                )
+            })?;
+        }
+
+        let mut rows = segment_inputs(&plan, metadata.total_bytes);
+        if let (Some(bytes), SegmentPlan::Ranged(segments)) = (probe_bytes.as_ref(), &plan) {
+            if let (Some(first), Some(row)) = (segments.first(), rows.first_mut()) {
+                let available = first.end.saturating_sub(first.start);
+                let take = (bytes.len() as u64).min(available);
+                if take > 0 {
+                    row.downloaded = take;
+                    row.state = if take >= available {
+                        SegmentState::Done
+                    } else {
+                        SegmentState::Pending
+                    };
+                    first_byte_write = Some((bytes[..take as usize].to_vec(), first.start));
+                }
+            }
+        }
+        store.replace_segments(task_id, &rows)?;
+    }
+
+    if let Some(flow) = requested_flow(control) {
+        drop(part);
+        return finish_interruption(store, task_id, dest_dir, flow);
+    }
+
+    if let Some((bytes, offset)) = first_byte_write {
+        part.write_at(offset, &bytes)?;
+    }
+
+    let client = build_client()?;
+    let segments = store.segments_for_task(task_id)?;
     let mut values = vec![0u64; segments.len()];
     for segment in &segments {
         if let Some(slot) = values.get_mut(segment.index as usize) {
@@ -421,7 +544,6 @@ pub async fn download_task(
         }
     }
 
-    let client = build_client()?;
     let pending: Vec<_> = segments
         .iter()
         .filter(|segment| segment.state != SegmentState::Done)
@@ -430,15 +552,27 @@ pub async fn download_task(
     if !pending.is_empty() {
         let concurrency = (spec.connections as usize).max(1).min(pending.len());
         let mut results = stream::iter(pending.into_iter().map(|segment| {
-            let start = segment.start.saturating_add(segment.downloaded_bytes);
-            let (request, limit_end) = if segment.end >= OPEN_ENDED_END {
-                (RequestShape::Range { start, end: None }, None)
+            let downloaded = segment.downloaded_bytes;
+            let (request, progress_start, limit_end) = if !metadata.range_supported {
+                // Without usable ranges the only safe request is a plain body
+                // from the beginning; any persisted bytes are overwritten.
+                (RequestShape::Plain, 0, metadata.total_bytes)
+            } else if segment.end >= OPEN_ENDED_END {
+                (
+                    RequestShape::Range {
+                        start: segment.start.saturating_add(downloaded),
+                        end: None,
+                    },
+                    segment.start,
+                    None,
+                )
             } else {
                 (
                     RequestShape::Range {
-                        start,
+                        start: segment.start.saturating_add(downloaded),
                         end: Some(segment.end),
                     },
+                    segment.start,
                     Some(segment.end),
                 )
             };
@@ -452,7 +586,7 @@ pub async fn download_task(
                 control,
                 request,
                 segment.index,
-                segment.start,
+                progress_start,
                 limit_end,
             )
         }))
@@ -506,6 +640,35 @@ pub async fn download_task(
         total_bytes,
         final_path: finalized.final_path,
     }))
+}
+
+fn segments_cover(segments: &[Segment], total: Option<u64>) -> bool {
+    let mut expected = 0u64;
+    for segment in segments {
+        if segment.start != expected || segment.end <= segment.start {
+            return false;
+        }
+        if segment.downloaded_bytes > segment.end - segment.start {
+            return false;
+        }
+        expected = segment.end;
+    }
+
+    match total {
+        Some(total) => expected == total,
+        None => segments.len() == 1 && expected >= OPEN_ENDED_END,
+    }
+}
+
+fn part_exists(dest_dir: &Path, filename: &str) -> bool {
+    std::fs::symlink_metadata(dest_dir.join(PartFile::part_name(filename))).is_ok()
+}
+
+fn part_missing() -> EngineError {
+    EngineError::new(
+        "PART_MISSING",
+        "the task's part file is missing and cannot be resumed",
+    )
 }
 
 fn finish_interruption(
@@ -604,21 +767,36 @@ pub fn finalize_task(
     if !part_exists {
         if final_exists {
             let actual = hash_cap_file(&cap, &task.filename)?;
-            if let Some(total) = task.total_bytes {
-                if file_len(&cap, &task.filename)? != total {
-                    return Err(mark_failed(
-                        store,
-                        task_id,
-                        checksum_mismatch("the final file size does not match the recorded total"),
-                    ));
+            match task.actual_sha256.as_deref() {
+                Some(stored) => {
+                    if !hash_matches(&actual, stored) {
+                        return Err(mark_failed(
+                            store,
+                            task_id,
+                            checksum_mismatch("the final file does not match the stored SHA-256"),
+                        ));
+                    }
                 }
-            }
-            if expected.is_some_and(|expected| !hash_matches(&actual, expected)) {
-                return Err(mark_failed(
-                    store,
-                    task_id,
-                    checksum_mismatch("the final file does not match the expected SHA-256"),
-                ));
+                None => {
+                    if let Some(total) = task.total_bytes {
+                        if file_len(&cap, &task.filename)? != total {
+                            return Err(mark_failed(
+                                store,
+                                task_id,
+                                checksum_mismatch(
+                                    "the final file size does not match the recorded total",
+                                ),
+                            ));
+                        }
+                    }
+                    if expected.is_some_and(|expected| !hash_matches(&actual, expected)) {
+                        return Err(mark_failed(
+                            store,
+                            task_id,
+                            checksum_mismatch("the final file does not match the expected SHA-256"),
+                        ));
+                    }
+                }
             }
             store.record_actual_hash(task_id, &actual)?;
             store.complete_task(task_id, Some(&actual))?;
@@ -641,6 +819,17 @@ pub fn finalize_task(
     let actual = part.try_sha256()?;
     drop(part);
 
+    if task
+        .actual_sha256
+        .as_deref()
+        .is_some_and(|stored| !hash_matches(&actual, stored))
+    {
+        return Err(mark_failed(
+            store,
+            task_id,
+            checksum_mismatch("the downloaded bytes do not match the stored SHA-256"),
+        ));
+    }
     store.record_actual_hash(task_id, &actual)?;
     if expected.is_some_and(|expected| !hash_matches(&actual, expected)) {
         return Err(mark_failed(
@@ -747,72 +936,24 @@ async fn stream_segment(
     segment_start: u64,
     limit_end: Option<u64>,
 ) -> Result<WorkerFlow, EngineError> {
-    match request {
-        RequestShape::Range { start, end } => {
-            let mut position = start;
-            loop {
-                if let Some(flow) = requested_flow(control) {
-                    return Ok(flow);
-                }
-                let chunk_end = match end {
-                    Some(end) if position >= end => return Ok(WorkerFlow::Complete),
-                    Some(end) => (position + READ_CHUNK_BYTES).min(end),
-                    None => position + READ_CHUNK_BYTES,
-                };
-                let chunk = RequestShape::Range {
-                    start: position,
-                    end: Some(chunk_end),
-                };
-                let (written, flow, total) = stream_request(
-                    client,
-                    store,
-                    task_id,
-                    part,
-                    progress,
-                    spec,
-                    control,
-                    chunk,
-                    Some(chunk_end),
-                    segment_start,
-                    progress_index,
-                )
-                .await?;
-                if flow != WorkerFlow::Complete {
-                    return Ok(flow);
-                }
-                if end.is_some_and(|end| written >= end) {
-                    return Ok(WorkerFlow::Complete);
-                }
-                if total.is_some_and(|total| written >= total) {
-                    return Ok(WorkerFlow::Complete);
-                }
-                if written <= position {
-                    return Err(EngineError::retryable(
-                        "INCOMPLETE_BODY",
-                        "the server closed the response before the range was complete",
-                    ));
-                }
-                position = written;
-            }
-        }
-        request => {
-            let (_, flow, _) = stream_request(
-                client,
-                store,
-                task_id,
-                part,
-                progress,
-                spec,
-                control,
-                request,
-                limit_end,
-                segment_start,
-                progress_index,
-            )
-            .await?;
-            Ok(flow)
-        }
-    }
+    // A segment is fetched with one ranged request and streamed in place.
+    // Progress is persisted from the response stream, and a pause or cancel is
+    // honoured before the next chunk is read.
+    let (_, flow, _) = stream_request(
+        client,
+        store,
+        task_id,
+        part,
+        progress,
+        spec,
+        control,
+        request,
+        limit_end,
+        segment_start,
+        progress_index,
+    )
+    .await?;
+    Ok(flow)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -829,117 +970,158 @@ async fn stream_request(
     segment_start: u64,
     progress_index: usize,
 ) -> Result<(u64, WorkerFlow, Option<u64>), EngineError> {
-    let expected_start = match request {
+    let mut position = match request {
         RequestShape::Range { start, .. } => start,
         RequestShape::Plain => 0,
     };
     let mut range_total = None;
-    let mut attempts = 0usize;
-    let response = loop {
-        if let Some(flow) = requested_flow(control) {
-            return Ok((expected_start, flow, range_total));
-        }
-        attempts += 1;
-        let headers = request_headers(spec, request.range_header())?;
-        let (response, _final_url) = match get_following_redirects(client, &spec.url, headers).await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                if request.expects_partial() && attempts < RANGE_REQUEST_ATTEMPTS {
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                    continue;
-                }
-                return Err(error);
-            }
-        };
-        let status = response.status();
-
-        if request.expects_partial() {
-            if status == StatusCode::OK {
-                if attempts < RANGE_REQUEST_ATTEMPTS {
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                    continue;
-                }
-                return Err(EngineError::new(
-                    "RANGE_IGNORED",
-                    "the server ignored the requested byte range",
-                ));
-            }
-            if status != StatusCode::PARTIAL_CONTENT {
-                return Err(status_error(status));
-            }
-            let (start, total) = parse_content_range(&response)?;
-            if start != expected_start {
-                return Err(EngineError::new(
-                    "RANGE_MISMATCH",
-                    "the server returned a different range than requested",
-                ));
-            }
-            range_total = total;
-        } else if status != StatusCode::OK {
-            return Err(status_error(status));
-        } else {
-            range_total = response.content_length();
-        }
-        break response;
-    };
-
-    let write_start = match request {
-        RequestShape::Range { start, .. } => start,
-        RequestShape::Plain => 0,
-    };
-    let mut position = write_start;
     let mut last_persisted = 0u64;
-    let mut body = response.bytes_stream();
+    let mut retries = 0usize;
 
     loop {
         if let Some(flow) = requested_flow(control) {
-            let downloaded = position - segment_start;
-            persist_progress(store, task_id, progress, progress_index, downloaded)?;
+            persist_progress(
+                store,
+                task_id,
+                progress,
+                progress_index,
+                position.saturating_sub(segment_start),
+            )?;
             return Ok((position, flow, range_total));
         }
-        let Some(chunk) = body.next().await else {
-            break;
+        if matches!(request, RequestShape::Plain) {
+            // A plain response always starts at byte zero; restarting
+            // overwrites earlier bytes instead of appending them.
+            position = 0;
+        }
+        let current = match request {
+            RequestShape::Range { end, .. } => RequestShape::Range {
+                start: position,
+                end,
+            },
+            RequestShape::Plain => RequestShape::Plain,
         };
-        let chunk = chunk.map_err(|_| {
-            EngineError::retryable("NETWORK_INTERRUPTED", "the response stream was interrupted")
-        })?;
-        let mut bytes: &[u8] = &chunk;
-        if let Some(end) = limit_end {
-            let remaining = end.saturating_sub(position);
-            if remaining == 0 {
+
+        let mut send_attempts = 0usize;
+        let response = loop {
+            if let Some(flow) = requested_flow(control) {
+                return Ok((position, flow, range_total));
+            }
+            send_attempts += 1;
+            let headers = request_headers(spec, current.range_header())?;
+            let (response, _final_url) =
+                match get_following_redirects(client, &spec.url, headers).await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if current.expects_partial() && send_attempts < RANGE_REQUEST_ATTEMPTS {
+                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                };
+            let status = response.status();
+            if current.expects_partial() {
+                if status == StatusCode::OK {
+                    if send_attempts < RANGE_REQUEST_ATTEMPTS {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        continue;
+                    }
+                    return Err(EngineError::new(
+                        "RANGE_IGNORED",
+                        "the server ignored the requested byte range",
+                    ));
+                }
+                if status != StatusCode::PARTIAL_CONTENT {
+                    return Err(status_error(status));
+                }
+                let (start, total) = parse_content_range(&response)?;
+                if start != position {
+                    return Err(EngineError::new(
+                        "RANGE_MISMATCH",
+                        "the server returned a different range than requested",
+                    ));
+                }
+                range_total = total;
+            } else if status != StatusCode::OK {
+                return Err(status_error(status));
+            } else {
+                range_total = response.content_length();
+            }
+            break response;
+        };
+
+        let mut body = response.bytes_stream();
+        let mut interrupted = false;
+        loop {
+            if let Some(flow) = requested_flow(control) {
+                persist_progress(
+                    store,
+                    task_id,
+                    progress,
+                    progress_index,
+                    position.saturating_sub(segment_start),
+                )?;
+                return Ok((position, flow, range_total));
+            }
+            let Some(chunk) = body.next().await else {
+                break;
+            };
+            let Ok(chunk) = chunk else {
+                interrupted = true;
+                break;
+            };
+            let mut bytes: &[u8] = &chunk;
+            if let Some(end) = limit_end {
+                let remaining = end.saturating_sub(position);
+                if remaining == 0 {
+                    break;
+                }
+                if bytes.len() as u64 > remaining {
+                    bytes = &bytes[..remaining as usize];
+                }
+            }
+            if !bytes.is_empty() {
+                part.write_at(position, bytes)?;
+                position += bytes.len() as u64;
+            }
+            let downloaded = position.saturating_sub(segment_start);
+            if downloaded >= last_persisted + PROGRESS_INTERVAL {
+                persist_progress(store, task_id, progress, progress_index, downloaded)?;
+                last_persisted = downloaded;
+            }
+            if limit_end.is_some_and(|end| position >= end) {
                 break;
             }
-            if bytes.len() as u64 > remaining {
-                bytes = &bytes[..remaining as usize];
+        }
+
+        let downloaded = position.saturating_sub(segment_start);
+        persist_progress(store, task_id, progress, progress_index, downloaded)?;
+
+        if !interrupted {
+            if let Some(end) = limit_end {
+                let reached_total = range_total.is_some_and(|total| position >= total);
+                if position >= end || reached_total {
+                    return Ok((position, WorkerFlow::Complete, range_total));
+                }
+            } else {
+                return Ok((position, WorkerFlow::Complete, range_total));
             }
         }
-        if !bytes.is_empty() {
-            part.write_at(position, bytes)?;
-            position += bytes.len() as u64;
-        }
-        let downloaded = position - segment_start;
-        if downloaded >= last_persisted + PROGRESS_INTERVAL {
-            persist_progress(store, task_id, progress, progress_index, downloaded)?;
-            last_persisted = downloaded;
-        }
-        if limit_end.is_some_and(|end| position >= end) {
-            break;
-        }
-    }
 
-    if let Some(end) = limit_end {
-        let reached_total = range_total.is_some_and(|total| position >= total);
-        if position < end && !reached_total {
+        retries += 1;
+        if retries >= RANGE_REQUEST_ATTEMPTS {
             return Err(EngineError::retryable(
-                "INCOMPLETE_BODY",
-                "the server closed the response before the range was complete",
+                if interrupted {
+                    "NETWORK_INTERRUPTED"
+                } else {
+                    "INCOMPLETE_BODY"
+                },
+                "the response ended before the range was complete",
             ));
         }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    let downloaded = position - segment_start;
-    persist_progress(store, task_id, progress, progress_index, downloaded)?;
-    Ok((position, WorkerFlow::Complete, range_total))
 }
 
 fn request_headers(spec: &DownloadSpec, range: Option<String>) -> Result<HeaderMap, EngineError> {
@@ -1041,6 +1223,95 @@ fn segment_inputs(plan: &SegmentPlan, total: Option<u64>) -> Vec<SegmentInput> {
     }
 }
 
+/// Probe a task's remote file with a one-byte request at `start`.
+///
+/// The response body is consumed only when it is a single ranged byte, so a
+/// fresh download can persist that byte and resume its workers at the next
+/// offset without re-requesting byte zero. A 200 response is classified as a
+/// non-range download and its body is not consumed.
+async fn probe_for_download(
+    client: &Client,
+    spec: &DownloadSpec,
+    start: u64,
+) -> Result<(DownloadMetadata, Option<Vec<u8>>), EngineError> {
+    let headers = request_headers(spec, Some(format!("bytes={start}-{start}")))?;
+    let (response, _final_url) = get_following_redirects(client, &spec.url, headers).await?;
+
+    let content_type = header_text(&response, CONTENT_TYPE);
+    if !spec.allow_html && content_type.as_deref().is_some_and(is_html) {
+        return Err(EngineError::new(
+            "HTML_RESPONSE",
+            "the server returned an HTML page instead of a downloadable file",
+        ));
+    }
+
+    let etag = header_text(&response, ETAG);
+    let last_modified = header_text(&response, LAST_MODIFIED);
+    match response.status() {
+        StatusCode::PARTIAL_CONTENT => {
+            let (range_start, total) = parse_content_range(&response)?;
+            if range_start != start {
+                return Err(EngineError::new(
+                    "RANGE_MISMATCH",
+                    "the server returned a different range than requested",
+                ));
+            }
+            let body = response.bytes().await.map_err(|_| {
+                EngineError::retryable(
+                    "NETWORK_INTERRUPTED",
+                    "the probe response body was interrupted",
+                )
+            })?;
+            Ok((
+                DownloadMetadata {
+                    total_bytes: total,
+                    range_supported: true,
+                    etag,
+                    last_modified,
+                },
+                Some(body.to_vec()),
+            ))
+        }
+        StatusCode::OK => Ok((
+            DownloadMetadata {
+                total_bytes: response.content_length(),
+                range_supported: false,
+                etag,
+                last_modified,
+            },
+            None,
+        )),
+        StatusCode::RANGE_NOT_SATISFIABLE => Ok((
+            DownloadMetadata {
+                total_bytes: Some(parse_unsatisfied_total(&response)?),
+                range_supported: false,
+                etag,
+                last_modified,
+            },
+            None,
+        )),
+        status => Err(status_error(status)),
+    }
+}
+
+fn parse_unsatisfied_total(response: &reqwest::Response) -> Result<u64, EngineError> {
+    let value = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(invalid_response)?;
+    let (unit, rest) = value.split_once(' ').ok_or_else(invalid_response)?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return Err(invalid_response());
+    }
+    rest.trim()
+        .strip_prefix("*/")
+        .ok_or_else(invalid_response)?
+        .trim()
+        .parse()
+        .map_err(|_| invalid_response())
+}
+
 async fn probe_zero_length(
     url: &str,
     options: &ProbeOptions,
@@ -1122,7 +1393,7 @@ fn hash_matches(actual: &str, expected: &str) -> bool {
     actual.eq_ignore_ascii_case(expected.trim())
 }
 
-fn mark_failed(store: &Database, task_id: &str, error: EngineError) -> EngineError {
+pub(crate) fn mark_failed(store: &Database, task_id: &str, error: EngineError) -> EngineError {
     if let Ok(Some(task)) = store.task(task_id) {
         if task.state.can_transition_to(TaskState::Failed) {
             let _ = store.transition_task(task_id, task.state, TaskState::Failed);

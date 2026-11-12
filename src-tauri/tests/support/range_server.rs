@@ -93,6 +93,9 @@ struct SharedState {
     probe206_seen: bool,
     runtime_status_override: Option<Option<u16>>,
     runtime_rate_limit_429: Option<bool>,
+    runtime_etag: Option<Option<String>>,
+    runtime_last_modified: Option<Option<String>>,
+    runtime_total: Option<u64>,
 }
 
 pub struct RangeServer {
@@ -179,6 +182,36 @@ impl RangeServer {
     /// Override rate limiting for subsequent requests.
     pub fn set_runtime_rate_limit_429(&self, enabled: bool) {
         self.state.lock().expect("lock").runtime_rate_limit_429 = Some(enabled);
+    }
+
+    /// Override the ETag header for subsequent responses. `None` omits the header.
+    pub fn set_runtime_etag(&self, etag: Option<String>) {
+        self.state.lock().expect("lock").runtime_etag = Some(etag);
+    }
+
+    /// Clear any runtime ETag override and fall back to the fixture config.
+    pub fn clear_runtime_etag(&self) {
+        self.state.lock().expect("lock").runtime_etag = None;
+    }
+
+    /// Override the Last-Modified header for subsequent responses. `None` omits the header.
+    pub fn set_runtime_last_modified(&self, last_modified: Option<String>) {
+        self.state.lock().expect("lock").runtime_last_modified = Some(last_modified);
+    }
+
+    /// Clear any runtime Last-Modified override and fall back to the fixture config.
+    pub fn clear_runtime_last_modified(&self) {
+        self.state.lock().expect("lock").runtime_last_modified = None;
+    }
+
+    /// Override the effective total byte size reported in subsequent responses.
+    pub fn set_runtime_total(&self, total: u64) {
+        self.state.lock().expect("lock").runtime_total = Some(total);
+    }
+
+    /// Clear any runtime total override and fall back to the fixture config.
+    pub fn clear_runtime_total(&self) {
+        self.state.lock().expect("lock").runtime_total = None;
     }
 }
 
@@ -274,9 +307,21 @@ fn handle_connection(
         });
     }
 
-    let (runtime_status_override, runtime_rate_limit_429) = {
+    let (
+        runtime_status_override,
+        runtime_rate_limit_429,
+        runtime_etag,
+        runtime_last_modified,
+        runtime_total,
+    ) = {
         let st = state.lock().expect("lock");
-        (st.runtime_status_override, st.runtime_rate_limit_429)
+        (
+            st.runtime_status_override,
+            st.runtime_rate_limit_429,
+            st.runtime_etag.clone(),
+            st.runtime_last_modified.clone(),
+            st.runtime_total,
+        )
     };
     let effective_rate_limit = runtime_rate_limit_429.unwrap_or(config.rate_limit_429);
     let effective_status_override = match runtime_status_override {
@@ -371,9 +416,14 @@ fn handle_connection(
         return Ok(());
     }
 
-    let effective_total = config
-        .large_sparse_logical_size
-        .unwrap_or(config.body.len() as u64);
+    let effective_total = runtime_total.unwrap_or(
+        config
+            .large_sparse_logical_size
+            .unwrap_or(config.body.len() as u64),
+    );
+    let effective_etag = runtime_etag.unwrap_or_else(|| config.etag.clone());
+    let effective_last_modified =
+        runtime_last_modified.unwrap_or_else(|| config.last_modified.clone());
     let mut body = config.body.clone();
     if let Some(limit) = config.truncate_after {
         if body.len() > limit {
@@ -422,10 +472,10 @@ fn handle_connection(
                 resp.push_str("HTTP/1.1 206 Partial Content\r\n");
                 resp.push_str("Accept-Ranges: bytes\r\n");
                 resp.push_str(&format!("Content-Type: {}\r\n", content_type));
-                if let Some(etag) = &config.etag {
+                if let Some(etag) = &effective_etag {
                     resp.push_str(&format!("ETag: {}\r\n", etag));
                 }
-                if let Some(lm) = &config.last_modified {
+                if let Some(lm) = &effective_last_modified {
                     resp.push_str(&format!("Last-Modified: {}\r\n", lm));
                 }
                 if let Some(cd) = &config.content_disposition {
@@ -464,10 +514,10 @@ fn handle_connection(
         resp.push_str("Accept-Ranges: bytes\r\n");
     }
     resp.push_str(&format!("Content-Type: {}\r\n", content_type));
-    if let Some(etag) = &config.etag {
+    if let Some(etag) = &effective_etag {
         resp.push_str(&format!("ETag: {}\r\n", etag));
     }
-    if let Some(lm) = &config.last_modified {
+    if let Some(lm) = &effective_last_modified {
         resp.push_str(&format!("Last-Modified: {}\r\n", lm));
     }
     if let Some(cd) = &config.content_disposition {

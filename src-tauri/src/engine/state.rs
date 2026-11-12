@@ -68,9 +68,15 @@ impl TaskState {
         matches!(
             (self, next),
             (Queued, Connecting | Paused | Cancelled)
-                | (Connecting, Downloading | Paused | Failed | Cancelled)
-                | (Downloading, Paused | Finalizing | Failed | Cancelled)
-                | (Paused, Queued | Cancelled)
+                | (
+                    Connecting,
+                    Queued | Downloading | Paused | Failed | Cancelled
+                )
+                | (
+                    Downloading,
+                    Queued | Paused | Finalizing | Failed | Cancelled
+                )
+                | (Paused, Queued | Failed | Cancelled)
                 | (Finalizing, Completed | Failed | Cancelled)
                 | (Failed, Queued | Cancelled)
                 | (Cancelled, Cancelled)

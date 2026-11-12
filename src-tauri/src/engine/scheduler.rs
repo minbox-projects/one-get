@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,9 +22,12 @@ use crate::store::types::Task;
 use crate::store::Database;
 
 use super::error::EngineError;
+use super::part_file::PartFile;
+use super::probe::{probe, ProbeOptions};
 use super::state::TaskState;
 use super::worker::{
-    cancel_task, download_task, persist_pause, DownloadSpec, TaskControl, TaskRunOutcome,
+    cancel_task, download_task, finalize_task, mark_failed, persist_pause, DownloadSpec,
+    TaskControl, TaskRunOutcome,
 };
 
 /// How long the scheduler waits for newly added work before it stops.
@@ -40,6 +43,21 @@ type TaskFuture<'a> = Pin<Box<dyn Future<Output = Result<(), EngineError>> + 'a>
 pub struct EngineOptions {
     /// Maximum number of tasks in connecting, downloading, or finalizing state.
     pub max_concurrent: usize,
+}
+
+/// Summary of the store and part-file recovery performed at startup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecoveryReport {
+    /// Connecting or downloading tasks requeued for a later resume.
+    pub requeued: usize,
+    /// Finalizing tasks completed through the idempotent finalize path.
+    pub finalized: usize,
+    /// Cancelled tasks whose leftover part files were removed.
+    pub cancelled: usize,
+    /// Tasks failed during recovery because their part or hash was invalid.
+    pub failed: usize,
+    /// Paused tasks left untouched for a later explicit resume.
+    pub paused: usize,
 }
 
 /// A durable, queue-driven download engine.
@@ -86,12 +104,95 @@ impl Engine {
         Ok(())
     }
 
+    /// Recover interrupted tasks from the durable store and the part files.
+    ///
+    /// This is synchronous and performs no network access. Interrupted
+    /// connecting or downloading tasks are requeued so the download path can
+    /// resume them, finalizing tasks go through the idempotent finalize path,
+    /// and cancelled tasks have only their own leftover part removed. Paused
+    /// and failed tasks keep their parts and state.
+    pub fn recover(&self) -> Result<RecoveryReport, EngineError> {
+        let mut report = RecoveryReport::default();
+
+        for task in self.store.list_tasks()? {
+            match task.state {
+                TaskState::Connecting | TaskState::Downloading => {
+                    if part_exists(&self.dest_dir, &task.filename) {
+                        self.store
+                            .transition_task(&task.id, task.state, TaskState::Queued)?;
+                        report.requeued += 1;
+                    } else {
+                        mark_failed(&self.store, &task.id, part_missing());
+                        report.failed += 1;
+                    }
+                }
+                TaskState::Finalizing => {
+                    if finalize_task(&self.store, &task.id, &self.dest_dir, None).is_ok() {
+                        report.finalized += 1;
+                    } else {
+                        report.failed += 1;
+                    }
+                }
+                TaskState::Cancelled => {
+                    let _ = cancel_task(&self.store, &task.id, &self.dest_dir);
+                    report.cancelled += 1;
+                }
+                TaskState::Paused => report.paused += 1,
+                TaskState::Queued | TaskState::Completed | TaskState::Failed => {}
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// Re-probe paused tasks so a changed remote file or missing part is not
+    /// resumed silently. Unchanged tasks stay paused for an explicit resume.
+    async fn revalidate_paused(&self) -> Result<(), EngineError> {
+        for task in self.store.list_tasks()? {
+            if task.state != TaskState::Paused {
+                continue;
+            }
+            if !part_exists(&self.dest_dir, &task.filename) {
+                mark_failed(&self.store, &task.id, part_missing());
+                continue;
+            }
+
+            let options = ProbeOptions::default();
+            let Ok(outcome) = probe(&task.url, &options).await else {
+                // A transient probe failure leaves the task paused rather than
+                // discarding recoverable progress.
+                continue;
+            };
+
+            if task.etag.as_deref() != outcome.etag.as_deref()
+                || task.last_modified.as_deref() != outcome.last_modified.as_deref()
+                || task.total_bytes != outcome.total_bytes
+            {
+                mark_failed(
+                    &self.store,
+                    &task.id,
+                    EngineError::new(
+                        "FILE_CHANGED",
+                        "the remote file changed since the task was paused",
+                    ),
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Run until no queued or active tasks remain.
     ///
-    /// Paused tasks do not consume a slot and do not keep the loop alive. A
-    /// short idle grace lets a caller add work immediately after the queue
-    /// drains, so pause-then-add and retry flows do not need a new run call.
+    /// Startup recovery and paused-task revalidation run first, so a restarted
+    /// engine resumes persisted work instead of re-downloading it. Paused tasks
+    /// do not consume a slot and do not keep the loop alive. A short idle grace
+    /// lets a caller add work immediately after the queue drains, so
+    /// pause-then-add and retry flows do not need a new run call.
     pub async fn run(&self) -> Result<(), EngineError> {
+        self.recover()?;
+        self.revalidate_paused().await?;
+
         let mut active: FuturesUnordered<TaskFuture<'_>> = FuturesUnordered::new();
 
         loop {
@@ -313,4 +414,15 @@ fn load_task(store: &Database, id: &str) -> Result<Task, EngineError> {
     store
         .task(id)?
         .ok_or_else(|| EngineError::new("TASK_NOT_FOUND", "the requested task does not exist"))
+}
+
+fn part_exists(dest_dir: &Path, filename: &str) -> bool {
+    std::fs::symlink_metadata(dest_dir.join(PartFile::part_name(filename))).is_ok()
+}
+
+fn part_missing() -> EngineError {
+    EngineError::new(
+        "PART_MISSING",
+        "the task's part file is missing and cannot be resumed",
+    )
 }
