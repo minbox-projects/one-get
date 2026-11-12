@@ -77,10 +77,7 @@ impl SettingsStore {
                 return Self::create_defaults(path);
             }
             Err(error) => {
-                return Err(AppError::io_error(
-                    format!("read settings {}", path.display()),
-                    error,
-                ));
+                return Err(AppError::io_error("read settings file", error));
             }
         };
 
@@ -177,12 +174,8 @@ impl SettingsStore {
 
     fn recover_corrupt(path: PathBuf, original: &[u8]) -> Result<Self, AppError> {
         let backup = corrupt_backup_path(&path);
-        fs::write(&backup, original).map_err(|error| {
-            AppError::io_error(
-                format!("back up corrupt settings to {}", backup.display()),
-                error,
-            )
-        })?;
+        fs::write(&backup, original)
+            .map_err(|error| AppError::io_error("back up corrupt settings", error))?;
         Self::create_defaults(path)
     }
 }
@@ -218,12 +211,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
-    fs::create_dir_all(directory).map_err(|error| {
-        AppError::io_error(
-            format!("create settings directory {}", directory.display()),
-            error,
-        )
-    })?;
+    fs::create_dir_all(directory)
+        .map_err(|error| AppError::io_error("create settings directory", error))?;
 
     let file_name = path
         .file_name()
@@ -236,9 +225,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     ));
 
     let write_result = write_temporary(&temporary, bytes).and_then(|()| {
-        fs::rename(&temporary, path).map_err(|error| {
-            AppError::io_error(format!("replace settings {}", path.display()), error)
-        })
+        fs::rename(&temporary, path)
+            .map_err(|error| AppError::io_error("replace settings file", error))
     });
 
     if write_result.is_err() {
@@ -252,17 +240,13 @@ fn write_temporary(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
         .create_new(true)
         .write(true)
         .open(path)
-        .map_err(|error| {
-            AppError::io_error(format!("create settings temp {}", path.display()), error)
-        })?;
-    file.write_all(bytes).map_err(|error| {
-        AppError::io_error(format!("write settings temp {}", path.display()), error)
-    })?;
-    sync_file(&file, path)
+        .map_err(|error| AppError::io_error("create settings temporary file", error))?;
+    file.write_all(bytes)
+        .map_err(|error| AppError::io_error("write settings temporary file", error))?;
+    sync_file(&file)
 }
 
-fn sync_file(file: &File, path: &Path) -> Result<(), AppError> {
-    file.sync_all().map_err(|error| {
-        AppError::io_error(format!("sync settings temp {}", path.display()), error)
-    })
+fn sync_file(file: &File) -> Result<(), AppError> {
+    file.sync_all()
+        .map_err(|error| AppError::io_error("sync settings temporary file", error))
 }

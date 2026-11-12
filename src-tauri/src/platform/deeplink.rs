@@ -130,6 +130,13 @@ pub fn parse_deep_link(raw: &str) -> Result<DeepLinkEvent, AppError> {
         )
     })?;
 
+    if inner_url.chars().any(|ch| ch.is_ascii_control()) {
+        return Err(AppError::new(
+            "invalid_url_parameter",
+            "deep link url parameter must not contain control characters",
+        ));
+    }
+
     let parsed = url::Url::parse(&inner_url).map_err(|_| {
         AppError::new(
             "invalid_url_parameter",
@@ -154,7 +161,7 @@ pub fn parse_deep_link(raw: &str) -> Result<DeepLinkEvent, AppError> {
         ));
     }
 
-    Ok(DeepLinkEvent::accepted(inner_url))
+    Ok(DeepLinkEvent::accepted(parsed.as_str().to_string()))
 }
 
 /// Register every configured URL scheme at runtime on Windows.

@@ -202,6 +202,18 @@ fn write_failure_returns_typed_error_and_leaves_existing_file_intact() {
     fs::set_permissions(dir.path(), restore).expect("restore directory permissions");
 
     assert_typed_app_error(&err);
+    assert!(
+        !err.message.contains(
+            dir.path()
+                .to_str()
+                .expect("temp dir path should be valid UTF-8")
+        ),
+        "settings save error message must not contain internal directory paths"
+    );
+    assert!(
+        !err.message.contains("settings.json"),
+        "settings save error message must not contain internal file names"
+    );
     let after = fs::read(&path).expect("read settings after failed save");
     assert_eq!(
         after, before,

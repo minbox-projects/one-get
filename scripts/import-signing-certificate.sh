@@ -76,6 +76,7 @@ case "$keychain_physical" in
     ;;
 esac
 
+# Also probe the keychain database suffix ("$keychain-db"), not just the path itself.
 if [ -e "$keychain" ] || [ -e "$keychain-db" ]; then
   fail "keychain already exists: $keychain"
 fi

@@ -106,7 +106,7 @@ The WebView loads bundled assets only. The production CSP allows scripts, styles
 
 ### Deep links
 
-Deep links are untrusted input. The parser accepts only a `oneget://download` link with exactly one `url` parameter. The target must parse as `http` or `https`, must not contain embedded credentials, must use valid percent encoding, and the whole link is limited to 8 KiB. Missing, duplicate, malformed, non-http, credentialed, and oversized links produce typed rejections. Windows registers schemes at runtime; macOS relies on the built bundle registration.
+Deep links are untrusted input. The parser accepts only a `oneget://download` link with exactly one `url` parameter. The target must parse as `http` or `https`, must not contain embedded credentials, must use valid percent encoding, must not contain ASCII control characters once percent-decoded, and the whole link is limited to 8 KiB. Missing, duplicate, malformed, non-http, credentialed, oversized, and control-character-bearing links produce typed rejections. Windows registers schemes at runtime; macOS relies on the built bundle registration.
 
 ### Credential storage
 
@@ -155,7 +155,7 @@ The non-macOS, non-Windows path code is a development fallback using XDG locatio
 
 ## Test and CI baseline
 
-Local macOS arm64 evidence covers `npm ci`, the exact-pin check, typecheck, lint, 20 Vitest tests, the production build, and 8 Playwright checks across light and dark projects. Rust evidence covers `cargo check`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`, with 50 integration tests across nine suites. The Tauri application bundle builds locally.
+Local macOS arm64 evidence covers `npm ci`, the exact-pin check, typecheck, lint, 20 Vitest tests, the production build, and 8 Playwright checks across light and dark projects. Rust evidence covers `cargo check`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`, with 51 integration tests across nine suites. The Tauri application bundle builds locally.
 
 The CI workflow defines a frontend job, Rust quality gates on `macos-15` and `windows-2025`, a build matrix for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`, and a macOS signing dry-run job that creates, imports, signs, verifies, and cleans up an ephemeral identity and fails closed on missing inputs. The workflow is delivered but has not run on the authorized remote; hosted CI, manual platform acceptance, Windows checks, and the Intel artifact remain pending evidence.
 

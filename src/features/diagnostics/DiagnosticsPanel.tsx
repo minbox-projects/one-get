@@ -28,15 +28,6 @@ const DEFAULT_SETTINGS: Settings = {
 const THEMES: Theme[] = ["system", "light", "dark"];
 const LOG_LEVELS: LogLevel[] = ["error", "warn", "info", "debug", "trace"];
 
-async function callCommand<T>(
-  command: string,
-  args?: Record<string, unknown>,
-): Promise<IpcResult<T>> {
-  return args === undefined
-    ? invokeCommand<T>(command)
-    : invokeCommand<T>(command, args);
-}
-
 interface StatusMessage {
   tone: "success" | "error";
   text: string;
@@ -84,11 +75,11 @@ export function DiagnosticsPanel() {
     async function loadDiagnostics(): Promise<void> {
       const [infoResult, settingsResult, autostartResult, notificationResult, deepLinkResult] =
         await Promise.all([
-          callCommand<AppInfo>("app_info"),
-          callCommand<Settings>("settings_get"),
-          callCommand<AutostartState>("diagnostics_autostart_get"),
-          callCommand<NotificationStatus>("diagnostics_notification_status"),
-          callCommand<DeepLinkResult>("deep_link_last"),
+          invokeCommand<AppInfo>("app_info"),
+          invokeCommand<Settings>("settings_get"),
+          invokeCommand<AutostartState>("diagnostics_autostart_get"),
+          invokeCommand<NotificationStatus>("diagnostics_notification_status"),
+          invokeCommand<DeepLinkResult>("deep_link_last"),
         ]);
 
       if (!active) {
@@ -153,7 +144,7 @@ export function DiagnosticsPanel() {
     const nextEnabled = !autostartEnabled;
     setAutostartPending(true);
     setAutostartError(null);
-    const result = await callCommand<AutostartState>(
+    const result = await invokeCommand<AutostartState>(
       "diagnostics_autostart_set",
       { enabled: nextEnabled },
     );
@@ -168,7 +159,7 @@ export function DiagnosticsPanel() {
   async function handleSendNotification(): Promise<void> {
     setNotificationPending(true);
     setNotificationMessage(null);
-    const result = await callCommand<SendNotificationResult>(
+    const result = await invokeCommand<SendNotificationResult>(
       "diagnostics_send_notification",
     );
     setNotificationPending(false);
@@ -190,7 +181,7 @@ export function DiagnosticsPanel() {
   async function handleSecretRoundTrip(): Promise<void> {
     setSecretPending(true);
     setSecretMessage(null);
-    const result = await callCommand<SecretRoundtripResult>(
+    const result = await invokeCommand<SecretRoundtripResult>(
       "diagnostics_secret_roundtrip",
       { secret: createRoundTripSecret() },
     );
@@ -216,7 +207,7 @@ export function DiagnosticsPanel() {
     const next: Settings = { ...(settings ?? DEFAULT_SETTINGS), ...patch };
     setSettings(next);
     setSettingsError(null);
-    const result = await callCommand<Settings>("settings_save", {
+    const result = await invokeCommand<Settings>("settings_save", {
       settings: next,
     });
     if (result.ok) {
@@ -237,7 +228,7 @@ export function DiagnosticsPanel() {
   async function handleQuit(): Promise<void> {
     setQuitPending(true);
     setQuitMessage(null);
-    const result = await callCommand<QuitState>("app_graceful_quit");
+    const result = await invokeCommand<QuitState>("app_graceful_quit");
     setQuitPending(false);
     if (result.ok) {
       setQuitMessage({ tone: "success", text: "Quit requested." });

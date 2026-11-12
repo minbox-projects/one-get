@@ -33,7 +33,7 @@ fn rules() -> &'static Rules {
             r#"(?i)([?&](?:access_token|id_token|refresh_token|token|signature|sig|x-amz-signature|x-amz-credential|x-amz-security-token)=)([^&\s"'#<>]+)"#,
         )
         .expect("valid query redaction pattern"),
-        userinfo: Regex::new(r"(?i)(://[^/\s:@]+:)([^@\s/]+)(@)")
+        userinfo: Regex::new(r"(?i)(://[^/\s:@]*:)([^@\s/]+)(@)")
             .expect("valid userinfo redaction pattern"),
         password_fields: Regex::new(
             r#"(?i)(\b(?:proxy[_-]?)?(?:password|passwd)\b["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^,;&\s}\)\]"']+)"#,

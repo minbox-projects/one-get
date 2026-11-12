@@ -529,6 +529,11 @@
         {
           "kind": "imports",
           "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel",
           "to": "src/types/app.ts#AppError"
         },
         {

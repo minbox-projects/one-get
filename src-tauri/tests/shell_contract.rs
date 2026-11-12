@@ -286,6 +286,26 @@ fn deep_link_rejects_over_8192_bytes_without_panic() {
     assert_stable_error_code(&err);
 }
 
+#[test]
+fn deep_link_rejects_control() {
+    let accepted = parse_deep_link("oneget://download?url=https://example.com/file.zip")
+        .expect("normal accepted link must still be accepted");
+    assert_eq!(accepted.url, "https://example.com/file.zip");
+
+    for encoded in ["%0A", "%0D", "%09", "%00"] {
+        let link = format!("oneget://download?url=https://example.com/path{encoded}tail");
+        let result = std::panic::catch_unwind(|| parse_deep_link(&link));
+        assert!(
+            result.is_ok(),
+            "parser must not panic for encoded control char {encoded}"
+        );
+        let err = result.unwrap().expect_err(&format!(
+            "decoded control char {encoded} inside inner URL must be rejected"
+        ));
+        assert_stable_error_code(&err);
+    }
+}
+
 // 2. DeepLinkEvent JSON
 
 #[test]

@@ -13,6 +13,7 @@ const SECRET_COOKIE: &str = "session=cookie-secret";
 const SECRET_SET_COOKIE: &str = "sid=set-cookie-secret; Path=/; HttpOnly";
 const SECRET_PROXY_AUTH: &str = "Basic proxy-auth-secret";
 const SECRET_PROXY_PASSWORD: &str = "proxypass-secret";
+const SECRET_PROXY_PASSWORD_ONLY: &str = "proxy-only-password-secret";
 const SECRET_HF_TOKEN: &str = "hf_secretTokenValue123456";
 
 fn assert_redacted(text: &str, secret: &str, label: &str) {
@@ -73,6 +74,11 @@ fn redact_text_replaces_sensitive_values_with_marker() {
             format!("https://user:{SECRET_PROXY_PASSWORD}@proxy.example.com:8080"),
             SECRET_PROXY_PASSWORD,
             "proxy password in userinfo",
+        ),
+        (
+            format!("https://:{SECRET_PROXY_PASSWORD_ONLY}@proxy.example.com:8080"),
+            SECRET_PROXY_PASSWORD_ONLY,
+            "password-only proxy userinfo",
         ),
         (
             format!("using token {SECRET_HF_TOKEN} for huggingface"),

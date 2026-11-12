@@ -29,7 +29,7 @@ This record captures the evidence available for the OneGet desktop shell baselin
 | `cargo check` | Passed | Locked Rust dependency graph. |
 | `cargo fmt --check` | Passed | Formatting check. |
 | `cargo clippy --all-targets -- -D warnings` | Passed | Warnings denied. |
-| `cargo test` | Passed | 50 integration tests across 9 suites. |
+| `cargo test` | Passed | 51 integration tests across 9 suites. |
 | Tauri bundle | Passed | Application bundle built on macOS arm64. |
 
 The Rust suites cover the following delivered behavior:
@@ -42,7 +42,7 @@ The Rust suites cover the following delivered behavior:
 - in-memory secret-store round-trip, missing keys, unavailable storage, empty values, idempotent delete, and redacted formatting;
 - log redaction, JSON-line integrity, and size rotation;
 - settings defaults, persistence, corrupt-file backup, future-schema read-only handling, unknown-field preservation, and write-failure recovery;
-- deep-link shell contract parsing, accepted and rejected events, typed errors, autostart and notification service paths, secret round-trip behavior, shutdown logging, and the log-path contract.
+- deep-link shell contract parsing, accepted and rejected events, rejection of percent-decoded ASCII control characters, typed errors, autostart and notification service paths, secret round-trip behavior, shutdown logging, and the log-path contract.
 
 ## Self-signed certificate flow
 

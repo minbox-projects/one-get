@@ -1,4 +1,4 @@
-//! Runtime component kernel: manifest verification and installation primitives.
+//! Runtime component kernel: canonical JSON encoding and Ed25519 manifest verification.
 
 pub mod manifest;
 
