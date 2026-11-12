@@ -19,6 +19,13 @@ pub struct RecordedRequest {
     pub range: Option<String>,
 }
 
+/// A byte range served in a response body, inclusive start and end.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServedRange {
+    pub start: u64,
+    pub end: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum RangeMode {
     #[default]
@@ -46,6 +53,10 @@ pub struct FixtureConfig {
     pub response_416_zero: bool,
     pub response_416_nonzero: Option<u64>,
     pub large_sparse_logical_size: Option<u64>,
+    /// Optional per-body streaming delay used to keep downloads in-flight.
+    pub stream_delay: Option<Duration>,
+    /// Chunk size for delayed streaming.
+    pub stream_chunk_size: usize,
 }
 
 impl Default for FixtureConfig {
@@ -68,6 +79,8 @@ impl Default for FixtureConfig {
             response_416_zero: false,
             response_416_nonzero: None,
             large_sparse_logical_size: None,
+            stream_delay: None,
+            stream_chunk_size: 16 * 1024,
         }
     }
 }
@@ -75,8 +88,11 @@ impl Default for FixtureConfig {
 #[derive(Default)]
 struct SharedState {
     requests: Vec<RecordedRequest>,
+    served_ranges: Vec<ServedRange>,
     highest_offset_served: u64,
     probe206_seen: bool,
+    runtime_status_override: Option<Option<u16>>,
+    runtime_rate_limit_429: Option<bool>,
 }
 
 pub struct RangeServer {
@@ -142,8 +158,27 @@ impl RangeServer {
         self.state.lock().expect("lock").requests.clone()
     }
 
+    pub fn served_ranges(&self) -> Vec<ServedRange> {
+        self.state.lock().expect("lock").served_ranges.clone()
+    }
+
     pub fn highest_offset_served(&self) -> u64 {
         self.state.lock().expect("lock").highest_offset_served
+    }
+
+    /// Override the configured HTTP status for subsequent requests.
+    pub fn set_runtime_status_override(&self, status: Option<u16>) {
+        self.state.lock().expect("lock").runtime_status_override = Some(status);
+    }
+
+    /// Clear any runtime status override and fall back to the fixture config.
+    pub fn clear_runtime_status_override(&self) {
+        self.state.lock().expect("lock").runtime_status_override = None;
+    }
+
+    /// Override rate limiting for subsequent requests.
+    pub fn set_runtime_rate_limit_429(&self, enabled: bool) {
+        self.state.lock().expect("lock").runtime_rate_limit_429 = Some(enabled);
     }
 }
 
@@ -157,6 +192,29 @@ impl Drop for RangeServer {
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
+    }
+}
+
+fn record_served(state: &Arc<Mutex<SharedState>>, start: u64, end: u64) {
+    let mut st = state.lock().expect("lock");
+    st.served_ranges.push(ServedRange { start, end });
+    st.highest_offset_served = st.highest_offset_served.max(end);
+}
+
+fn write_body(stream: &mut TcpStream, body: &[u8], config: &FixtureConfig) -> std::io::Result<()> {
+    if body.is_empty() {
+        return Ok(());
+    }
+    if let Some(delay) = config.stream_delay {
+        let chunk_size = config.stream_chunk_size.max(1);
+        for chunk in body.chunks(chunk_size) {
+            stream.write_all(chunk)?;
+            let _ = stream.flush();
+            thread::sleep(delay);
+        }
+        Ok(())
+    } else {
+        stream.write_all(body)
     }
 }
 
@@ -216,6 +274,16 @@ fn handle_connection(
         });
     }
 
+    let (runtime_status_override, runtime_rate_limit_429) = {
+        let st = state.lock().expect("lock");
+        (st.runtime_status_override, st.runtime_rate_limit_429)
+    };
+    let effective_rate_limit = runtime_rate_limit_429.unwrap_or(config.rate_limit_429);
+    let effective_status_override = match runtime_status_override {
+        Some(value) => value,
+        None => config.status_override,
+    };
+
     if let Some(expected) = &config.expected_authorization {
         let got = headers.get("authorization").cloned().unwrap_or_default();
         if &got != expected {
@@ -230,7 +298,7 @@ fn handle_connection(
         }
     }
 
-    if config.rate_limit_429 {
+    if effective_rate_limit {
         let body = b"rate limited";
         let retry = config
             .retry_after
@@ -246,7 +314,7 @@ fn handle_connection(
         return Ok(());
     }
 
-    if let Some(status) = config.status_override {
+    if let Some(status) = effective_status_override {
         let (reason, body): (&str, &[u8]) = match status {
             401 | 403 => ("Auth Required", b"auth required"),
             404 => ("Not Found", b"not found"),
@@ -346,9 +414,9 @@ fn handle_connection(
                 } else {
                     Vec::new()
                 };
-                {
-                    let mut st = state.lock().expect("lock");
-                    st.highest_offset_served = st.highest_offset_served.max(end);
+                if !slice.is_empty() {
+                    let actual_end = start + slice.len() as u64 - 1;
+                    record_served(state, start, actual_end.min(end));
                 }
                 let mut resp = String::new();
                 resp.push_str("HTTP/1.1 206 Partial Content\r\n");
@@ -370,7 +438,7 @@ fn handle_connection(
                 resp.push_str(&format!("Content-Length: {}\r\n", slice.len()));
                 resp.push_str("Connection: close\r\n\r\n");
                 stream.write_all(resp.as_bytes())?;
-                stream.write_all(&slice)?;
+                write_body(&mut stream, &slice, config)?;
                 return Ok(());
             } else {
                 // Malformed/unsatisfiable as invalid response path; send 416 generic.
@@ -385,12 +453,9 @@ fn handle_connection(
     }
 
     // 200 OK full response (or range ignored / probe206then200 later request)
-    {
-        let mut st = state.lock().expect("lock");
-        if !body.is_empty() {
-            let end = body.len().saturating_sub(1) as u64;
-            st.highest_offset_served = st.highest_offset_served.max(end);
-        }
+    if !body.is_empty() {
+        let end = body.len().saturating_sub(1) as u64;
+        record_served(state, 0, end);
     }
     let mut resp = String::new();
     resp.push_str("HTTP/1.1 200 OK\r\n");
@@ -413,7 +478,7 @@ fn handle_connection(
     }
     resp.push_str("Connection: close\r\n\r\n");
     stream.write_all(resp.as_bytes())?;
-    stream.write_all(&body)?;
+    write_body(&mut stream, &body, config)?;
     Ok(())
 }
 

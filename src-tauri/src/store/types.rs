@@ -52,6 +52,8 @@ pub struct Task {
     pub created_at_ms: i64,
     /// Last modification time in epoch milliseconds.
     pub updated_at_ms: i64,
+    /// Requested parallel connection count.
+    pub connections: u32,
 }
 
 /// A persisted byte range owned by a task.

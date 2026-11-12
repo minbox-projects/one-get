@@ -12,7 +12,7 @@ use crate::engine::state::TaskState;
 
 const TASK_COLUMNS: &str = "id, url, filename, part_path, state, downloaded_bytes, \
      total_bytes, expected_sha256, actual_sha256, etag, last_modified, error_code, error_message, \
-     created_at_ms, updated_at_ms";
+     created_at_ms, updated_at_ms, connections";
 
 impl Database {
     /// Insert a new queued task and return its identifier.
@@ -81,6 +81,44 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(count)
+    }
+
+    /// Count tasks waiting for a scheduler slot.
+    pub fn queued_task_count(&self) -> Result<i64, EngineError> {
+        let count = self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE state = 'queued'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Record the expected SHA-256 for a task without changing its state.
+    pub fn record_expected_sha256(
+        &self,
+        id: &str,
+        expected_sha256: &str,
+    ) -> Result<(), EngineError> {
+        let changed = self.conn.execute(
+            "UPDATE tasks SET expected_sha256 = ?1, updated_at_ms = ?2 WHERE id = ?3",
+            params![expected_sha256, now_ms(), id],
+        )?;
+        if changed == 0 {
+            return Err(task_not_found());
+        }
+        Ok(())
+    }
+
+    /// Record the requested connection count for a task.
+    pub fn record_connections(&self, id: &str, connections: u32) -> Result<(), EngineError> {
+        let changed = self.conn.execute(
+            "UPDATE tasks SET connections = ?1, updated_at_ms = ?2 WHERE id = ?3",
+            params![i64::from(connections), now_ms(), id],
+        )?;
+        if changed == 0 {
+            return Err(task_not_found());
+        }
+        Ok(())
     }
 
     /// Apply a state transition only when the stored state matches `from`.
@@ -357,6 +395,14 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         error_message: row.get(12)?,
         created_at_ms: row.get(13)?,
         updated_at_ms: row.get(14)?,
+        connections: read_u32(row, 15, "connections")?,
+    })
+}
+
+fn read_u32(row: &Row<'_>, index: usize, name: &str) -> rusqlite::Result<u32> {
+    let raw: i64 = row.get(index)?;
+    u32::try_from(raw).map_err(|_| {
+        rusqlite::Error::InvalidColumnType(index, name.to_owned(), rusqlite::types::Type::Integer)
     })
 }
 

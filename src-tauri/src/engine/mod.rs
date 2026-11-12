@@ -7,5 +7,6 @@ pub mod http;
 pub mod part_file;
 pub mod planner;
 pub mod probe;
+pub mod scheduler;
 pub mod state;
 pub mod worker;

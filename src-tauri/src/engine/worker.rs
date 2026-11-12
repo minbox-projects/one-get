@@ -6,6 +6,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use futures_util::{stream, StreamExt};
@@ -74,6 +75,68 @@ pub struct DownloadOutcome {
 pub struct FinalizeOutcome {
     /// Absolute path of the final file.
     pub final_path: PathBuf,
+}
+
+/// How one engine execution of a task finished.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskRunOutcome {
+    /// The part file was finalized into its destination file.
+    Completed(DownloadOutcome),
+    /// Workers stopped and progress was persisted for a later resume.
+    Paused,
+    /// Workers stopped and the task's own part file was removed.
+    Cancelled,
+}
+
+/// Cooperative pause and cancel signals shared with a running task.
+#[derive(Debug, Default)]
+pub struct TaskControl {
+    pause_requested: AtomicBool,
+    cancel_requested: AtomicBool,
+}
+
+impl TaskControl {
+    /// Create a control object that lets a task run to completion.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the task's workers to stop before their next streamed chunk.
+    pub fn request_pause(&self) {
+        self.pause_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// Ask the task's workers to stop and discard the task's part file.
+    pub fn request_cancel(&self) {
+        self.cancel_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a pause has been requested.
+    pub fn pause_requested(&self) -> bool {
+        self.pause_requested.load(Ordering::SeqCst)
+    }
+
+    /// Whether a cancel has been requested.
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel_requested.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerFlow {
+    Complete,
+    Paused,
+    Cancelled,
+}
+
+fn requested_flow(control: &TaskControl) -> Option<WorkerFlow> {
+    if control.cancel_requested() {
+        Some(WorkerFlow::Cancelled)
+    } else if control.pause_requested() {
+        Some(WorkerFlow::Paused)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -185,6 +248,7 @@ pub async fn download_once(
     let progress = Mutex::new(vec![0u64; segment_rows.len()]);
 
     let client = build_client()?;
+    let control = TaskControl::new();
     match &plan {
         SegmentPlan::Ranged(segments) => {
             let concurrency = (spec.connections as usize).max(1);
@@ -200,15 +264,23 @@ pub async fn download_once(
                     &part,
                     &progress,
                     spec,
+                    &control,
                     request,
-                    index,
+                    index as u32,
+                    segment.start,
                     Some(segment.end),
                 )
             }))
             .buffer_unordered(concurrency);
             while let Some(result) = results.next().await {
-                if let Err(error) = result {
-                    return Err(mark_failed(store, task_id, error));
+                match result {
+                    Ok(WorkerFlow::Complete) => {}
+                    Ok(_) => {
+                        return Err(EngineError::invalid_state(
+                            "the download was interrupted without a control request",
+                        ))
+                    }
+                    Err(error) => return Err(mark_failed(store, task_id, error)),
                 }
             }
         }
@@ -221,19 +293,29 @@ pub async fn download_once(
             } else {
                 RequestShape::Plain
             };
-            run_worker(
+            match run_worker(
                 &client,
                 store,
                 task_id,
                 &part,
                 &progress,
                 spec,
+                &control,
                 request,
                 0,
+                *start,
                 metadata.total_bytes,
             )
             .await
-            .map_err(|error| mark_failed(store, task_id, error))?;
+            .map_err(|error| mark_failed(store, task_id, error))?
+            {
+                WorkerFlow::Complete => {}
+                _ => {
+                    return Err(EngineError::invalid_state(
+                        "the download was interrupted without a control request",
+                    ))
+                }
+            }
         }
     }
 
@@ -260,6 +342,232 @@ pub async fn download_once(
         total_bytes,
         final_path: finalized.final_path,
     })
+}
+
+/// Execute one claimed task, resuming persisted segments when present.
+///
+/// A pause or cancel request is cooperative: workers stop at the next streamed
+/// chunk, persist their progress, and the task is left paused or cancelled
+/// before this function returns. Real download failures mark the task failed
+/// and preserve its part file.
+pub async fn download_task(
+    store: &Database,
+    task_id: &str,
+    dest_dir: &Path,
+    spec: &DownloadSpec,
+    control: &TaskControl,
+) -> Result<TaskRunOutcome, EngineError> {
+    if let Some(flow) = requested_flow(control) {
+        return finish_interruption(store, task_id, dest_dir, flow);
+    }
+
+    let task = load_task(store, task_id)?;
+
+    let mut segments = store.segments_for_task(task_id)?;
+    if segments.is_empty() {
+        store.replace_segments(
+            task_id,
+            &[SegmentInput {
+                index: 0,
+                start: 0,
+                end: OPEN_ENDED_END.max(2),
+                downloaded: 0,
+                state: SegmentState::Pending,
+            }],
+        )?;
+        segments = store.segments_for_task(task_id)?;
+    }
+
+    if task.state == TaskState::Queued {
+        store.transition_task(task_id, TaskState::Queued, TaskState::Connecting)?;
+    }
+    let stored = load_task(store, task_id)?;
+    if stored.state == TaskState::Connecting {
+        store.transition_task(task_id, TaskState::Connecting, TaskState::Downloading)?;
+    } else if stored.state != TaskState::Downloading {
+        return Err(EngineError::invalid_state(
+            "only a connecting task can start downloading",
+        ));
+    }
+
+    if let Some(flow) = requested_flow(control) {
+        return finish_interruption(store, task_id, dest_dir, flow);
+    }
+
+    let cap = CapDir::open(dest_dir).map_err(platform_error)?;
+    let part_name = PartFile::part_name(&spec.filename);
+    let part = PartFile::create(&cap, &spec.filename, None)?;
+    store.record_part_path(task_id, &part_name)?;
+
+    let mut values = vec![0u64; segments.len()];
+    for segment in &segments {
+        if let Some(slot) = values.get_mut(segment.index as usize) {
+            *slot = segment.downloaded_bytes;
+        }
+    }
+    let progress = Mutex::new(values);
+
+    for segment in &segments {
+        if segment.state == SegmentState::Done {
+            continue;
+        }
+        if segment.state != SegmentState::Pending {
+            let _ = store.transition_segment(
+                task_id,
+                segment.index,
+                segment.state,
+                SegmentState::Pending,
+            );
+        }
+    }
+
+    let client = build_client()?;
+    let pending: Vec<_> = segments
+        .iter()
+        .filter(|segment| segment.state != SegmentState::Done)
+        .collect();
+    let mut interrupted = None;
+    if !pending.is_empty() {
+        let concurrency = (spec.connections as usize).max(1).min(pending.len());
+        let mut results = stream::iter(pending.into_iter().map(|segment| {
+            let start = segment.start.saturating_add(segment.downloaded_bytes);
+            let (request, limit_end) = if segment.end >= OPEN_ENDED_END {
+                (RequestShape::Range { start, end: None }, None)
+            } else {
+                (
+                    RequestShape::Range {
+                        start,
+                        end: Some(segment.end),
+                    },
+                    Some(segment.end),
+                )
+            };
+            run_worker(
+                &client,
+                store,
+                task_id,
+                &part,
+                &progress,
+                spec,
+                control,
+                request,
+                segment.index,
+                segment.start,
+                limit_end,
+            )
+        }))
+        .buffer_unordered(concurrency);
+
+        while let Some(result) = results.next().await {
+            match result {
+                Ok(WorkerFlow::Complete) => {}
+                Ok(flow) => interrupted = Some(flow),
+                Err(error) => {
+                    if control.cancel_requested() {
+                        interrupted = Some(WorkerFlow::Cancelled);
+                    } else if control.pause_requested() {
+                        interrupted = Some(WorkerFlow::Paused);
+                    } else {
+                        return Err(mark_failed(store, task_id, error));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(flow) = interrupted {
+        drop(part);
+        return finish_interruption(store, task_id, dest_dir, flow);
+    }
+    if let Some(flow) = requested_flow(control) {
+        drop(part);
+        return finish_interruption(store, task_id, dest_dir, flow);
+    }
+
+    part.sync_all()
+        .map_err(|error| mark_failed(store, task_id, error))?;
+    store.transition_task(task_id, TaskState::Downloading, TaskState::Finalizing)?;
+    drop(part);
+
+    let finalized = finalize_task(store, task_id, dest_dir, spec.expected_sha256.as_deref())?;
+    let task = load_task(store, task_id)?;
+    let actual_sha256 = task.actual_sha256.ok_or_else(|| {
+        EngineError::new(
+            "CHECKSUM_MISSING",
+            "the completed task did not store its SHA-256",
+        )
+    })?;
+    let total_bytes = std::fs::metadata(&finalized.final_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+
+    Ok(TaskRunOutcome::Completed(DownloadOutcome {
+        actual_sha256,
+        total_bytes,
+        final_path: finalized.final_path,
+    }))
+}
+
+fn finish_interruption(
+    store: &Database,
+    task_id: &str,
+    dest_dir: &Path,
+    flow: WorkerFlow,
+) -> Result<TaskRunOutcome, EngineError> {
+    match flow {
+        WorkerFlow::Paused => {
+            persist_pause(store, task_id)?;
+            Ok(TaskRunOutcome::Paused)
+        }
+        WorkerFlow::Cancelled => {
+            cancel_task(store, task_id, dest_dir)?;
+            Ok(TaskRunOutcome::Cancelled)
+        }
+        WorkerFlow::Complete => Ok(TaskRunOutcome::Paused),
+    }
+}
+
+pub(crate) fn persist_pause(store: &Database, task_id: &str) -> Result<(), EngineError> {
+    let segments = store.segments_for_task(task_id)?;
+    let inputs: Vec<SegmentProgressInput> = segments
+        .iter()
+        .map(|segment| SegmentProgressInput {
+            segment_id: segment.index,
+            downloaded_bytes: segment.downloaded_bytes,
+        })
+        .collect();
+    let total: u64 = inputs.iter().map(|segment| segment.downloaded_bytes).sum();
+    store.persist_paused_progress(task_id, &inputs, total)
+}
+
+pub(crate) fn cancel_task(
+    store: &Database,
+    task_id: &str,
+    dest_dir: &Path,
+) -> Result<(), EngineError> {
+    let task = load_task(store, task_id)?;
+    let part_name = PartFile::part_name(&task.filename);
+    match std::fs::remove_file(dest_dir.join(&part_name)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(EngineError::new(
+                "IO_ERROR",
+                format!("the part file could not be removed: {error}"),
+            ))
+        }
+    }
+
+    let task = load_task(store, task_id)?;
+    if task.state != TaskState::Cancelled {
+        if !task.state.can_transition_to(TaskState::Cancelled) {
+            return Err(EngineError::invalid_state(
+                "the task cannot be cancelled in its current state",
+            ));
+        }
+        store.transition_task(task_id, task.state, TaskState::Cancelled)?;
+    }
+    Ok(())
 }
 
 /// Finalize a task that is already in the finalizing state.
@@ -362,11 +670,15 @@ async fn run_worker(
     part: &PartFile,
     progress: &Mutex<Vec<u64>>,
     spec: &DownloadSpec,
+    control: &TaskControl,
     request: RequestShape,
-    progress_index: usize,
+    segment_index: u32,
+    segment_start: u64,
     limit_end: Option<u64>,
-) -> Result<(), EngineError> {
-    let segment_index = progress_index as u32;
+) -> Result<WorkerFlow, EngineError> {
+    if let Some(flow) = requested_flow(control) {
+        return Ok(flow);
+    }
     store.transition_segment(
         task_id,
         segment_index,
@@ -374,6 +686,7 @@ async fn run_worker(
         SegmentState::Active,
     )?;
 
+    let progress_index = segment_index as usize;
     let result = stream_segment(
         client,
         store,
@@ -381,21 +694,32 @@ async fn run_worker(
         part,
         progress,
         spec,
+        control,
         request,
         progress_index,
+        segment_start,
         limit_end,
     )
     .await;
 
     match result {
-        Ok(()) => {
+        Ok(WorkerFlow::Complete) => {
             store.transition_segment(
                 task_id,
                 segment_index,
                 SegmentState::Active,
                 SegmentState::Done,
             )?;
-            Ok(())
+            Ok(WorkerFlow::Complete)
+        }
+        Ok(flow) => {
+            let _ = store.transition_segment(
+                task_id,
+                segment_index,
+                SegmentState::Active,
+                SegmentState::Pending,
+            );
+            Ok(flow)
         }
         Err(error) => {
             let _ = store.transition_segment(
@@ -417,35 +741,51 @@ async fn stream_segment(
     part: &PartFile,
     progress: &Mutex<Vec<u64>>,
     spec: &DownloadSpec,
+    control: &TaskControl,
     request: RequestShape,
     progress_index: usize,
+    segment_start: u64,
     limit_end: Option<u64>,
-) -> Result<(), EngineError> {
+) -> Result<WorkerFlow, EngineError> {
     match request {
-        RequestShape::Range {
-            start,
-            end: Some(end),
-        } => {
+        RequestShape::Range { start, end } => {
             let mut position = start;
-            while position < end {
-                let chunk_end = (position + READ_CHUNK_BYTES).min(end);
+            loop {
+                if let Some(flow) = requested_flow(control) {
+                    return Ok(flow);
+                }
+                let chunk_end = match end {
+                    Some(end) if position >= end => return Ok(WorkerFlow::Complete),
+                    Some(end) => (position + READ_CHUNK_BYTES).min(end),
+                    None => position + READ_CHUNK_BYTES,
+                };
                 let chunk = RequestShape::Range {
                     start: position,
                     end: Some(chunk_end),
                 };
-                let written = stream_request(
+                let (written, flow, total) = stream_request(
                     client,
                     store,
                     task_id,
                     part,
                     progress,
                     spec,
+                    control,
                     chunk,
                     Some(chunk_end),
-                    start,
+                    segment_start,
                     progress_index,
                 )
                 .await?;
+                if flow != WorkerFlow::Complete {
+                    return Ok(flow);
+                }
+                if end.is_some_and(|end| written >= end) {
+                    return Ok(WorkerFlow::Complete);
+                }
+                if total.is_some_and(|total| written >= total) {
+                    return Ok(WorkerFlow::Complete);
+                }
                 if written <= position {
                     return Err(EngineError::retryable(
                         "INCOMPLETE_BODY",
@@ -454,27 +794,23 @@ async fn stream_segment(
                 }
                 position = written;
             }
-            Ok(())
         }
         request => {
-            let segment_start = match request {
-                RequestShape::Range { start, .. } => start,
-                RequestShape::Plain => 0,
-            };
-            stream_request(
+            let (_, flow, _) = stream_request(
                 client,
                 store,
                 task_id,
                 part,
                 progress,
                 spec,
+                control,
                 request,
                 limit_end,
                 segment_start,
                 progress_index,
             )
             .await?;
-            Ok(())
+            Ok(flow)
         }
     }
 }
@@ -487,17 +823,22 @@ async fn stream_request(
     part: &PartFile,
     progress: &Mutex<Vec<u64>>,
     spec: &DownloadSpec,
+    control: &TaskControl,
     request: RequestShape,
     limit_end: Option<u64>,
     segment_start: u64,
     progress_index: usize,
-) -> Result<u64, EngineError> {
+) -> Result<(u64, WorkerFlow, Option<u64>), EngineError> {
     let expected_start = match request {
         RequestShape::Range { start, .. } => start,
         RequestShape::Plain => 0,
     };
+    let mut range_total = None;
     let mut attempts = 0usize;
     let response = loop {
+        if let Some(flow) = requested_flow(control) {
+            return Ok((expected_start, flow, range_total));
+        }
         attempts += 1;
         let headers = request_headers(spec, request.range_header())?;
         let (response, _final_url) = match get_following_redirects(client, &spec.url, headers).await
@@ -527,15 +868,18 @@ async fn stream_request(
             if status != StatusCode::PARTIAL_CONTENT {
                 return Err(status_error(status));
             }
-            let (start, _total) = parse_content_range(&response)?;
+            let (start, total) = parse_content_range(&response)?;
             if start != expected_start {
                 return Err(EngineError::new(
                     "RANGE_MISMATCH",
                     "the server returned a different range than requested",
                 ));
             }
+            range_total = total;
         } else if status != StatusCode::OK {
             return Err(status_error(status));
+        } else {
+            range_total = response.content_length();
         }
         break response;
     };
@@ -548,7 +892,15 @@ async fn stream_request(
     let mut last_persisted = 0u64;
     let mut body = response.bytes_stream();
 
-    while let Some(chunk) = body.next().await {
+    loop {
+        if let Some(flow) = requested_flow(control) {
+            let downloaded = position - segment_start;
+            persist_progress(store, task_id, progress, progress_index, downloaded)?;
+            return Ok((position, flow, range_total));
+        }
+        let Some(chunk) = body.next().await else {
+            break;
+        };
         let chunk = chunk.map_err(|_| {
             EngineError::retryable("NETWORK_INTERRUPTED", "the response stream was interrupted")
         })?;
@@ -577,7 +929,8 @@ async fn stream_request(
     }
 
     if let Some(end) = limit_end {
-        if position < end {
+        let reached_total = range_total.is_some_and(|total| position >= total);
+        if position < end && !reached_total {
             return Err(EngineError::retryable(
                 "INCOMPLETE_BODY",
                 "the server closed the response before the range was complete",
@@ -586,7 +939,7 @@ async fn stream_request(
     }
     let downloaded = position - segment_start;
     persist_progress(store, task_id, progress, progress_index, downloaded)?;
-    Ok(position)
+    Ok((position, WorkerFlow::Complete, range_total))
 }
 
 fn request_headers(spec: &DownloadSpec, range: Option<String>) -> Result<HeaderMap, EngineError> {

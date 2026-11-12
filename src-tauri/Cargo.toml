@@ -30,7 +30,7 @@ tauri-plugin-autostart = "2.7.0"
 tauri-plugin-deep-link = "2.6.3"
 tauri-plugin-notification = "2.8.1"
 tauri-plugin-single-instance = "2.5.5"
-tokio = { version = "1", features = ["process", "rt", "time"] }
+tokio = { version = "1", features = ["macros", "process", "rt", "sync", "time"] }
 unicode-normalization = "0.1"
 url = "2.5.8"
 uuid = { version = "=1.29.2", features = ["v4"] }
