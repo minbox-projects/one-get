@@ -10,6 +10,7 @@ pub mod deeplink;
 pub mod filename;
 pub mod files;
 pub mod notifications;
+pub mod opener;
 pub mod paths;
 pub mod process;
 pub mod secrets;

@@ -23,14 +23,14 @@ fn create_queued_task(db: &Database) -> String {
 }
 
 #[test]
-fn opening_new_database_creates_schema_version_1_and_required_structures_idempotently() {
+fn opening_new_database_creates_schema_version_2_and_required_structures_idempotently() {
     let dir = tempdir().expect("tempdir");
     let db_path = dir.path().join("store.sqlite");
 
     {
         let db = Database::open(&db_path).expect("first open creates schema");
         let meta = db.schema_metadata().expect("read schema metadata");
-        assert_eq!(meta.version, 1, "schema version must be 1");
+        assert_eq!(meta.version, 2, "schema version must be 2");
         assert!(
             meta.journal_mode.eq_ignore_ascii_case("wal"),
             "journal_mode must be WAL"
@@ -63,11 +63,253 @@ fn opening_new_database_creates_schema_version_1_and_required_structures_idempot
 }
 
 #[test]
+fn create_task_at_persists_destination_and_completion_records_completed_at_ms() {
+    let (_dir, db) = open_temp_db();
+
+    let destination = "/tmp/oneget-downloads";
+    let task_id = db
+        .create_task_at(
+            "https://example.invalid/with-destination.bin",
+            "with-destination.bin",
+            Some(destination),
+        )
+        .expect("create task with destination");
+    let created = db.task(&task_id).expect("lookup").expect("exists");
+    assert_eq!(
+        created.destination.as_deref(),
+        Some(destination),
+        "create_task_at must persist the requested destination"
+    );
+    assert!(
+        created.completed_at_ms.is_none(),
+        "a new task has no completion time"
+    );
+
+    let legacy_id = db
+        .create_task("https://example.invalid/legacy.bin", "legacy.bin")
+        .expect("create legacy task");
+    let legacy = db.task(&legacy_id).expect("lookup").expect("exists");
+    assert!(
+        legacy.destination.is_none(),
+        "create_task must keep the destination unset for the engine default"
+    );
+    assert!(legacy.completed_at_ms.is_none());
+
+    db.transition_task(&task_id, TaskState::Queued, TaskState::Connecting)
+        .expect("setup connecting");
+    db.transition_task(&task_id, TaskState::Connecting, TaskState::Downloading)
+        .expect("setup downloading");
+    db.transition_task(&task_id, TaskState::Downloading, TaskState::Finalizing)
+        .expect("setup finalizing");
+    db.complete_task(&task_id, Some("c".repeat(64).as_str()))
+        .expect("complete task");
+
+    let completed = db.task(&task_id).expect("lookup").expect("exists");
+    assert_eq!(completed.state, TaskState::Completed);
+    let completed_at_ms = completed
+        .completed_at_ms
+        .expect("complete_task must record completed_at_ms");
+    assert!(
+        completed_at_ms >= completed.created_at_ms,
+        "completion time must not precede creation time"
+    );
+}
+
+#[test]
+fn delete_task_removes_the_task_and_cascades_segments_without_touching_other_tasks() {
+    let (_dir, db) = open_temp_db();
+
+    let removed_id = create_queued_task(&db);
+    db.replace_segments(
+        &removed_id,
+        &[
+            SegmentInput {
+                index: 0,
+                start: 0,
+                end: 1024,
+                downloaded: 0,
+                state: SegmentState::Pending,
+            },
+            SegmentInput {
+                index: 1,
+                start: 1024,
+                end: 2048,
+                downloaded: 0,
+                state: SegmentState::Pending,
+            },
+        ],
+    )
+    .expect("segments for removed task");
+
+    let survivor_id = create_queued_task(&db);
+    db.replace_segments(
+        &survivor_id,
+        &[SegmentInput {
+            index: 0,
+            start: 0,
+            end: 4096,
+            downloaded: 512,
+            state: SegmentState::Active,
+        }],
+    )
+    .expect("segments for survivor task");
+
+    db.delete_task(&removed_id)
+        .expect("delete the selected task and its segments");
+
+    assert!(
+        db.task(&removed_id).expect("lookup removed task").is_none(),
+        "the deleted task row must be gone"
+    );
+    assert!(
+        db.segments_for_task(&removed_id)
+            .expect("segments for removed task")
+            .is_empty(),
+        "deleting a task must cascade its segments"
+    );
+
+    assert!(
+        db.task(&survivor_id)
+            .expect("lookup survivor task")
+            .is_some(),
+        "deleting one task must not remove another task"
+    );
+    assert_eq!(
+        db.segments_for_task(&survivor_id)
+            .expect("survivor segments")
+            .len(),
+        1,
+        "deleting one task must not remove another task's segments"
+    );
+    assert_eq!(
+        db.list_tasks().expect("list tasks").len(),
+        1,
+        "only the survivor remains"
+    );
+}
+
+#[test]
+fn migrating_schema_1_database_preserves_rows_and_is_idempotent_on_reopen() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("store.sqlite");
+
+    {
+        let conn = Connection::open(&db_path).expect("create raw schema-1 database");
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE schema_meta (
+                 key TEXT PRIMARY KEY NOT NULL,
+                 value TEXT NOT NULL
+             );
+             CREATE TABLE tasks (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 url TEXT NOT NULL,
+                 filename TEXT NOT NULL,
+                 part_path TEXT,
+                 state TEXT NOT NULL CHECK (state IN (
+                     'queued', 'connecting', 'downloading', 'paused',
+                     'finalizing', 'completed', 'failed', 'cancelled'
+                 )),
+                 downloaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK (downloaded_bytes >= 0),
+                 total_bytes INTEGER CHECK (total_bytes IS NULL OR total_bytes >= 0),
+                 expected_sha256 TEXT,
+                 actual_sha256 TEXT,
+                 etag TEXT,
+                 last_modified TEXT,
+                 error_code TEXT,
+                 error_message TEXT,
+                 created_at_ms INTEGER NOT NULL,
+                 updated_at_ms INTEGER NOT NULL,
+                 connections INTEGER NOT NULL DEFAULT 1 CHECK (connections > 0),
+                 headers_json TEXT NOT NULL DEFAULT '[]'
+             );
+             CREATE TABLE segments (
+                 task_id TEXT NOT NULL,
+                 segment_index INTEGER NOT NULL CHECK (segment_index >= 0),
+                 start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
+                 end_offset INTEGER NOT NULL CHECK (end_offset > start_offset),
+                 downloaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK (downloaded_bytes >= 0),
+                 state TEXT NOT NULL CHECK (state IN ('pending', 'active', 'done', 'failed')),
+                 PRIMARY KEY (task_id, segment_index),
+                 FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE,
+                 CHECK (downloaded_bytes <= end_offset - start_offset)
+             );
+             CREATE INDEX idx_tasks_state_created_at ON tasks (state, created_at_ms);
+             CREATE INDEX idx_segments_task_id ON segments (task_id);
+             INSERT INTO schema_meta (key, value) VALUES ('schema_version', '1');
+             INSERT INTO tasks (
+                 id, url, filename, state, downloaded_bytes, created_at_ms,
+                 updated_at_ms, connections
+             ) VALUES (
+                 'legacy-task', 'https://example.invalid/legacy.bin', 'legacy.bin',
+                 'queued', 0, 1000, 1000, 4
+             );
+             INSERT INTO segments (
+                 task_id, segment_index, start_offset, end_offset, downloaded_bytes, state
+             ) VALUES ('legacy-task', 0, 0, 1024, 0, 'pending');",
+        )
+        .expect("write schema-1 fixture");
+    }
+
+    let db = Database::open(&db_path).expect("schema-1 database must migrate");
+    assert_eq!(
+        db.schema_metadata().expect("metadata").version,
+        2,
+        "migration must reach schema version 2"
+    );
+    let task = db
+        .task("legacy-task")
+        .expect("lookup migrated task")
+        .expect("migrated row must be preserved");
+    assert_eq!(task.filename, "legacy.bin");
+    assert_eq!(task.connections, 4);
+    assert_eq!(task.state, TaskState::Queued);
+    assert!(
+        task.destination.is_none(),
+        "a migrated row has no recorded destination and falls back to the engine default"
+    );
+    assert!(
+        task.completed_at_ms.is_none(),
+        "a migrated row has no completion time"
+    );
+    assert_eq!(
+        db.segments_for_task("legacy-task")
+            .expect("migrated segments")
+            .len(),
+        1,
+        "existing segments must survive the migration"
+    );
+
+    drop(db);
+    let reopened = Database::open(&db_path).expect("reopen migrated database");
+    assert_eq!(
+        reopened.schema_metadata().expect("metadata").version,
+        2,
+        "reopening a migrated database stays at version 2"
+    );
+    assert!(
+        reopened
+            .task("legacy-task")
+            .expect("lookup after reopen")
+            .is_some(),
+        "the migration must be idempotent and keep existing rows"
+    );
+    assert_eq!(
+        reopened
+            .segments_for_task("legacy-task")
+            .expect("segments after reopen")
+            .len(),
+        1,
+        "reopening must not drop existing segments"
+    );
+}
+
+#[test]
 fn database_with_schema_version_newer_than_supported_is_refused_with_typed_error() {
     let dir = tempdir().expect("tempdir");
     let db_path = dir.path().join("store.sqlite");
     {
-        let _db = Database::open(&db_path).expect("create schema version 1 database");
+        let _db = Database::open(&db_path).expect("create schema version 2 database");
     }
 
     {
@@ -88,7 +330,7 @@ fn failing_migration_rolls_back_schema_change_and_leaves_backup_beside_database(
     let dir = tempdir().expect("tempdir");
     let db_path = dir.path().join("store.sqlite");
     {
-        let _db = Database::open(&db_path).expect("create schema version 1 database");
+        let _db = Database::open(&db_path).expect("create schema version 2 database");
     }
 
     // Craft a state that requires migration but makes applying migration fail:

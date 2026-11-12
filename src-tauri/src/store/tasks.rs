@@ -12,19 +12,41 @@ use crate::engine::state::TaskState;
 
 const TASK_COLUMNS: &str = "id, url, filename, part_path, state, downloaded_bytes, \
      total_bytes, expected_sha256, actual_sha256, etag, last_modified, error_code, error_message, \
-     created_at_ms, updated_at_ms, connections";
+     created_at_ms, updated_at_ms, connections, destination, completed_at_ms";
 
 impl Database {
     /// Insert a new queued task and return its identifier.
     pub fn create_task(&self, url: &str, filename: &str) -> Result<String, EngineError> {
+        self.create_task_at(url, filename, None)
+    }
+
+    /// Insert a new queued task with an optional per-task destination.
+    pub fn create_task_at(
+        &self,
+        url: &str,
+        filename: &str,
+        destination: Option<&str>,
+    ) -> Result<String, EngineError> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_ms();
         self.conn.execute(
-            "INSERT INTO tasks (id, url, filename, state, downloaded_bytes, created_at_ms, updated_at_ms) \
-             VALUES (?1, ?2, ?3, 'queued', 0, ?4, ?4)",
-            params![id, url, filename, now],
+            "INSERT INTO tasks \
+                 (id, url, filename, destination, state, downloaded_bytes, created_at_ms, updated_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, 'queued', 0, ?5, ?5)",
+            params![id, url, filename, destination, now],
         )?;
         Ok(id)
+    }
+
+    /// Remove one task; its segments cascade through the foreign key.
+    pub fn delete_task(&self, id: &str) -> Result<(), EngineError> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            return Err(task_not_found());
+        }
+        Ok(())
     }
 
     /// Look up one task by identifier.
@@ -369,7 +391,7 @@ impl Database {
 
         let changed = self.conn.execute(
             "UPDATE tasks SET state = 'completed', actual_sha256 = ?1, \
-             error_code = NULL, error_message = NULL, updated_at_ms = ?2 \
+             completed_at_ms = ?2, error_code = NULL, error_message = NULL, updated_at_ms = ?2 \
              WHERE id = ?3 AND state = 'finalizing'",
             params![hash, now_ms(), id],
         )?;
@@ -417,6 +439,8 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         created_at_ms: row.get(13)?,
         updated_at_ms: row.get(14)?,
         connections: read_u32(row, 15, "connections")?,
+        destination: row.get(16)?,
+        completed_at_ms: row.get(17)?,
     })
 }
 

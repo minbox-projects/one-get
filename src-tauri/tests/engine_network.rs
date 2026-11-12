@@ -104,6 +104,7 @@ fn make_spec(
         allow_html: false,
         expected_sha256,
         extra_headers: Vec::new(),
+        destination: None,
     }
 }
 
@@ -1075,6 +1076,7 @@ fn make_spec_with_headers(
         allow_html: false,
         expected_sha256,
         extra_headers: headers,
+        destination: None,
     }
 }
 

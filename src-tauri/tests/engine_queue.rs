@@ -55,6 +55,7 @@ fn make_spec(
         allow_html: false,
         expected_sha256,
         extra_headers: Vec::new(),
+        destination: None,
     }
 }
 
@@ -1489,5 +1490,362 @@ async fn add_task_rejects_parent_component_filename_and_cancel_spares_outside_pa
     assert!(
         server.served_ranges().is_empty(),
         "a traversal filename must not cause any request to the fixture"
+    );
+}
+
+fn destination_string(destination: &Path) -> String {
+    destination
+        .to_str()
+        .expect("fixture destination must be valid UTF-8")
+        .to_string()
+}
+
+fn mark_completed(store: &Database, id: &str, hash: &str) {
+    store
+        .transition_task(id, TaskState::Queued, TaskState::Connecting)
+        .expect("setup completed connecting");
+    store
+        .transition_task(id, TaskState::Connecting, TaskState::Downloading)
+        .expect("setup completed downloading");
+    store
+        .transition_task(id, TaskState::Downloading, TaskState::Finalizing)
+        .expect("setup completed finalizing");
+    store
+        .complete_task(id, Some(hash))
+        .expect("setup completed task");
+}
+
+fn mark_failed(store: &Database, id: &str) {
+    store
+        .transition_task(id, TaskState::Queued, TaskState::Connecting)
+        .expect("setup failed connecting");
+    store
+        .transition_task(id, TaskState::Connecting, TaskState::Failed)
+        .expect("setup failed task");
+}
+
+#[tokio::test]
+async fn add_task_rejects_invalid_destinations_without_persisting_a_task() {
+    let default_dest = tempdir().expect("default destination");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        default_dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    let missing = default_dest.path().join("missing-directory");
+    let mut spec = make_spec(
+        "https://example.invalid/missing".into(),
+        "missing.bin",
+        1,
+        None,
+    );
+    spec.destination = Some(missing);
+    let err = engine
+        .add_task(spec)
+        .expect_err("a missing destination directory must be rejected");
+    assert_code(&err, "INVALID_DESTINATION");
+
+    let not_a_directory = default_dest.path().join("not-a-directory");
+    std::fs::write(&not_a_directory, b"file").expect("write non-directory target");
+    let mut spec = make_spec(
+        "https://example.invalid/not-a-directory".into(),
+        "file.bin",
+        1,
+        None,
+    );
+    spec.destination = Some(not_a_directory);
+    let err = engine
+        .add_task(spec)
+        .expect_err("a file used as a destination must be rejected");
+    assert_code(&err, "INVALID_DESTINATION");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unwritable = default_dest.path().join("unwritable");
+        std::fs::create_dir(&unwritable).expect("create unwritable directory");
+        std::fs::set_permissions(&unwritable, std::fs::Permissions::from_mode(0o555))
+            .expect("make directory read-only");
+        let mut spec = make_spec(
+            "https://example.invalid/unwritable".into(),
+            "unwritable.bin",
+            1,
+            None,
+        );
+        spec.destination = Some(unwritable.clone());
+        let err = engine
+            .add_task(spec)
+            .expect_err("an unwritable destination directory must be rejected");
+        assert_code(&err, "INVALID_DESTINATION");
+        std::fs::set_permissions(&unwritable, std::fs::Permissions::from_mode(0o755))
+            .expect("restore directory permissions");
+    }
+
+    assert!(
+        engine.store().list_tasks().expect("list tasks").is_empty(),
+        "a rejected destination must not leave a task row"
+    );
+}
+
+#[tokio::test]
+async fn delete_record_allows_terminal_states_removes_part_and_preserves_completed_final() {
+    let task_dest = tempdir().expect("task destination");
+    let default_dest = tempdir().expect("default destination");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        default_dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let store = engine.store();
+    let destination = destination_string(task_dest.path());
+
+    let completed_id = store
+        .create_task_at(
+            "https://example.invalid/completed.bin",
+            "completed.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create completed task");
+    let completed_final = task_dest.path().join("completed.bin");
+    let completed_body = b"completed-final-bytes";
+    std::fs::write(&completed_final, completed_body).expect("write completed final");
+    let completed_part = part_path(task_dest.path(), "completed.bin");
+    std::fs::write(&completed_part, b"leftover-part").expect("write completed part");
+    mark_completed(store, &completed_id, &sha256_hex(completed_body));
+
+    let survivor_id = store
+        .create_task_at(
+            "https://example.invalid/survivor.bin",
+            "survivor.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create survivor task");
+    let survivor_final = task_dest.path().join("survivor.bin");
+    std::fs::write(&survivor_final, b"survivor-final-bytes").expect("write survivor final");
+    let survivor_part = part_path(task_dest.path(), "survivor.bin");
+    std::fs::write(&survivor_part, b"survivor-part").expect("write survivor part");
+    mark_completed(store, &survivor_id, &sha256_hex(b"survivor-final-bytes"));
+
+    engine
+        .delete_record(&completed_id)
+        .expect("delete a completed record");
+    assert!(
+        store
+            .task(&completed_id)
+            .expect("lookup completed record")
+            .is_none(),
+        "delete_record must remove the record"
+    );
+    assert!(
+        completed_final.exists(),
+        "delete_record must never remove the completed final file"
+    );
+    assert!(
+        !completed_part.exists(),
+        "delete_record must remove a present part file"
+    );
+    assert!(
+        survivor_final.exists() && survivor_part.exists(),
+        "delete_record must not touch another task's files"
+    );
+    assert!(
+        store.task(&survivor_id).expect("lookup survivor").is_some(),
+        "delete_record must not touch another task's record"
+    );
+
+    let failed_id = store
+        .create_task_at(
+            "https://example.invalid/failed.bin",
+            "failed.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create failed task");
+    let failed_part = part_path(task_dest.path(), "failed.bin");
+    std::fs::write(&failed_part, b"failed-part").expect("write failed part");
+    mark_failed(store, &failed_id);
+    engine
+        .delete_record(&failed_id)
+        .expect("delete a failed record");
+    assert!(
+        store.task(&failed_id).expect("lookup failed").is_none(),
+        "a failed record must be deletable"
+    );
+    assert!(
+        !failed_part.exists(),
+        "a failed record's part must be removed"
+    );
+
+    let cancelled_id = store
+        .create_task_at(
+            "https://example.invalid/cancelled.bin",
+            "cancelled.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create cancelled task");
+    let cancelled_part = part_path(task_dest.path(), "cancelled.bin");
+    std::fs::write(&cancelled_part, b"cancelled-part").expect("write cancelled part");
+    store
+        .transition_task(&cancelled_id, TaskState::Queued, TaskState::Cancelled)
+        .expect("cancel task");
+    engine
+        .delete_record(&cancelled_id)
+        .expect("delete a cancelled record");
+    assert!(
+        store
+            .task(&cancelled_id)
+            .expect("lookup cancelled")
+            .is_none(),
+        "a cancelled record must be deletable"
+    );
+    assert!(
+        !cancelled_part.exists(),
+        "a cancelled record's part must be removed"
+    );
+
+    let active_id = store
+        .create_task_at(
+            "https://example.invalid/active.bin",
+            "active.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create active task");
+    let active_part = part_path(task_dest.path(), "active.bin");
+    std::fs::write(&active_part, b"active-part").expect("write active part");
+    let err = engine
+        .delete_record(&active_id)
+        .expect_err("an active record must not be deleted");
+    assert_code(&err, "INVALID_STATE");
+    assert!(
+        store.task(&active_id).expect("lookup active").is_some(),
+        "a rejected delete_record must keep the record"
+    );
+    assert!(
+        active_part.exists(),
+        "a rejected delete_record must keep the part file"
+    );
+}
+
+#[tokio::test]
+async fn delete_file_removes_completed_final_and_record_but_leaves_unrelated_files() {
+    let task_dest = tempdir().expect("task destination");
+    let default_dest = tempdir().expect("default destination");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        default_dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let store = engine.store();
+    let destination = destination_string(task_dest.path());
+
+    let deleted_id = store
+        .create_task_at(
+            "https://example.invalid/delete-me.bin",
+            "delete-me.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create deleted task");
+    let deleted_final = task_dest.path().join("delete-me.bin");
+    std::fs::write(&deleted_final, b"delete-me-bytes").expect("write deleted final");
+    mark_completed(store, &deleted_id, &sha256_hex(b"delete-me-bytes"));
+
+    let unrelated = task_dest.path().join("unrelated.txt");
+    std::fs::write(&unrelated, b"unrelated").expect("write unrelated file");
+
+    let survivor_id = store
+        .create_task_at(
+            "https://example.invalid/survivor.bin",
+            "survivor.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create survivor task");
+    let survivor_final = task_dest.path().join("survivor.bin");
+    std::fs::write(&survivor_final, b"survivor-bytes").expect("write survivor final");
+    mark_completed(store, &survivor_id, &sha256_hex(b"survivor-bytes"));
+
+    engine
+        .delete_file(&deleted_id)
+        .expect("delete a completed file");
+
+    assert!(
+        !deleted_final.exists(),
+        "delete_file must remove the completed final file"
+    );
+    assert!(
+        store
+            .task(&deleted_id)
+            .expect("lookup deleted record")
+            .is_none(),
+        "delete_file must remove the record on success"
+    );
+    assert!(unrelated.exists(), "unrelated files must remain untouched");
+    assert!(
+        survivor_final.exists(),
+        "another task's final file must remain untouched"
+    );
+    assert!(
+        store.task(&survivor_id).expect("lookup survivor").is_some(),
+        "another task's record must remain untouched"
+    );
+}
+
+#[tokio::test]
+async fn delete_file_reports_missing_final_and_rejects_non_completed_states() {
+    let task_dest = tempdir().expect("task destination");
+    let default_dest = tempdir().expect("default destination");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        default_dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let store = engine.store();
+    let destination = destination_string(task_dest.path());
+
+    let missing_id = store
+        .create_task_at(
+            "https://example.invalid/missing.bin",
+            "missing.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create completed task without a final file");
+    mark_completed(store, &missing_id, &sha256_hex(b"never-written"));
+    let err = engine
+        .delete_file(&missing_id)
+        .expect_err("a missing final file must fail");
+    assert_code(&err, "FILE_MISSING");
+    assert!(
+        store
+            .task(&missing_id)
+            .expect("lookup missing-final record")
+            .is_some(),
+        "a missing final file must keep the record"
+    );
+
+    let failed_id = store
+        .create_task_at(
+            "https://example.invalid/failed.bin",
+            "failed.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create failed task");
+    let failed_final = task_dest.path().join("failed.bin");
+    std::fs::write(&failed_final, b"failed-bytes").expect("write failed final");
+    mark_failed(store, &failed_id);
+    let err = engine
+        .delete_file(&failed_id)
+        .expect_err("only a completed task can delete its file");
+    assert_code(&err, "INVALID_STATE");
+    assert!(
+        failed_final.exists(),
+        "a rejected delete_file must keep the existing file"
+    );
+    assert!(
+        store.task(&failed_id).expect("lookup failed").is_some(),
+        "a rejected delete_file must keep the record"
     );
 }

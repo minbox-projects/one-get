@@ -74,6 +74,7 @@ fn make_spec_with(
         allow_html,
         expected_sha256,
         extra_headers: Vec::new(),
+        destination: None,
     }
 }
 
@@ -190,6 +191,118 @@ async fn download_once_8mib_8_connections_completes_with_matching_hash_progress_
         task.actual_sha256.as_deref(),
         Some(expected_hash.as_str()),
         "stored actual_sha256 must match"
+    );
+}
+
+#[tokio::test]
+async fn engine_task_uses_its_persisted_destination_for_part_and_final_files() {
+    let body = pattern_bytes(73, 2 * 1024 * 1024);
+    let server = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        range_mode: RangeMode::HonorRange,
+        stream_delay: Some(Duration::from_millis(8)),
+        stream_chunk_size: 16 * 1024,
+        ..Default::default()
+    });
+    let default_dest = tempdir().expect("default destination");
+    let custom_dest = tempdir().expect("custom destination");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        default_dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    let filename = "custom-destination.bin";
+    let mut spec = make_spec(server.url("/custom-destination"), filename, 2);
+    spec.destination = Some(custom_dest.path().to_path_buf());
+    let task_id = engine
+        .add_task(spec)
+        .expect("add task with a custom destination");
+
+    let task = engine
+        .store()
+        .task(&task_id)
+        .expect("load task")
+        .expect("task exists");
+    let stored_destination = task
+        .destination
+        .as_deref()
+        .expect("the resolved destination must be persisted");
+    assert_eq!(
+        std::fs::canonicalize(stored_destination).expect("canonical stored destination"),
+        std::fs::canonicalize(custom_dest.path()).expect("canonical custom destination"),
+        "the persisted destination must resolve to the requested directory"
+    );
+
+    let part_name = PartFile::part_name(filename);
+    let ((), ()) = tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine.run())
+                .await
+                .expect("engine run timed out")
+                .expect("engine run failed");
+        },
+        async {
+            let deadline = Instant::now() + WAIT_TIMEOUT;
+            loop {
+                if custom_dest.path().join(&part_name).exists() {
+                    assert!(
+                        !default_dest.path().join(&part_name).exists(),
+                        "the part file must not be written in the engine default destination"
+                    );
+                    break;
+                }
+                let state = engine
+                    .store()
+                    .task(&task_id)
+                    .expect("load task")
+                    .expect("task exists")
+                    .state;
+                assert!(
+                    !matches!(
+                        state,
+                        TaskState::Completed | TaskState::Failed | TaskState::Cancelled
+                    ),
+                    "task reached {state:?} before its part file appeared in the custom destination"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the part file in the custom destination"
+                );
+                sleep(POLL_INTERVAL).await;
+            }
+        }
+    );
+
+    let finished = engine
+        .store()
+        .task(&task_id)
+        .expect("load task")
+        .expect("task exists");
+    assert_eq!(
+        finished.state,
+        TaskState::Completed,
+        "the task must complete"
+    );
+
+    let final_path = custom_dest.path().join(filename);
+    assert!(
+        final_path.exists(),
+        "the final file must be written in the custom destination"
+    );
+    assert_eq!(
+        read_file(&final_path),
+        body,
+        "the final file bytes must match the fixture"
+    );
+    assert!(
+        !default_dest.path().join(filename).exists(),
+        "no final file may be written in the engine default destination"
+    );
+    assert!(
+        !custom_dest.path().join(&part_name).exists(),
+        "the part file must be removed after completion"
     );
 }
 

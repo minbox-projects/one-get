@@ -28,6 +28,8 @@ pub struct Task {
     pub url: String,
     /// Sanitized destination filename.
     pub filename: String,
+    /// Persisted destination directory, or `None` for the engine default.
+    pub destination: Option<String>,
     /// Part file recorded for recovery.
     pub part_path: Option<String>,
     /// Current lifecycle state.
@@ -52,6 +54,8 @@ pub struct Task {
     pub created_at_ms: i64,
     /// Last modification time in epoch milliseconds.
     pub updated_at_ms: i64,
+    /// Completion time in epoch milliseconds, once the task completed.
+    pub completed_at_ms: Option<i64>,
     /// Requested parallel connection count.
     pub connections: u32,
 }

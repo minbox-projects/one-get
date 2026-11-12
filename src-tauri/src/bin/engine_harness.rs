@@ -87,6 +87,7 @@ async fn run_command(args: &[String]) -> Result<(), String> {
                 allow_html: false,
                 expected_sha256,
                 extra_headers: Vec::new(),
+                destination: None,
             })
             .map_err(|error| error.to_string())?,
     };

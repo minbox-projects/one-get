@@ -77,6 +77,8 @@ pub struct DownloadSpec {
     pub expected_sha256: Option<String>,
     /// Additional request headers.
     pub extra_headers: Vec<(String, String)>,
+    /// Destination directory for this task, or `None` for the engine default.
+    pub destination: Option<PathBuf>,
 }
 
 /// HTTP and pacing configuration shared by one task execution.
@@ -2454,7 +2456,7 @@ pub(crate) fn load_task(store: &Database, task_id: &str) -> Result<Task, EngineE
         .ok_or_else(|| EngineError::new("TASK_NOT_FOUND", "the requested task does not exist"))
 }
 
-fn find_completed_final(cap: &CapDir, task: &Task) -> Result<String, EngineError> {
+pub(crate) fn find_completed_final(cap: &CapDir, task: &Task) -> Result<String, EngineError> {
     let expected = task.actual_sha256.as_deref();
     for name in candidate_names(&task.filename) {
         if !exists(cap, &name) {

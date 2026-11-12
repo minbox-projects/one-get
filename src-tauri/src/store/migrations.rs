@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::engine::error::EngineError;
 
 /// Schema version this build creates and understands.
-pub(crate) const SCHEMA_VERSION: i64 = 1;
+pub(crate) const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -55,6 +55,13 @@ CREATE INDEX IF NOT EXISTS idx_segments_task_id
 INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '1');
 ";
 
+/// Schema 2 adds the per-task destination and the completion timestamp.
+const SCHEMA_V2: &str = "
+ALTER TABLE tasks ADD COLUMN destination TEXT;
+ALTER TABLE tasks ADD COLUMN completed_at_ms INTEGER;
+UPDATE schema_meta SET value = '2' WHERE key = 'schema_version';
+";
+
 /// Read the stored schema version, treating an absent table or row as version 0.
 pub(crate) fn read_schema_version(conn: &Connection) -> rusqlite::Result<i64> {
     let has_meta: bool = conn.query_row(
@@ -96,6 +103,9 @@ pub(crate) fn migrate(conn: &Connection, from_version: i64) -> Result<(), Engine
         .map_err(|_| migration_error())?;
     transaction
         .execute_batch(SCHEMA_V1)
+        .map_err(|_| migration_error())?;
+    transaction
+        .execute_batch(SCHEMA_V2)
         .map_err(|_| migration_error())?;
     if !required_indexes_present(&transaction).map_err(|_| migration_error())?
         || !required_constraints_present(&transaction).map_err(|_| migration_error())?
