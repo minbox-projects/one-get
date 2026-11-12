@@ -1,5 +1,6 @@
-//! Platform-specific capabilities: application paths, filename safety, and
-//! capability-scoped filesystem access.
+//! Platform-specific capabilities: application paths, filename safety,
+//! capability-scoped filesystem access, guarded child processes, and secret
+//! storage.
 //!
 //! Target-specific branches are confined to this module. Shared application
 //! code depends only on the interfaces re-exported here.
@@ -7,10 +8,14 @@
 pub mod filename;
 pub mod files;
 pub mod paths;
+pub mod process;
+pub mod secrets;
 
 pub use filename::{sanitize_filename, FilenameTarget};
 pub use files::{CapDir, FileMetadata};
 pub use paths::AppPaths;
+pub use process::ChildGuard;
+pub use secrets::{KeyringStore, MemorySecretStore, SecretError, SecretStore, SecretValue};
 
 use std::fmt;
 
