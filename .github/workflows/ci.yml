@@ -1,0 +1,150 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run check:pins
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run test
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+
+  rust-gates:
+    name: rust gates (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-15
+          - windows-2025
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+            bundles: app
+            bundle_path: src-tauri/target/aarch64-apple-darwin/release/bundle/macos
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: app
+            bundle_path: src-tauri/target/x86_64-apple-darwin/release/bundle/macos
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+            bundle_path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.target }}
+      - run: npm ci
+      - run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oneget-${{ matrix.target }}
+          path: ${{ matrix.bundle_path }}
+          if-no-files-found: error
+
+  macos-signing-dry-run:
+    name: macos signing dry-run
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check script syntax
+        run: |
+          for script in \
+            scripts/create-signing-certificate.sh \
+            scripts/import-signing-certificate.sh \
+            scripts/verify-macos-artifact.sh; do
+            bash -n "$script"
+          done
+      - name: Create, import, sign, verify, and clean up
+        run: |
+          set -euo pipefail
+          work_dir=$(mktemp -d "$RUNNER_TEMP/oneget-signing.XXXXXX")
+          certificate_dir="$work_dir/certificates"
+          keychain="$work_dir/oneget-signing.keychain-db"
+          identity="OneGet CI Dry Run"
+
+          scripts/create-signing-certificate.sh "$certificate_dir" "$identity"
+          scripts/import-signing-certificate.sh \
+            "$certificate_dir/certificate.p12" \
+            "$certificate_dir/certificate-password.txt" \
+            "$keychain" \
+            "$identity"
+          scripts/verify-macos-artifact.sh "$keychain" "$identity" "$certificate_dir"
+
+          for leftover in "$keychain" "$keychain-db" "$keychain.password"; do
+            if [ -e "$leftover" ]; then
+              printf 'error: temporary keychain file was not removed: %s\n' "$leftover" >&2
+              exit 1
+            fi
+          done
+          if [ -e "$certificate_dir" ]; then
+            printf 'error: certificate output directory was not removed: %s\n' "$certificate_dir" >&2
+            exit 1
+          fi
+          rm -rf "$work_dir"
+          printf 'signing dry run completed and cleaned up\n'
+      - name: Fail closed on missing inputs
+        run: |
+          set -euo pipefail
+          script=scripts/create-signing-certificate.sh
+          if "$script"; then
+            printf 'error: missing arguments did not fail\n' >&2
+            exit 1
+          fi
+          if "$script" "$RUNNER_TEMP/oneget-missing-identity"; then
+            printf 'error: missing identity did not fail\n' >&2
+            exit 1
+          fi
+          printf 'missing inputs were rejected\n'

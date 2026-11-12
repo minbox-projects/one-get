@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (.ai-workflow/notes/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+# ai-workflow notes pairing --project <project-root> --write .ai-workflow/notes/implemented/architecture/2026-11-11-oneget-desktop-shell-baseline.md
+2026-11-11-oneget-desktop-shell-baseline.md: 09e075bc09c9ecca9517736be10bfe7f2dd374ad
+2026-11-11-oneget-desktop-shell-baseline.zh.md: ca681b1368c7321994d25362249d277dd9269c96
