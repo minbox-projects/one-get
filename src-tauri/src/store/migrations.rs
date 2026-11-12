@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     error_message TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
-    connections INTEGER NOT NULL DEFAULT 1 CHECK (connections > 0)
+    connections INTEGER NOT NULL DEFAULT 1 CHECK (connections > 0),
+    headers_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS segments (
     task_id TEXT NOT NULL,

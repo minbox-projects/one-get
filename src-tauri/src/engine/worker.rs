@@ -7,7 +7,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::{stream, StreamExt};
@@ -23,11 +23,13 @@ use crate::platform::PlatformError;
 use crate::store::types::{Segment, SegmentInput, SegmentProgressInput, Task};
 use crate::store::Database;
 
+use super::cookies::CookieJar;
 use super::error::EngineError;
-use super::http::{build_client, get_following_redirects};
+use super::http::{build_client, get_following_redirects_with_cookies};
 use super::part_file::PartFile;
 use super::planner::{plan_segments, SegmentPlan, MIN_SEGMENT_BYTES};
 use super::probe::{probe, ProbeOptions, ProbeOutcome};
+use super::rate_limit::RateLimiter;
 use super::retry;
 use super::state::{SegmentState, TaskState};
 
@@ -75,6 +77,33 @@ pub struct DownloadSpec {
     pub expected_sha256: Option<String>,
     /// Additional request headers.
     pub extra_headers: Vec<(String, String)>,
+}
+
+/// HTTP and pacing configuration shared by one task execution.
+pub(crate) struct NetworkContext {
+    /// Client that applies the configured proxy.
+    pub client: Client,
+    /// Cookies reloaded for this task run, when a cookie file is configured.
+    pub cookies: Option<CookieJar>,
+    /// Per-task and global rate limiters that pace every streamed chunk.
+    pub limiters: Vec<Arc<RateLimiter>>,
+}
+
+impl NetworkContext {
+    /// A proxy-free, cookie-free, unlimited context for direct callers.
+    pub(crate) fn plain() -> Result<Self, EngineError> {
+        Ok(Self {
+            client: build_client()?,
+            cookies: None,
+            limiters: Vec::new(),
+        })
+    }
+
+    async fn pace(&self, bytes: usize) {
+        for limiter in &self.limiters {
+            limiter.acquire(bytes as u64).await;
+        }
+    }
 }
 
 /// Result of a completed download.
@@ -199,6 +228,32 @@ impl From<ProbeOutcome> for DownloadMetadata {
             last_modified: outcome.last_modified,
         }
     }
+}
+
+/// Remote metadata compared when revalidating a paused task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteMetadata {
+    /// Total file size when the server reports it.
+    pub total_bytes: Option<u64>,
+    /// Response entity tag.
+    pub etag: Option<String>,
+    /// Response last-modified value.
+    pub last_modified: Option<String>,
+}
+
+/// Revalidate a paused task's remote metadata through the engine network.
+pub(crate) async fn remote_metadata(
+    network: &NetworkContext,
+    spec: &DownloadSpec,
+    start: u64,
+) -> Result<RemoteMetadata, EngineError> {
+    let (metadata, _) =
+        probe_for_download(&network.client, network.cookies.as_ref(), spec, start).await?;
+    Ok(RemoteMetadata {
+        total_bytes: metadata.total_bytes,
+        etag: metadata.etag,
+        last_modified: metadata.last_modified,
+    })
 }
 
 /// One segment as it is currently being downloaded.
@@ -567,6 +622,7 @@ pub async fn download_once(
         allow_html: spec.allow_html,
         extra_headers: spec.extra_headers.clone(),
     };
+    let network = NetworkContext::plain()?;
 
     let mut probe_attempts = 0;
     let metadata = loop {
@@ -574,7 +630,14 @@ pub async fn download_once(
         match probe(&spec.url, &options).await {
             Ok(outcome) => break DownloadMetadata::from(outcome),
             Err(error) if error.code() == "INVALID_RESPONSE" => {
-                match probe_zero_length(&spec.url, &options).await {
+                match probe_zero_length(
+                    &network.client,
+                    network.cookies.as_ref(),
+                    &spec.url,
+                    &options,
+                )
+                .await
+                {
                     Ok(metadata) => break metadata,
                     Err(_) => return Err(mark_failed(store, task_id, error)),
                 }
@@ -629,12 +692,11 @@ pub async fn download_once(
     let part = PartFile::create(&cap, &spec.filename, metadata.total_bytes)?;
     store.record_part_path(task_id, &part_name)?;
 
-    let client = build_client()?;
     if range_supported {
         if let SegmentPlan::Ranged(segments) = &plan {
             if let Some(first) = segments.first() {
                 if first.end > first.start {
-                    match check_first_range(&client, spec, first.start, first.end).await? {
+                    match check_first_range(&network, spec, first.start, first.end).await? {
                         RangeCheck::Accepted => {}
                         RangeCheck::Ignored => {
                             range_supported = false;
@@ -660,7 +722,7 @@ pub async fn download_once(
                     end: Some(segment.end),
                 };
                 run_worker(
-                    &client,
+                    &network,
                     store,
                     task_id,
                     &part,
@@ -696,7 +758,7 @@ pub async fn download_once(
                 RequestShape::Plain
             };
             match run_worker(
-                &client,
+                &network,
                 store,
                 task_id,
                 &part,
@@ -763,6 +825,19 @@ pub async fn download_task(
     spec: &DownloadSpec,
     control: &TaskControl,
 ) -> Result<TaskRunOutcome, EngineError> {
+    let network = NetworkContext::plain()?;
+    download_task_with_network(store, task_id, dest_dir, spec, control, &network).await
+}
+
+/// Execute one task with a caller-supplied HTTP, cookie, and pacing context.
+pub(crate) async fn download_task_with_network(
+    store: &Database,
+    task_id: &str,
+    dest_dir: &Path,
+    spec: &DownloadSpec,
+    control: &TaskControl,
+    network: &NetworkContext,
+) -> Result<TaskRunOutcome, EngineError> {
     if let Some(flow) = requested_flow(control) {
         return finish_interruption(store, task_id, dest_dir, flow);
     }
@@ -810,11 +885,11 @@ pub async fn download_task(
         _ => probe_start,
     };
 
-    let probe_client = build_client()?;
     let mut probe_attempts = 0;
     let (metadata, probe_bytes) = loop {
         probe_attempts += 1;
-        match probe_for_download(&probe_client, spec, probe_start).await {
+        match probe_for_download(&network.client, network.cookies.as_ref(), spec, probe_start).await
+        {
             // A range probe that receives a non-range response is retried a
             // bounded number of times: a transient server or proxy error can
             // look like a server that ignores ranges, and a genuine non-range
@@ -919,8 +994,7 @@ pub async fn download_task(
                     let downloaded = rows.first().map(|row| row.downloaded).unwrap_or(0);
                     let start = first.start.saturating_add(downloaded);
                     if start < first.end {
-                        let client = build_client()?;
-                        match check_first_range(&client, spec, start, first.end).await? {
+                        match check_first_range(network, spec, start, first.end).await? {
                             RangeCheck::Accepted => {}
                             RangeCheck::Ignored => {
                                 range_supported = false;
@@ -946,12 +1020,11 @@ pub async fn download_task(
         part.write_at(offset, &bytes)?;
     }
 
-    let client = build_client()?;
     let mut plain = !range_supported;
     let mut attempt = 0usize;
     loop {
         attempt += 1;
-        match run_pool(&client, store, task_id, &part, spec, control, plain).await {
+        match run_pool(network, store, task_id, &part, spec, control, plain).await {
             Ok(PoolOutcome::Completed) => break,
             Ok(PoolOutcome::Interrupted(flow)) => {
                 drop(part);
@@ -1260,7 +1333,7 @@ pub fn finalize_task(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_worker(
-    client: &Client,
+    network: &NetworkContext,
     store: &Database,
     task_id: &str,
     part: &PartFile,
@@ -1289,7 +1362,7 @@ async fn run_worker(
         limit_end,
     };
     let result = stream_request(
-        client,
+        network,
         store,
         task_id,
         part,
@@ -1339,7 +1412,7 @@ type PoolFuture<'a> = std::pin::Pin<
 
 /// Run one registry-backed worker pool until every segment is done.
 async fn run_pool(
-    client: &Client,
+    network: &NetworkContext,
     store: &Database,
     task_id: &str,
     part: &PartFile,
@@ -1369,7 +1442,7 @@ async fn run_pool(
             break;
         };
         active.push(Box::pin(run_dynamic_worker(
-            client,
+            network,
             store,
             task_id,
             part,
@@ -1421,7 +1494,7 @@ async fn run_pool(
             let pending = lock_registry(&registry)?.take_pending();
             if let Some(segment_index) = pending {
                 active.push(Box::pin(run_dynamic_worker(
-                    client,
+                    network,
                     store,
                     task_id,
                     part,
@@ -1440,7 +1513,7 @@ async fn run_pool(
                 break;
             };
             active.push(Box::pin(run_dynamic_worker(
-                client, store, task_id, part, spec, control, &registry, tail_index, plain,
+                network, store, task_id, part, spec, control, &registry, tail_index, plain,
             )));
         }
     }
@@ -1454,7 +1527,7 @@ async fn run_pool(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_dynamic_worker(
-    client: &Client,
+    network: &NetworkContext,
     store: &Database,
     task_id: &str,
     part: &PartFile,
@@ -1520,7 +1593,7 @@ async fn run_dynamic_worker(
         segment_index,
     };
     let result = stream_request(
-        client,
+        network,
         store,
         task_id,
         part,
@@ -1572,7 +1645,7 @@ async fn run_dynamic_worker(
 
 #[allow(clippy::too_many_arguments)]
 async fn stream_request(
-    client: &Client,
+    network: &NetworkContext,
     store: &Database,
     task_id: &str,
     part: &PartFile,
@@ -1644,7 +1717,14 @@ async fn stream_request(
             }
             send_attempts += 1;
             let headers = request_headers(spec, current.range_header())?;
-            let response = match get_following_redirects(client, &spec.url, headers).await {
+            let response = match get_following_redirects_with_cookies(
+                &network.client,
+                &spec.url,
+                headers,
+                network.cookies.as_ref(),
+            )
+            .await
+            {
                 Ok((response, _final_url)) => response,
                 Err(error) if error.is_retryable() && send_attempts < retry::MAX_ATTEMPTS => {
                     tokio::time::sleep(retry::delay_for_attempt(
@@ -1742,6 +1822,7 @@ async fn stream_request(
                         }
                     }
                     if !bytes.is_empty() {
+                        network.pace(bytes.len()).await;
                         if let Err(error) = part.write_at(position, bytes) {
                             persist_target_progress(
                                 store,
@@ -1767,6 +1848,7 @@ async fn stream_request(
                     registry,
                     segment_index,
                 } => {
+                    network.pace(chunk.len()).await;
                     let write =
                         match write_dynamic_chunk(registry, part, *segment_index, position, &chunk)
                         {
@@ -1873,7 +1955,7 @@ enum RangeCheck {
 /// A matching 206 keeps the multi-segment plan. A 200 means the server ignores
 /// ranges, so the caller discards the plan before any worker writes.
 async fn check_first_range(
-    client: &Client,
+    network: &NetworkContext,
     spec: &DownloadSpec,
     start: u64,
     end: u64,
@@ -1891,7 +1973,14 @@ async fn check_first_range(
             spec,
             Some(format!("bytes={start}-{}", request_end.saturating_sub(1))),
         )?;
-        let result = match get_following_redirects(client, &spec.url, headers).await {
+        let result = match get_following_redirects_with_cookies(
+            &network.client,
+            &spec.url,
+            headers,
+            network.cookies.as_ref(),
+        )
+        .await
+        {
             Ok((response, _final_url)) => match response.status() {
                 StatusCode::PARTIAL_CONTENT => {
                     let (range_start, _) = parse_content_range(&response)?;
@@ -2004,11 +2093,13 @@ fn segment_inputs(plan: &SegmentPlan, total: Option<u64>) -> Vec<SegmentInput> {
 /// non-range download and its body is not consumed.
 async fn probe_for_download(
     client: &Client,
+    cookies: Option<&CookieJar>,
     spec: &DownloadSpec,
     start: u64,
 ) -> Result<(DownloadMetadata, Option<Vec<u8>>), EngineError> {
     let headers = request_headers(spec, Some(format!("bytes={start}-{start}")))?;
-    let (response, _final_url) = get_following_redirects(client, &spec.url, headers).await?;
+    let (response, _final_url) =
+        get_following_redirects_with_cookies(client, &spec.url, headers, cookies).await?;
 
     let content_type = header_text(&response, CONTENT_TYPE);
     if !spec.allow_html && content_type.as_deref().is_some_and(is_html) {
@@ -2094,10 +2185,11 @@ fn parse_unsatisfied_total(response: &reqwest::Response) -> Result<u64, EngineEr
 }
 
 async fn probe_zero_length(
+    client: &Client,
+    cookies: Option<&CookieJar>,
     url: &str,
     options: &ProbeOptions,
 ) -> Result<DownloadMetadata, EngineError> {
-    let client = build_client()?;
     let mut headers = HeaderMap::new();
     for (name, value) in &options.extra_headers {
         let name = HeaderName::from_bytes(name.as_bytes())
@@ -2109,7 +2201,8 @@ async fn probe_zero_length(
     }
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
 
-    let (response, _final_url) = get_following_redirects(&client, url, headers).await?;
+    let (response, _final_url) =
+        get_following_redirects_with_cookies(client, url, headers, cookies).await?;
     if response.status() != StatusCode::OK || response.content_length() != Some(0) {
         return Err(invalid_response());
     }
@@ -2153,6 +2246,7 @@ fn status_error(status: StatusCode) -> EngineError {
     match status.as_u16() {
         401 | 403 => EngineError::new("AUTH_REQUIRED", "the server requires authorization"),
         404 => EngineError::new("NOT_FOUND", "the remote file was not found"),
+        407 => EngineError::new("PROXY_AUTH_REQUIRED", "the proxy requires authentication"),
         408 => EngineError::retryable("TIMEOUT", "the server reported a request timeout"),
         429 => EngineError::retryable("RATE_LIMITED", "the server asked the client to slow down"),
         _ if status.is_server_error() => {

@@ -11,23 +11,27 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
+use reqwest::Client;
 use tokio::sync::Notify;
 
+use crate::logging::{LogLevel, Logger};
 use crate::store::types::Task;
 use crate::store::Database;
 
+use super::cookies::CookieJar;
 use super::error::EngineError;
+use super::http::{self, ProxyConfig};
 use super::part_file::PartFile;
-use super::probe::{probe, ProbeOptions};
+use super::rate_limit::RateLimiter;
 use super::state::TaskState;
 use super::worker::{
-    cancel_task, download_task, finalize_task, mark_failed, persist_pause, DownloadSpec,
-    TaskControl, TaskRunOutcome,
+    cancel_task, download_task_with_network, finalize_task, mark_failed, persist_pause,
+    remote_metadata, DownloadSpec, NetworkContext, TaskControl, TaskRunOutcome,
 };
 
 /// How long the scheduler waits for newly added work before it stops.
@@ -67,6 +71,14 @@ pub struct Engine {
     max_concurrent: AtomicUsize,
     controls: Mutex<HashMap<String, Arc<TaskControl>>>,
     notify: Notify,
+    /// Full in-memory specs, including query-bearing URLs and header values.
+    specs: Mutex<HashMap<String, DownloadSpec>>,
+    proxy: RwLock<Option<ProxyConfig>>,
+    client: Mutex<Option<Client>>,
+    cookie_file: Mutex<Option<PathBuf>>,
+    global_rate: Mutex<Option<Arc<RateLimiter>>>,
+    task_rates: Mutex<HashMap<String, Arc<RateLimiter>>>,
+    logger: Mutex<Option<Arc<Logger>>>,
 }
 
 impl Engine {
@@ -78,6 +90,13 @@ impl Engine {
             max_concurrent: AtomicUsize::new(options.max_concurrent),
             controls: Mutex::new(HashMap::new()),
             notify: Notify::new(),
+            specs: Mutex::new(HashMap::new()),
+            proxy: RwLock::new(None),
+            client: Mutex::new(None),
+            cookie_file: Mutex::new(None),
+            global_rate: Mutex::new(None),
+            task_rates: Mutex::new(HashMap::new()),
+            logger: Mutex::new(None),
         }
     }
 
@@ -86,13 +105,100 @@ impl Engine {
         &self.store
     }
 
+    /// Route every engine request through an optional HTTP proxy.
+    ///
+    /// The proxy URL is validated immediately. Embedded userinfo is refused so
+    /// credentials can only arrive through the dedicated fields, which stay in
+    /// memory and are never persisted or logged.
+    pub fn set_proxy(&self, proxy: Option<ProxyConfig>) -> Result<(), EngineError> {
+        let validated = match proxy {
+            Some(proxy) => Some(ProxyConfig {
+                url: http::validate_proxy_url(&proxy.url)?,
+                username: proxy.username,
+                password: proxy.password,
+            }),
+            None => None,
+        };
+
+        *self
+            .proxy
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = validated;
+        *self
+            .client
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        Ok(())
+    }
+
+    /// Load a Netscape cookie file at each task start or resume.
+    pub fn set_cookie_file(&self, path: Option<PathBuf>) {
+        *self
+            .cookie_file
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
+    }
+
+    /// Pace every task's downloads at a shared bytes-per-second limit.
+    ///
+    /// `None` or zero removes the limit without restarting the engine.
+    pub fn set_global_rate_limit(&self, bytes_per_second: Option<u64>) {
+        *self
+            .global_rate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = active_limiter(bytes_per_second);
+        self.notify.notify_one();
+    }
+
+    /// Pace one task's workers at a shared bytes-per-second limit.
+    ///
+    /// `None` or zero removes the limit without restarting the engine.
+    pub fn set_task_rate_limit(&self, task_id: &str, bytes_per_second: Option<u64>) {
+        let mut limits = self
+            .task_rates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match active_limiter(bytes_per_second) {
+            Some(limiter) => {
+                limits.insert(task_id.to_string(), limiter);
+            }
+            None => {
+                limits.remove(task_id);
+            }
+        }
+        drop(limits);
+        self.notify.notify_one();
+    }
+
+    /// Attach the structured logger that receives task lifecycle events.
+    pub fn set_logger(&self, logger: Arc<Logger>) {
+        *self
+            .logger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(logger);
+    }
+
     /// Create a queued task and persist its connection and hash settings.
     pub fn add_task(&self, spec: DownloadSpec) -> Result<String, EngineError> {
-        let id = self.store.create_task(&spec.url, &spec.filename)?;
+        http::validate_extra_headers(&spec.extra_headers)?;
+
+        let stored_url = http::storage_url(&spec.url);
+        let id = self.store.create_task(&stored_url, &spec.filename)?;
         self.store.record_connections(&id, spec.connections)?;
         if let Some(expected) = spec.expected_sha256.as_deref() {
             self.store.record_expected_sha256(&id, expected)?;
         }
+        let header_names: Vec<String> = spec
+            .extra_headers
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        self.store.record_header_names(&id, &header_names)?;
+
+        self.specs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.clone(), spec);
         self.notify.notify_one();
         Ok(id)
     }
@@ -148,6 +254,12 @@ impl Engine {
     /// Re-probe paused tasks so a changed remote file or missing part is not
     /// resumed silently. Unchanged tasks stay paused for an explicit resume.
     async fn revalidate_paused(&self) -> Result<(), EngineError> {
+        let network = NetworkContext {
+            client: self.client()?,
+            cookies: self.load_cookies().ok().flatten(),
+            limiters: Vec::new(),
+        };
+
         for task in self.store.list_tasks()? {
             if task.state != TaskState::Paused {
                 continue;
@@ -157,8 +269,8 @@ impl Engine {
                 continue;
             }
 
-            let options = ProbeOptions::default();
-            let Ok(outcome) = probe(&task.url, &options).await else {
+            let spec = self.spec_for(&task);
+            let Ok(outcome) = remote_metadata(&network, &spec, 0).await else {
                 // A transient probe failure leaves the task paused rather than
                 // discarding recoverable progress.
                 continue;
@@ -356,6 +468,96 @@ impl Engine {
         }
     }
 
+    fn client(&self) -> Result<Client, EngineError> {
+        let mut cached = self
+            .client
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(client) = cached.as_ref() {
+            return Ok(client.clone());
+        }
+
+        let proxy = self
+            .proxy
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let client = http::build_client_with_proxy(proxy.as_ref())?;
+        *cached = Some(client.clone());
+        Ok(client)
+    }
+
+    fn load_cookies(&self) -> Result<Option<CookieJar>, EngineError> {
+        let path = self
+            .cookie_file
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        match path {
+            Some(path) => CookieJar::load(&path).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn spec_for(&self, task: &Task) -> DownloadSpec {
+        let mut spec = self
+            .specs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&task.id)
+            .cloned()
+            .unwrap_or_else(|| spec_from_task(task));
+
+        // Configuration that can change between runs stays authoritative in the
+        // durable row, while the query-bearing URL and header values remain
+        // available only from the in-memory spec.
+        spec.filename = task.filename.clone();
+        spec.connections = task.connections.max(1);
+        spec.expected_sha256 = task.expected_sha256.clone();
+        spec
+    }
+
+    fn network_for(&self, task_id: &str) -> Result<NetworkContext, EngineError> {
+        let client = self.client()?;
+        let cookies = self.load_cookies()?;
+
+        let mut limiters = Vec::new();
+        if let Some(limiter) = self
+            .task_rates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(task_id)
+            .cloned()
+        {
+            limiters.push(limiter);
+        }
+        if let Some(limiter) = self
+            .global_rate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            limiters.push(limiter);
+        }
+
+        Ok(NetworkContext {
+            client,
+            cookies,
+            limiters,
+        })
+    }
+
+    fn log(&self, level: LogLevel, event: &str, fields: serde_json::Value) {
+        let logger = self
+            .logger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(logger) = logger {
+            let _ = logger.log(level, event, fields);
+        }
+    }
+
     async fn run_task(
         &self,
         task_id: String,
@@ -363,8 +565,26 @@ impl Engine {
     ) -> Result<(), EngineError> {
         let result = match self.store.task(&task_id)? {
             Some(task) => {
-                let spec = spec_from_task(&task);
-                download_task(&self.store, &task_id, &self.dest_dir, &spec, &control).await
+                self.log(
+                    LogLevel::Info,
+                    "engine.task.started",
+                    serde_json::json!({ "task_id": task_id }),
+                );
+                let spec = self.spec_for(&task);
+                match self.network_for(&task_id) {
+                    Ok(network) => {
+                        download_task_with_network(
+                            &self.store,
+                            &task_id,
+                            &self.dest_dir,
+                            &spec,
+                            &control,
+                            &network,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
             }
             None => Ok(TaskRunOutcome::Cancelled),
         };
@@ -378,7 +598,33 @@ impl Engine {
         }
 
         match result {
-            Ok(_) => Ok(()),
+            Ok(TaskRunOutcome::Completed(outcome)) => {
+                self.log(
+                    LogLevel::Info,
+                    "engine.task.completed",
+                    serde_json::json!({
+                        "task_id": task_id,
+                        "bytes": outcome.total_bytes,
+                    }),
+                );
+                Ok(())
+            }
+            Ok(TaskRunOutcome::Paused) => {
+                self.log(
+                    LogLevel::Info,
+                    "engine.task.paused",
+                    serde_json::json!({ "task_id": task_id }),
+                );
+                Ok(())
+            }
+            Ok(TaskRunOutcome::Cancelled) => {
+                self.log(
+                    LogLevel::Info,
+                    "engine.task.cancelled",
+                    serde_json::json!({ "task_id": task_id }),
+                );
+                Ok(())
+            }
             Err(error) => {
                 if let Ok(Some(task)) = self.store.task(&task_id) {
                     if task.state.can_transition_to(TaskState::Failed) {
@@ -390,6 +636,14 @@ impl Engine {
                         self.store
                             .update_task_error(&task_id, error.code(), &error.to_string());
                 }
+                self.log(
+                    LogLevel::Warn,
+                    "engine.task.failed",
+                    serde_json::json!({
+                        "task_id": task_id,
+                        "error_code": error.code(),
+                    }),
+                );
                 if error.code() == "DATABASE_ERROR" {
                     return Err(error);
                 }
@@ -397,6 +651,12 @@ impl Engine {
             }
         }
     }
+}
+
+fn active_limiter(bytes_per_second: Option<u64>) -> Option<Arc<RateLimiter>> {
+    bytes_per_second
+        .filter(|rate| *rate > 0)
+        .map(|rate| Arc::new(RateLimiter::new(rate)))
 }
 
 fn spec_from_task(task: &Task) -> DownloadSpec {

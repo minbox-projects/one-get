@@ -1,17 +1,53 @@
 //! Behavior tests for cooperative dynamic splitting and the safe Range
 //! fallback. Every fixture is local and deterministic.
+//!
+//! Exact engine configuration boundary exercised by the network-settings tests:
+//!
+//! ```text
+//! impl Engine {
+//!     pub fn set_global_rate_limit(&self, bytes_per_second: Option<u64>);
+//!     pub fn set_task_rate_limit(&self, task_id: &str, bytes_per_second: Option<u64>);
+//!     pub fn set_proxy(&self, proxy: Option<ProxyConfig>) -> Result<(), EngineError>;
+//!     pub fn set_cookie_file(&self, path: Option<std::path::PathBuf>);
+//!     pub fn set_logger(&self, logger: std::sync::Arc<oneget_lib::logging::Logger>);
+//! }
+//!
+//! pub struct ProxyConfig {
+//!     pub url: String,
+//!     pub username: Option<String>,
+//!     pub password: Option<String>,
+//! }
+//! ```
+//!
+//! `ProxyConfig` lives in `oneget_lib::engine::http`. `add_task` rejects a
+//! forbidden or newline-bearing header with `EngineError::code()` equal to
+//! `INVALID_HEADER` before it creates a task. `set_proxy` rejects a URL with
+//! embedded userinfo with `INVALID_PROXY_URL`. A proxy authentication failure
+//! surfaces as task error code `PROXY_AUTH_REQUIRED`.
 
 mod support;
 
+#[path = "support/cookies.rs"]
+mod cookies;
+#[path = "support/proxy_server.rs"]
+mod proxy_server;
+
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
-use oneget_lib::engine::http::build_client_with_timeouts;
+use cookies::{
+    cookie_names, cookie_value, future_expiry, past_expiry, write_cookie_file, NetscapeCookie,
+};
+use oneget_lib::engine::http::{build_client_with_timeouts, ProxyConfig};
 use oneget_lib::engine::retry::classify_reqwest_error;
 use oneget_lib::engine::scheduler::{Engine, EngineOptions};
 use oneget_lib::engine::state::TaskState;
 use oneget_lib::engine::worker::DownloadSpec;
+use oneget_lib::logging::{LogConfig, LogLevel, Logger};
 use oneget_lib::store::{Database, Segment};
+use proxy_server::{ProxyCredentials, ProxyServer};
 use sha2::{Digest, Sha256};
 use support::fixtures::pattern_bytes;
 use support::range_server::{FixtureConfig, RangeMode, RangeServer};
@@ -20,6 +56,25 @@ use tokio::time::{sleep, timeout, Instant};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(15);
 const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+const MIB: u64 = 1024 * 1024;
+const RATE_STARTUP: Duration = Duration::from_millis(1_500);
+const RATE_FINALIZE: Duration = Duration::from_millis(1_500);
+const SAFE_HEADER_NAME: &str = "X-Custom-Trace";
+const SAFE_HEADER_VALUE: &str = "oneget-safe-trace-value";
+const FORBIDDEN_HEADERS: &[&str] = &[
+    "Host",
+    "Authorization",
+    "Cookie",
+    "Range",
+    "Proxy-Authorization",
+    "Content-Length",
+    "Connection",
+    "Transfer-Encoding",
+    "Upgrade",
+    "TE",
+    "Trailer",
+    "Set-Cookie",
+];
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
@@ -1003,5 +1058,1076 @@ async fn a_stalled_server_produces_a_timeout_code_and_no_files() {
         fixture.requests().len(),
         1,
         "the timeout probe must issue exactly one request"
+    );
+}
+
+fn make_spec_with_headers(
+    url: String,
+    filename: &str,
+    connections: u32,
+    expected_sha256: Option<String>,
+    headers: Vec<(String, String)>,
+) -> DownloadSpec {
+    DownloadSpec {
+        url,
+        filename: filename.to_string(),
+        connections,
+        allow_html: false,
+        expected_sha256,
+        extra_headers: headers,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProgressSample {
+    at: Instant,
+    downloaded: u64,
+}
+
+async fn sample_progress(store: &Database, id: &str, deadline: Duration) -> Vec<ProgressSample> {
+    let start = Instant::now();
+    let mut samples = Vec::new();
+    loop {
+        let task = store.task(id).expect("load task").expect("task exists");
+        samples.push(ProgressSample {
+            at: Instant::now(),
+            downloaded: task.downloaded_bytes,
+        });
+        if matches!(
+            task.state,
+            TaskState::Completed | TaskState::Failed | TaskState::Cancelled | TaskState::Paused
+        ) {
+            return samples;
+        }
+        if start.elapsed() > deadline {
+            panic!(
+                "timed out sampling task {id}, state {:?}, downloaded={}",
+                task.state, task.downloaded_bytes
+            );
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn downloaded_at(samples: &[ProgressSample], at: Instant) -> u64 {
+    samples
+        .iter()
+        .take_while(|sample| sample.at <= at)
+        .last()
+        .map(|sample| sample.downloaded)
+        .unwrap_or(0)
+}
+
+/// Average persisted throughput over a steady window that excludes the
+/// startup ramp and the finalization tail.
+fn steady_rate(
+    samples: &[ProgressSample],
+    total: u64,
+    startup: Duration,
+    finalize: Duration,
+) -> f64 {
+    let first_byte = samples
+        .iter()
+        .find(|sample| sample.downloaded > 0)
+        .expect("the task must persist at least one byte");
+    let done = samples
+        .iter()
+        .find(|sample| sample.downloaded >= total)
+        .expect("the task must reach its declared total");
+    let window_start = first_byte.at + startup;
+    let window_end = done.at.checked_sub(finalize).unwrap_or(done.at);
+    assert!(
+        window_end > window_start,
+        "the steady window must be non-empty, start={window_start:?}, end={window_end:?}"
+    );
+
+    let bytes =
+        downloaded_at(samples, window_end).saturating_sub(downloaded_at(samples, window_start));
+    bytes as f64 / (window_end - window_start).as_secs_f64()
+}
+
+fn sqlite_text_dump(path: &Path) -> String {
+    let connection = rusqlite::Connection::open(path).expect("open sqlite for scan");
+    let mut statement = connection
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        .expect("list tables");
+    let tables: Vec<String> = statement
+        .query_map([], |row| row.get(0))
+        .expect("query tables")
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .expect("collect tables");
+    drop(statement);
+
+    let mut dump = String::new();
+    for table in tables {
+        if table.starts_with("sqlite_") {
+            continue;
+        }
+        let escaped = table.replace('"', "\"\"");
+        let mut statement = connection
+            .prepare(&format!("SELECT * FROM \"{}\"", escaped))
+            .expect("prepare table scan");
+        let columns = statement.column_count();
+        let mut rows = statement.query([]).expect("query table rows");
+        while let Some(row) = rows.next().expect("next table row") {
+            for index in 0..columns {
+                let value: rusqlite::types::Value =
+                    row.get(index).expect("read table cell as a value");
+                match value {
+                    rusqlite::types::Value::Text(text) => dump.push_str(&text),
+                    rusqlite::types::Value::Blob(bytes) => {
+                        dump.push_str(&String::from_utf8_lossy(&bytes))
+                    }
+                    _ => {}
+                }
+                dump.push('\u{1f}');
+            }
+        }
+    }
+    dump
+}
+
+fn read_log_files(logger: &Logger) -> String {
+    let mut logs = String::new();
+    for path in logger.files().expect("list log files") {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            logs.push_str(&text);
+            logs.push('\n');
+        }
+    }
+    logs
+}
+
+fn debug_logger(directory: &Path) -> Arc<Logger> {
+    Arc::new(
+        Logger::new(
+            LogConfig::new(directory.to_path_buf(), 10 * 1024 * 1024, 5)
+                .with_level(LogLevel::Debug),
+        )
+        .expect("create logger"),
+    )
+}
+
+async fn run_engine_to_terminal(engine: &Engine, store: &Database, id: &str) {
+    let ((), state) = tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine.run())
+                .await
+                .expect("engine run timed out")
+                .expect("engine run failed");
+        },
+        wait_for_terminal(store, id, WAIT_TIMEOUT),
+    );
+    assert!(
+        matches!(
+            state,
+            TaskState::Completed | TaskState::Failed | TaskState::Cancelled | TaskState::Paused
+        ),
+        "task {id} did not reach a terminal state, observed {state:?}"
+    );
+}
+
+#[tokio::test]
+async fn per_task_rate_limit_holds_steady_throughput() {
+    const BODY_BYTES: usize = 8 * 1024 * 1024;
+    let body = pattern_bytes(0x31, BODY_BYTES);
+    let hash = sha256_hex(&body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body,
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    let id = engine
+        .add_task(make_spec(
+            fixture.url("/rate/per-task.bin"),
+            "per-task.bin",
+            1,
+            Some(hash.clone()),
+        ))
+        .expect("add task");
+    engine.set_task_rate_limit(&id, Some(MIB));
+
+    let ((), samples) = tokio::join!(
+        async {
+            timeout(Duration::from_secs(30), engine.run())
+                .await
+                .expect("rate-limited engine run timed out")
+                .expect("engine run failed");
+        },
+        sample_progress(engine.store(), &id, Duration::from_secs(30)),
+    );
+
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(
+        task.state,
+        TaskState::Completed,
+        "rate-limited download failed with {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+
+    let measured = steady_rate(&samples, BODY_BYTES as u64, RATE_STARTUP, RATE_FINALIZE);
+    let expected = MIB as f64;
+    assert!(
+        (expected * 0.9..=expected * 1.1).contains(&measured),
+        "per-task steady throughput {measured:.0} B/s is outside 10% of {expected:.0} B/s"
+    );
+}
+
+#[tokio::test]
+async fn global_rate_limit_applies_to_a_single_task() {
+    const BODY_BYTES: usize = 4 * 1024 * 1024;
+    let body = pattern_bytes(0x42, BODY_BYTES);
+    let hash = sha256_hex(&body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body,
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    engine.set_global_rate_limit(Some(MIB));
+
+    let id = engine
+        .add_task(make_spec(
+            fixture.url("/rate/global.bin"),
+            "global.bin",
+            1,
+            Some(hash.clone()),
+        ))
+        .expect("add task");
+
+    let ((), samples) = tokio::join!(
+        async {
+            timeout(Duration::from_secs(25), engine.run())
+                .await
+                .expect("globally rate-limited engine run timed out")
+                .expect("engine run failed");
+        },
+        sample_progress(engine.store(), &id, Duration::from_secs(25)),
+    );
+
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(
+        task.state,
+        TaskState::Completed,
+        "globally rate-limited download failed with {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+
+    let measured = steady_rate(&samples, BODY_BYTES as u64, RATE_STARTUP, RATE_FINALIZE);
+    let expected = MIB as f64;
+    assert!(
+        (expected * 0.9..=expected * 1.1).contains(&measured),
+        "global steady throughput {measured:.0} B/s is outside 10% of {expected:.0} B/s"
+    );
+}
+
+#[tokio::test]
+async fn an_unlimited_task_is_not_throttled() {
+    const BODY_BYTES: usize = 8 * 1024 * 1024;
+    let body = pattern_bytes(0x53, BODY_BYTES);
+    let hash = sha256_hex(&body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body,
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    let id = engine
+        .add_task(make_spec(
+            fixture.url("/rate/unlimited.bin"),
+            "unlimited.bin",
+            1,
+            Some(hash.clone()),
+        ))
+        .expect("add task");
+
+    let started = Instant::now();
+    let ((), observed) = tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine.run())
+                .await
+                .expect("unlimited engine run timed out")
+                .expect("engine run failed");
+        },
+        wait_for_terminal(engine.store(), &id, WAIT_TIMEOUT),
+    );
+    let elapsed = started.elapsed();
+
+    assert_eq!(observed, TaskState::Completed);
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "an unlimited local 8 MiB task must not be throttled, elapsed {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn proxy_basic_auth_forwards_and_never_leaks_to_the_origin() {
+    const HEADER_VALUE: &str = "oneget-proxy-test-header";
+    const PROXY_USER: &str = "oneget-proxy-user";
+    const PROXY_PASSWORD: &str = "oneget-proxy-password-secret";
+    let body = non_periodic_bytes(1024 * 1024);
+    let hash = sha256_hex(&body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        ..Default::default()
+    });
+    let proxy = ProxyServer::start(Some(ProxyCredentials {
+        username: PROXY_USER.to_string(),
+        password: PROXY_PASSWORD.to_string(),
+    }));
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let log_dir = tempdir().expect("logs");
+    let logger = debug_logger(log_dir.path());
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    engine
+        .set_proxy(Some(ProxyConfig {
+            url: proxy.url(),
+            username: Some(PROXY_USER.to_string()),
+            password: Some(PROXY_PASSWORD.to_string()),
+        }))
+        .expect("configure the authenticated proxy");
+    engine.set_logger(Arc::clone(&logger));
+
+    let id = engine
+        .add_task(make_spec_with_headers(
+            fixture.url("/proxy/payload.bin"),
+            "proxy-payload.bin",
+            2,
+            Some(hash.clone()),
+            vec![("X-Proxy-Test".to_string(), HEADER_VALUE.to_string())],
+        ))
+        .expect("add proxied task");
+
+    run_engine_to_terminal(&engine, engine.store(), &id).await;
+    logger.flush().expect("flush logs");
+
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(
+        task.state,
+        TaskState::Completed,
+        "proxied download failed with {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+    assert_eq!(
+        std::fs::read(dest.path().join("proxy-payload.bin")).expect("read final"),
+        body
+    );
+
+    let expected = proxy
+        .expected_authorization()
+        .expect("the fixture proxy requires credentials")
+        .to_string();
+    let requests = proxy.requests();
+    assert!(!requests.is_empty(), "the proxy must observe requests");
+    for request in &requests {
+        assert_eq!(
+            request.headers.get("proxy-authorization"),
+            Some(&expected),
+            "the proxy must observe Proxy-Authorization for {}",
+            request.target
+        );
+        let forwarded = request
+            .forwarded_headers
+            .as_ref()
+            .expect("an authenticated request must be forwarded");
+        assert!(
+            !forwarded.contains_key("proxy-authorization"),
+            "proxy credentials must not be forwarded to the origin"
+        );
+        assert!(
+            !forwarded.contains_key("proxy-connection"),
+            "hop-by-hop proxy headers must not be forwarded"
+        );
+    }
+
+    let origin_requests = fixture.requests();
+    assert!(!origin_requests.is_empty());
+    assert_eq!(
+        requests.len(),
+        origin_requests.len(),
+        "every client request must reach the origin through the proxy"
+    );
+    for request in &origin_requests {
+        assert!(
+            !request.headers.contains_key("proxy-authorization"),
+            "the origin must never see proxy credentials"
+        );
+    }
+
+    let origin_prefix = fixture.url("");
+    for request in &requests {
+        assert!(
+            request.target.starts_with(&origin_prefix),
+            "the proxy forwarded to an unexpected destination: {}",
+            request.target
+        );
+    }
+
+    let dump = sqlite_text_dump(&store_dir.path().join("tasks.db"));
+    assert!(
+        !dump.contains(PROXY_USER),
+        "the proxy username reached the store"
+    );
+    assert!(
+        !dump.contains(PROXY_PASSWORD),
+        "the proxy password reached the store"
+    );
+    let logs = read_log_files(&logger);
+    assert!(
+        !logs.contains(PROXY_USER),
+        "the proxy username reached the logs"
+    );
+    assert!(
+        !logs.contains(PROXY_PASSWORD),
+        "the proxy password reached the logs"
+    );
+}
+
+#[tokio::test]
+async fn wrong_proxy_password_fails_with_a_typed_proxy_auth_error() {
+    const PROXY_USER: &str = "oneget-proxy-user";
+    const GOOD_PASSWORD: &str = "oneget-proxy-good-secret";
+    const WRONG_PASSWORD: &str = "oneget-proxy-wrong-secret";
+    let body = non_periodic_bytes(128 * 1024);
+    let fixture = RangeServer::start(FixtureConfig {
+        body,
+        ..Default::default()
+    });
+    let proxy = ProxyServer::start(Some(ProxyCredentials {
+        username: PROXY_USER.to_string(),
+        password: GOOD_PASSWORD.to_string(),
+    }));
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let log_dir = tempdir().expect("logs");
+    let logger = debug_logger(log_dir.path());
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    engine
+        .set_proxy(Some(ProxyConfig {
+            url: proxy.url(),
+            username: Some(PROXY_USER.to_string()),
+            password: Some(WRONG_PASSWORD.to_string()),
+        }))
+        .expect("configure the proxy with a wrong password");
+    engine.set_logger(Arc::clone(&logger));
+
+    let id = engine
+        .add_task(make_spec(
+            fixture.url("/proxy/wrong-password.bin"),
+            "wrong-password.bin",
+            1,
+            None,
+        ))
+        .expect("add task");
+    run_engine_to_terminal(&engine, engine.store(), &id).await;
+    logger.flush().expect("flush logs");
+
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(task.state, TaskState::Failed);
+    assert_eq!(
+        task.error_code.as_deref(),
+        Some("PROXY_AUTH_REQUIRED"),
+        "wrong proxy credentials must produce a typed proxy auth error, got {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert!(
+        !dest.path().join("wrong-password.bin").exists(),
+        "a proxy authentication failure must not create a final file"
+    );
+
+    let requests = proxy.requests();
+    assert!(!requests.is_empty(), "the proxy must observe the attempt");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.forwarded_headers.is_none()),
+        "a rejected proxy request must not be forwarded to the origin"
+    );
+    assert!(
+        fixture.requests().is_empty(),
+        "the origin must not receive a request rejected by the proxy"
+    );
+
+    let dump = sqlite_text_dump(&store_dir.path().join("tasks.db"));
+    for secret in [PROXY_USER, GOOD_PASSWORD, WRONG_PASSWORD] {
+        assert!(
+            !dump.contains(secret),
+            "proxy credential {secret} reached the store"
+        );
+    }
+    let logs = read_log_files(&logger);
+    for secret in [PROXY_USER, GOOD_PASSWORD, WRONG_PASSWORD] {
+        assert!(
+            !logs.contains(secret),
+            "proxy credential {secret} reached the logs"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_proxy_url_with_userinfo_is_rejected_without_persisting_credentials() {
+    let proxy = ProxyServer::start(None);
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    let error = engine
+        .set_proxy(Some(ProxyConfig {
+            url: format!("http://oneget-user:oneget-embedded-secret@{}", proxy.addr()),
+            username: None,
+            password: None,
+        }))
+        .expect_err("a proxy URL with userinfo must be rejected");
+    assert_eq!(
+        error.code(),
+        "INVALID_PROXY_URL",
+        "expected INVALID_PROXY_URL, got {}: {}",
+        error.code(),
+        error
+    );
+    assert!(
+        proxy.requests().is_empty(),
+        "an invalid proxy configuration must not send a request"
+    );
+    assert!(
+        engine.store().list_tasks().expect("list tasks").is_empty(),
+        "an invalid proxy configuration must not create a task"
+    );
+
+    let dump = sqlite_text_dump(&store_dir.path().join("tasks.db"));
+    assert!(
+        !dump.contains("oneget-embedded-secret"),
+        "embedded proxy credentials reached the store"
+    );
+}
+
+#[tokio::test]
+async fn cookie_scope_sends_only_matching_host_path_and_unexpired_insecure_cookies() {
+    const HOST_ONLY: &str = "oneget-cookie-host-only";
+    const PATH_OK: &str = "oneget-cookie-path-ok";
+    const OTHER_HOST: &str = "oneget-cookie-other-host";
+    const PATH_WRONG: &str = "oneget-cookie-path-wrong";
+    const EXPIRED: &str = "oneget-cookie-expired";
+    const SECURE: &str = "oneget-cookie-secure";
+    let body = non_periodic_bytes(256 * 1024);
+    let hash = sha256_hex(&body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let log_dir = tempdir().expect("logs");
+    let cookie_dir = tempdir().expect("cookies");
+    let logger = debug_logger(log_dir.path());
+    let cookie_path = write_cookie_file(
+        cookie_dir.path(),
+        &[
+            NetscapeCookie {
+                domain: "127.0.0.1".to_string(),
+                include_subdomains: false,
+                path: "/".to_string(),
+                secure: false,
+                expires: future_expiry(),
+                name: "host_only".to_string(),
+                value: HOST_ONLY.to_string(),
+            },
+            NetscapeCookie {
+                domain: "localhost".to_string(),
+                include_subdomains: false,
+                path: "/".to_string(),
+                secure: false,
+                expires: future_expiry(),
+                name: "other_host".to_string(),
+                value: OTHER_HOST.to_string(),
+            },
+            NetscapeCookie {
+                domain: "127.0.0.1".to_string(),
+                include_subdomains: false,
+                path: "/allowed".to_string(),
+                secure: false,
+                expires: future_expiry(),
+                name: "path_ok".to_string(),
+                value: PATH_OK.to_string(),
+            },
+            NetscapeCookie {
+                domain: "127.0.0.1".to_string(),
+                include_subdomains: false,
+                path: "/blocked".to_string(),
+                secure: false,
+                expires: future_expiry(),
+                name: "path_wrong".to_string(),
+                value: PATH_WRONG.to_string(),
+            },
+            NetscapeCookie {
+                domain: "127.0.0.1".to_string(),
+                include_subdomains: false,
+                path: "/".to_string(),
+                secure: false,
+                expires: past_expiry(),
+                name: "expired".to_string(),
+                value: EXPIRED.to_string(),
+            },
+            NetscapeCookie {
+                domain: "127.0.0.1".to_string(),
+                include_subdomains: false,
+                path: "/".to_string(),
+                secure: true,
+                expires: future_expiry(),
+                name: "secure_only".to_string(),
+                value: SECURE.to_string(),
+            },
+        ],
+    );
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    engine.set_cookie_file(Some(cookie_path));
+    engine.set_logger(Arc::clone(&logger));
+
+    let id = engine
+        .add_task(make_spec(
+            fixture.url("/allowed/payload.bin"),
+            "cookie-scope.bin",
+            1,
+            Some(hash.clone()),
+        ))
+        .expect("add task");
+    run_engine_to_terminal(&engine, engine.store(), &id).await;
+
+    // The same listener is reachable as both 127.0.0.1 and localhost, so the
+    // second task isolates host matching from any port or redirect difference.
+    let localhost_id = engine
+        .add_task(make_spec(
+            fixture.host_url("localhost", "/allowed/payload-localhost.bin"),
+            "cookie-scope-localhost.bin",
+            1,
+            None,
+        ))
+        .expect("add localhost task");
+    run_engine_to_terminal(&engine, engine.store(), &localhost_id).await;
+    logger.flush().expect("flush logs");
+
+    for task_id in [&id, &localhost_id] {
+        let task = engine
+            .store()
+            .task(task_id)
+            .expect("load task")
+            .expect("task");
+        assert_eq!(
+            task.state,
+            TaskState::Completed,
+            "cookie-scoped download failed with {:?}: {:?}",
+            task.error_code,
+            task.error_message
+        );
+    }
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+
+    let requests = fixture.requests();
+    assert!(!requests.is_empty());
+    let ipv4_names = BTreeSet::from(["host_only".to_string(), "path_ok".to_string()]);
+    let localhost_names = BTreeSet::from(["other_host".to_string()]);
+    let mut saw_ipv4 = false;
+    let mut saw_localhost = false;
+    for request in &requests {
+        let host = request.headers.get("host").cloned().unwrap_or_default();
+        let names = cookie_names(&request.headers);
+        if host.starts_with("127.0.0.1") {
+            saw_ipv4 = true;
+            assert_eq!(
+                names,
+                ipv4_names,
+                "request to {} sent cookies {:?}",
+                request.path,
+                request.headers.get("cookie")
+            );
+        } else if host.starts_with("localhost") {
+            saw_localhost = true;
+            assert_eq!(
+                names,
+                localhost_names,
+                "request to {} sent cookies {:?}",
+                request.path,
+                request.headers.get("cookie")
+            );
+        } else {
+            panic!("unexpected fixture host {host}");
+        }
+    }
+    assert!(saw_ipv4, "the fixture must record the 127.0.0.1 requests");
+    assert!(
+        saw_localhost,
+        "the fixture must record the localhost requests"
+    );
+
+    let dump = sqlite_text_dump(&store_dir.path().join("tasks.db"));
+    let logs = read_log_files(&logger);
+    for secret in [HOST_ONLY, PATH_OK, OTHER_HOST, PATH_WRONG, EXPIRED, SECURE] {
+        assert!(
+            !dump.contains(secret),
+            "cookie value {secret} reached the store"
+        );
+        assert!(
+            !logs.contains(secret),
+            "cookie value {secret} reached the logs"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_cross_host_redirect_does_not_forward_the_original_host_cookie() {
+    const SOURCE_COOKIE: &str = "oneget-source-cookie-secret";
+    const TARGET_COOKIE: &str = "oneget-target-cookie-secret";
+    let target_body = non_periodic_bytes(512 * 1024);
+    let target_hash = sha256_hex(&target_body);
+    let target = RangeServer::start(FixtureConfig {
+        body: target_body.clone(),
+        ..Default::default()
+    });
+    let source = RangeServer::start(FixtureConfig {
+        body: Vec::new(),
+        redirect_location: Some(target.host_url("localhost", "/final/payload.bin")),
+        redirect_status: Some(302),
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let log_dir = tempdir().expect("logs");
+    let cookie_dir = tempdir().expect("cookies");
+    let logger = debug_logger(log_dir.path());
+    let cookie_path = write_cookie_file(
+        cookie_dir.path(),
+        &[
+            NetscapeCookie {
+                domain: "127.0.0.1".to_string(),
+                include_subdomains: false,
+                path: "/".to_string(),
+                secure: false,
+                expires: future_expiry(),
+                name: "source_cookie".to_string(),
+                value: SOURCE_COOKIE.to_string(),
+            },
+            NetscapeCookie {
+                domain: "localhost".to_string(),
+                include_subdomains: false,
+                path: "/".to_string(),
+                secure: false,
+                expires: future_expiry(),
+                name: "target_cookie".to_string(),
+                value: TARGET_COOKIE.to_string(),
+            },
+        ],
+    );
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    engine.set_cookie_file(Some(cookie_path));
+    engine.set_logger(Arc::clone(&logger));
+
+    let id = engine
+        .add_task(make_spec(
+            source.url("/start/payload.bin"),
+            "cross-host.bin",
+            1,
+            Some(target_hash.clone()),
+        ))
+        .expect("add task");
+    run_engine_to_terminal(&engine, engine.store(), &id).await;
+    logger.flush().expect("flush logs");
+
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(
+        task.state,
+        TaskState::Completed,
+        "cross-host redirect failed with {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert_eq!(task.actual_sha256.as_deref(), Some(target_hash.as_str()));
+    assert_eq!(
+        std::fs::read(dest.path().join("cross-host.bin")).expect("read final"),
+        target_body
+    );
+
+    let source_requests = source.requests();
+    assert!(!source_requests.is_empty());
+    for request in &source_requests {
+        assert_eq!(
+            cookie_value(&request.headers, "source_cookie").as_deref(),
+            Some(SOURCE_COOKIE),
+            "the original host must receive its own cookie"
+        );
+    }
+
+    let target_requests = target.requests();
+    assert!(!target_requests.is_empty());
+    for request in &target_requests {
+        assert!(
+            cookie_value(&request.headers, "source_cookie").is_none(),
+            "the redirected host must not receive the original host cookie"
+        );
+        let raw_cookie = request.headers.get("cookie").cloned().unwrap_or_default();
+        assert!(
+            !raw_cookie.contains(SOURCE_COOKIE),
+            "the redirected host cookie header leaked the original value"
+        );
+    }
+
+    let dump = sqlite_text_dump(&store_dir.path().join("tasks.db"));
+    let logs = read_log_files(&logger);
+    for secret in [SOURCE_COOKIE, TARGET_COOKIE] {
+        assert!(
+            !dump.contains(secret),
+            "cookie value {secret} reached the store"
+        );
+        assert!(
+            !logs.contains(secret),
+            "cookie value {secret} reached the logs"
+        );
+    }
+}
+
+#[tokio::test]
+async fn forbidden_and_newline_headers_are_rejected_before_any_request() {
+    let fixture = RangeServer::start(FixtureConfig {
+        body: non_periodic_bytes(64 * 1024),
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    for &header in FORBIDDEN_HEADERS {
+        let error = engine
+            .add_task(make_spec_with_headers(
+                fixture.url("/header/rejected.bin"),
+                "rejected.bin",
+                1,
+                None,
+                vec![(header.to_string(), "oneget-forbidden-value".to_string())],
+            ))
+            .expect_err("a forbidden header must be rejected");
+        assert_eq!(
+            error.code(),
+            "INVALID_HEADER",
+            "header {header} must return INVALID_HEADER, got {}: {}",
+            error.code(),
+            error
+        );
+    }
+
+    for header in ["authorization", "cookie", "proxy-authorization", "range"] {
+        let error = engine
+            .add_task(make_spec_with_headers(
+                fixture.url("/header/rejected-lowercase.bin"),
+                "rejected-lowercase.bin",
+                1,
+                None,
+                vec![(header.to_string(), "oneget-forbidden-value".to_string())],
+            ))
+            .expect_err("a lowercase forbidden header must be rejected");
+        assert_eq!(
+            error.code(),
+            "INVALID_HEADER",
+            "header {header} must return INVALID_HEADER"
+        );
+    }
+
+    for value in [
+        "oneget\r\nHost: evil.example",
+        "oneget\nHost: evil.example",
+        "oneget\rHost: evil.example",
+    ] {
+        let error = engine
+            .add_task(make_spec_with_headers(
+                fixture.url("/header/newline.bin"),
+                "newline.bin",
+                1,
+                None,
+                vec![("X-Custom-Trace".to_string(), value.to_string())],
+            ))
+            .expect_err("a CR or LF header value must be rejected");
+        assert_eq!(
+            error.code(),
+            "INVALID_HEADER",
+            "a newline-bearing value must return INVALID_HEADER"
+        );
+    }
+
+    let error = engine
+        .add_task(make_spec_with_headers(
+            fixture.url("/header/injection.bin"),
+            "injection.bin",
+            1,
+            None,
+            vec![(
+                "X-Custom-Trace\r\nHost: evil.example".to_string(),
+                "oneget".to_string(),
+            )],
+        ))
+        .expect_err("a CRLF header name must be rejected");
+    assert_eq!(error.code(), "INVALID_HEADER");
+
+    assert!(
+        fixture.requests().is_empty(),
+        "rejected headers must not produce any request"
+    );
+    assert!(
+        engine.store().list_tasks().expect("list tasks").is_empty(),
+        "rejected headers must not create a task"
+    );
+}
+
+#[tokio::test]
+async fn safe_header_reaches_the_fixture_but_is_not_persisted_for_replay() {
+    let body = non_periodic_bytes(512 * 1024);
+    let hash = sha256_hex(&body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let log_dir = tempdir().expect("logs");
+    let db_path = store_dir.path().join("tasks.db");
+    let logger = debug_logger(log_dir.path());
+
+    let (id, served_requests) = {
+        let engine = Engine::new(
+            Database::open(&db_path).expect("open store"),
+            dest.path().to_path_buf(),
+            EngineOptions { max_concurrent: 1 },
+        );
+        engine.set_logger(Arc::clone(&logger));
+        let id = engine
+            .add_task(make_spec_with_headers(
+                fixture.url("/header/safe.bin"),
+                "safe-header.bin",
+                1,
+                Some(hash.clone()),
+                vec![(SAFE_HEADER_NAME.to_string(), SAFE_HEADER_VALUE.to_string())],
+            ))
+            .expect("add safe-header task");
+
+        run_engine_to_terminal(&engine, engine.store(), &id).await;
+        logger.flush().expect("flush logs");
+
+        let task = engine.store().task(&id).expect("load task").expect("task");
+        assert_eq!(
+            task.state,
+            TaskState::Completed,
+            "safe-header download failed with {:?}: {:?}",
+            task.error_code,
+            task.error_message
+        );
+        assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+
+        let requests = fixture.requests();
+        assert!(!requests.is_empty());
+        for request in &requests {
+            assert_eq!(
+                request.headers.get("x-custom-trace").map(String::as_str),
+                Some(SAFE_HEADER_VALUE),
+                "the safe header must reach every fixture request while the task is live"
+            );
+        }
+        (id, requests.len())
+    };
+
+    let dump = sqlite_text_dump(&db_path);
+    assert!(
+        !dump.contains(SAFE_HEADER_VALUE),
+        "the SQLite store must not keep a custom header value for recovery"
+    );
+    // Persisting the safe header name with a redacted or empty value is
+    // acceptable so a fresh engine knows which safe headers were configured,
+    // but the value must never be replayable. Dropping headers entirely is
+    // also privacy-correct, so the name is not required.
+    let logs = read_log_files(&logger);
+    assert!(
+        !logs.contains(SAFE_HEADER_VALUE),
+        "a header value must not be written to the log"
+    );
+
+    let fresh_engine = Engine::new(
+        Database::open(&db_path).expect("reopen store"),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let tasks = fresh_engine.store().list_tasks().expect("list tasks");
+    assert_eq!(tasks.len(), 1, "exactly one safe task must be persisted");
+    let fresh_task = &tasks[0];
+    assert_eq!(fresh_task.id, id);
+    assert!(
+        !format!("{fresh_task:?}").contains(SAFE_HEADER_VALUE),
+        "a fresh engine must not expose a persisted header value"
+    );
+
+    timeout(WAIT_TIMEOUT, fresh_engine.run())
+        .await
+        .expect("fresh engine run timed out")
+        .expect("fresh engine run failed");
+    assert_eq!(
+        fixture.requests().len(),
+        served_requests,
+        "a fresh engine must not replay a completed task's custom header"
+    );
+    let fresh_dump = sqlite_text_dump(&db_path);
+    assert!(
+        !fresh_dump.contains(SAFE_HEADER_VALUE),
+        "reopening the store must not reveal a persisted header value"
     );
 }

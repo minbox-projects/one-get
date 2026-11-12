@@ -121,6 +121,27 @@ impl Database {
         Ok(())
     }
 
+    /// Persist safe custom header names with empty values.
+    ///
+    /// Header values can carry credentials, so only the names survive a store
+    /// round trip. A fresh engine cannot replay the original values.
+    pub fn record_header_names(&self, id: &str, names: &[String]) -> Result<(), EngineError> {
+        let entries: Vec<serde_json::Value> = names
+            .iter()
+            .map(|name| serde_json::json!({ "name": name, "value": "" }))
+            .collect();
+        let encoded = serde_json::to_string(&entries).unwrap_or_else(|_| String::from("[]"));
+
+        let changed = self.conn.execute(
+            "UPDATE tasks SET headers_json = ?1, updated_at_ms = ?2 WHERE id = ?3",
+            params![encoded, now_ms(), id],
+        )?;
+        if changed == 0 {
+            return Err(task_not_found());
+        }
+        Ok(())
+    }
+
     /// Apply a state transition only when the stored state matches `from`.
     pub fn transition_task(
         &self,
