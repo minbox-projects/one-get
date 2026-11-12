@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use futures_util::stream::FuturesUnordered;
 use futures_util::{stream, StreamExt};
 use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, CONTENT_RANGE, CONTENT_TYPE, ETAG,
@@ -25,7 +26,7 @@ use crate::store::Database;
 use super::error::EngineError;
 use super::http::{build_client, get_following_redirects};
 use super::part_file::PartFile;
-use super::planner::{plan_segments, SegmentPlan};
+use super::planner::{plan_segments, SegmentPlan, MIN_SEGMENT_BYTES};
 use super::probe::{probe, ProbeOptions, ProbeOutcome};
 use super::state::{SegmentState, TaskState};
 
@@ -45,6 +46,15 @@ const RANGE_REQUEST_ATTEMPTS: usize = 8;
 
 /// Upper bound for the stored end of an unknown-length segment.
 const OPEN_ENDED_END: u64 = i64::MAX as u64;
+
+/// Bytes requested when revalidating a planned range before the worker pool.
+///
+/// The prefix is deliberately small so the check costs one short request and
+/// is not mistaken for the probe's single-byte `bytes=0-0` request.
+const REVALIDATION_PREFIX_BYTES: u64 = 64 * 1024;
+
+/// Maximum number of times one segment may be split cooperatively.
+const MAX_SPLIT_DEPTH: u8 = 2;
 
 /// Caller-supplied download configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -131,6 +141,9 @@ enum WorkerFlow {
     Complete,
     Paused,
     Cancelled,
+    /// A ranged request received a full response before any task bytes were
+    /// committed, so the task must restart as one plain connection.
+    RangeFallback,
 }
 
 fn requested_flow(control: &TaskControl) -> Option<WorkerFlow> {
@@ -184,6 +197,361 @@ impl From<ProbeOutcome> for DownloadMetadata {
     }
 }
 
+/// One segment as it is currently being downloaded.
+#[derive(Debug, Clone)]
+struct SegmentRuntime {
+    index: u32,
+    start: u64,
+    end: u64,
+    pos: u64,
+    depth: u8,
+    state: SegmentState,
+    /// Whether a worker currently owns this segment.
+    active: bool,
+}
+
+impl SegmentRuntime {
+    fn downloaded(&self) -> u64 {
+        self.pos
+            .saturating_sub(self.start)
+            .min(self.end.saturating_sub(self.start))
+    }
+
+    fn remaining(&self) -> u64 {
+        self.end.saturating_sub(self.pos)
+    }
+}
+
+/// Shared view of a task's active segments.
+///
+/// Offsets are updated under the registry lock, so a cooperating split can
+/// shorten a segment without a worker ever writing past the new end.
+#[derive(Debug, Default)]
+struct SegmentRegistry {
+    segments: Vec<SegmentRuntime>,
+    next_index: u32,
+    /// Set when a ranged request received a full response before any bytes were
+    /// committed; the pool then restarts as one plain connection.
+    fallback: bool,
+}
+
+impl SegmentRegistry {
+    fn from_segments(segments: &[Segment]) -> Self {
+        let mut runtime = Vec::with_capacity(segments.len());
+        let mut next_index = 0u32;
+        for segment in segments {
+            next_index = next_index.max(segment.index.saturating_add(1));
+            let length = segment.end.saturating_sub(segment.start);
+            let (state, pos) =
+                if segment.state == SegmentState::Done || segment.downloaded_bytes >= length {
+                    (SegmentState::Done, segment.end)
+                } else {
+                    (
+                        SegmentState::Pending,
+                        segment.start.saturating_add(segment.downloaded_bytes),
+                    )
+                };
+            runtime.push(SegmentRuntime {
+                index: segment.index,
+                start: segment.start,
+                end: segment.end,
+                pos,
+                depth: 0,
+                state,
+                active: false,
+            });
+        }
+        Self {
+            segments: runtime,
+            next_index,
+            fallback: false,
+        }
+    }
+
+    fn committed_bytes(&self) -> u64 {
+        self.segments.iter().map(SegmentRuntime::downloaded).sum()
+    }
+
+    /// Mark the next not-yet-owned segment as taken and return its index.
+    fn take_pending(&mut self) -> Option<u32> {
+        let segment = self
+            .segments
+            .iter_mut()
+            .find(|segment| segment.state == SegmentState::Pending && !segment.active)?;
+        segment.active = true;
+        Some(segment.index)
+    }
+
+    fn to_inputs(&self) -> Vec<SegmentInput> {
+        self.segments
+            .iter()
+            .map(|segment| SegmentInput {
+                index: segment.index,
+                start: segment.start,
+                end: segment.end,
+                downloaded: segment.downloaded(),
+                state: segment.state,
+            })
+            .collect()
+    }
+}
+
+/// Where a streamed body writes its bytes.
+#[derive(Debug, Clone, Copy)]
+enum WriteTarget<'a> {
+    /// Fixed-range execution that persists through a progress vector.
+    Static {
+        progress: &'a Mutex<Vec<u64>>,
+        progress_index: usize,
+        limit_end: Option<u64>,
+    },
+    /// Registry-backed execution that supports cooperative splitting.
+    Dynamic {
+        registry: &'a Mutex<SegmentRegistry>,
+        segment_index: u32,
+    },
+}
+
+/// Outcome of writing one streamed chunk into a dynamic segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkWrite {
+    Written(usize),
+    Closed,
+    Fallback,
+}
+
+/// How one execution of the dynamic worker pool ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PoolOutcome {
+    Completed,
+    Interrupted(WorkerFlow),
+    Fallback,
+}
+
+fn lock_registry(
+    registry: &Mutex<SegmentRegistry>,
+) -> Result<std::sync::MutexGuard<'_, SegmentRegistry>, EngineError> {
+    registry
+        .lock()
+        .map_err(|_| EngineError::new("INTERNAL_ERROR", "the segment registry lock was poisoned"))
+}
+
+fn registry_limit(
+    registry: &Mutex<SegmentRegistry>,
+    segment_index: u32,
+) -> Result<Option<u64>, EngineError> {
+    let registry = lock_registry(registry)?;
+    let segment = registry
+        .segments
+        .iter()
+        .find(|segment| segment.index == segment_index)
+        .ok_or_else(|| {
+            EngineError::new(
+                "INTERNAL_ERROR",
+                "the requested segment is missing from the registry",
+            )
+        })?;
+    Ok(if segment.end >= OPEN_ENDED_END {
+        None
+    } else {
+        Some(segment.end)
+    })
+}
+
+fn reset_registry_position(
+    registry: &Mutex<SegmentRegistry>,
+    segment_index: u32,
+) -> Result<(), EngineError> {
+    let mut registry = lock_registry(registry)?;
+    if let Some(segment) = registry
+        .segments
+        .iter_mut()
+        .find(|segment| segment.index == segment_index)
+    {
+        segment.pos = segment.start;
+    }
+    Ok(())
+}
+
+fn set_dynamic_segment_state(
+    store: &Database,
+    registry: &Mutex<SegmentRegistry>,
+    task_id: &str,
+    segment_index: u32,
+    from: SegmentState,
+    to: SegmentState,
+) -> Result<(), EngineError> {
+    let mut registry = lock_registry(registry)?;
+    store.transition_segment(task_id, segment_index, from, to)?;
+    if let Some(segment) = registry
+        .segments
+        .iter_mut()
+        .find(|segment| segment.index == segment_index)
+    {
+        segment.state = to;
+        if to == SegmentState::Done {
+            segment.pos = segment.end;
+        }
+        if to != SegmentState::Active {
+            segment.active = false;
+        }
+    }
+    Ok(())
+}
+
+fn write_dynamic_chunk(
+    registry: &Mutex<SegmentRegistry>,
+    part: &PartFile,
+    segment_index: u32,
+    position: u64,
+    bytes: &[u8],
+) -> Result<ChunkWrite, EngineError> {
+    // The lock is held across the write so a concurrent split cannot shorten the
+    // end between the remaining-bytes check and the write, and progress never
+    // claims bytes that have not reached the file.
+    let mut registry = lock_registry(registry)?;
+    if registry.fallback {
+        return Ok(ChunkWrite::Fallback);
+    }
+    let segment = registry
+        .segments
+        .iter_mut()
+        .find(|segment| segment.index == segment_index)
+        .ok_or_else(|| {
+            EngineError::new(
+                "INTERNAL_ERROR",
+                "the requested segment is missing from the registry",
+            )
+        })?;
+    let remaining = segment.end.saturating_sub(position);
+    if remaining == 0 {
+        return Ok(ChunkWrite::Closed);
+    }
+    let take = (bytes.len() as u64).min(remaining) as usize;
+    if take > 0 {
+        part.write_at(position, &bytes[..take])?;
+        segment.pos = position + take as u64;
+    }
+    Ok(ChunkWrite::Written(take))
+}
+
+fn persist_registry_progress(
+    store: &Database,
+    task_id: &str,
+    registry: &Mutex<SegmentRegistry>,
+) -> Result<(), EngineError> {
+    let (inputs, total) = {
+        let registry = lock_registry(registry)?;
+        let inputs: Vec<SegmentProgressInput> = registry
+            .segments
+            .iter()
+            .map(|segment| SegmentProgressInput {
+                segment_id: segment.index,
+                downloaded_bytes: segment.downloaded(),
+            })
+            .collect();
+        let total = registry
+            .segments
+            .iter()
+            .map(SegmentRuntime::downloaded)
+            .sum();
+        (inputs, total)
+    };
+    store.persist_progress(task_id, &inputs, total)
+}
+
+fn persist_target_progress(
+    store: &Database,
+    task_id: &str,
+    target: &WriteTarget<'_>,
+    position: u64,
+    segment_start: u64,
+) -> Result<(), EngineError> {
+    match target {
+        WriteTarget::Static {
+            progress,
+            progress_index,
+            ..
+        } => persist_progress(
+            store,
+            task_id,
+            progress,
+            *progress_index,
+            position.saturating_sub(segment_start),
+        ),
+        WriteTarget::Dynamic { registry, .. } => {
+            persist_registry_progress(store, task_id, registry)
+        }
+    }
+}
+
+/// Split the active segment with the most remaining bytes, persist the
+/// shortened segment and its tail in one transaction, and return the tail
+/// index for an idle worker.
+fn split_and_persist(
+    store: &Database,
+    task_id: &str,
+    registry: &Mutex<SegmentRegistry>,
+) -> Result<Option<u32>, EngineError> {
+    let mut registry = lock_registry(registry)?;
+    if registry.fallback {
+        return Ok(None);
+    }
+
+    let mut chosen: Option<usize> = None;
+    for (position, segment) in registry.segments.iter().enumerate() {
+        if !segment.active || segment.state != SegmentState::Active {
+            continue;
+        }
+        if segment.depth >= MAX_SPLIT_DEPTH || segment.end >= OPEN_ENDED_END {
+            continue;
+        }
+        let remaining = segment.remaining();
+        if remaining < 2 * MIN_SEGMENT_BYTES {
+            continue;
+        }
+        if chosen.is_none_or(|best| registry.segments[best].remaining() < remaining) {
+            chosen = Some(position);
+        }
+    }
+    let Some(chosen) = chosen else {
+        return Ok(None);
+    };
+
+    let (_, end, depth) = {
+        let segment = &registry.segments[chosen];
+        (segment.index, segment.end, segment.depth)
+    };
+    let position = registry.segments[chosen].pos;
+    let remaining = end.saturating_sub(position);
+    if remaining < 2 * MIN_SEGMENT_BYTES {
+        return Ok(None);
+    }
+    let split = position + remaining / 2;
+    if split <= position || split >= end {
+        return Ok(None);
+    }
+
+    let tail_index = registry.next_index;
+    registry.next_index = registry.next_index.saturating_add(1);
+    let next_depth = depth.saturating_add(1);
+    registry.segments[chosen].end = split;
+    registry.segments[chosen].depth = next_depth;
+    registry.segments.push(SegmentRuntime {
+        index: tail_index,
+        start: split,
+        end,
+        pos: split,
+        depth: next_depth,
+        state: SegmentState::Pending,
+        active: false,
+    });
+
+    let rows = registry.to_inputs();
+    store.replace_segments(task_id, &rows)?;
+    Ok(Some(tail_index))
+}
+
 /// Download one task to completion and finalize its file.
 pub async fn download_once(
     store: &Database,
@@ -207,18 +575,17 @@ pub async fn download_once(
         Err(error) => return Err(mark_failed(store, task_id, error)),
     };
 
-    let plan = plan_segments(
+    let mut plan = plan_segments(
         metadata.total_bytes,
         metadata.range_supported,
         spec.connections,
     )
     .map_err(|error| mark_failed(store, task_id, error))?;
     // A known empty total finalizes without workers regardless of range support.
-    let plan = if metadata.total_bytes == Some(0) {
-        SegmentPlan::Ranged(Vec::new())
-    } else {
-        plan
-    };
+    let mut range_supported = metadata.range_supported;
+    if metadata.total_bytes == Some(0) {
+        plan = SegmentPlan::Ranged(Vec::new());
+    }
 
     store.record_discovered_metadata(
         task_id,
@@ -247,11 +614,27 @@ pub async fn download_once(
     let part = PartFile::create(&cap, &spec.filename, metadata.total_bytes)?;
     store.record_part_path(task_id, &part_name)?;
 
+    let client = build_client()?;
+    if range_supported {
+        if let SegmentPlan::Ranged(segments) = &plan {
+            if let Some(first) = segments.first() {
+                if first.end > first.start {
+                    match check_first_range(&client, spec, first.start, first.end).await? {
+                        RangeCheck::Accepted => {}
+                        RangeCheck::Ignored => {
+                            range_supported = false;
+                            plan = SegmentPlan::OpenEnded { start: 0 };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let segment_rows = segment_inputs(&plan, metadata.total_bytes);
     store.replace_segments(task_id, &segment_rows)?;
     let progress = Mutex::new(vec![0u64; segment_rows.len()]);
 
-    let client = build_client()?;
     let control = TaskControl::new();
     match &plan {
         SegmentPlan::Ranged(segments) => {
@@ -289,7 +672,7 @@ pub async fn download_once(
             }
         }
         SegmentPlan::OpenEnded { start } => {
-            let request = if metadata.range_supported {
+            let request = if range_supported {
                 RequestShape::Range {
                     start: *start,
                     end: None,
@@ -463,20 +846,19 @@ pub async fn download_task(
     }
 
     let is_fresh = !resuming;
+    let mut range_supported = metadata.range_supported;
     let mut first_byte_write = None;
     if is_fresh {
-        let plan = plan_segments(
+        let mut plan = plan_segments(
             metadata.total_bytes,
             metadata.range_supported,
             spec.connections,
         )
         .map_err(|error| mark_failed(store, task_id, error))?;
         // A known empty total finalizes without workers regardless of ranges.
-        let plan = if metadata.total_bytes == Some(0) {
-            SegmentPlan::Ranged(Vec::new())
-        } else {
-            plan
-        };
+        if metadata.total_bytes == Some(0) {
+            plan = SegmentPlan::Ranged(Vec::new());
+        }
         store.record_discovered_metadata(
             task_id,
             metadata.total_bytes,
@@ -508,6 +890,31 @@ pub async fn download_task(
                 }
             }
         }
+
+        // Revalidate the first range before any worker starts. A server that
+        // reports range support to the probe but returns a full body here is
+        // treated as a plain download while nothing has been committed.
+        if range_supported {
+            if let SegmentPlan::Ranged(segments) = &plan {
+                if let Some(first) = segments.first() {
+                    let downloaded = rows.first().map(|row| row.downloaded).unwrap_or(0);
+                    let start = first.start.saturating_add(downloaded);
+                    if start < first.end {
+                        let client = build_client()?;
+                        match check_first_range(&client, spec, start, first.end).await? {
+                            RangeCheck::Accepted => {}
+                            RangeCheck::Ignored => {
+                                range_supported = false;
+                                plan = SegmentPlan::OpenEnded { start: 0 };
+                                rows = segment_inputs(&plan, metadata.total_bytes);
+                                first_byte_write = None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         store.replace_segments(task_id, &rows)?;
     }
 
@@ -521,98 +928,44 @@ pub async fn download_task(
     }
 
     let client = build_client()?;
-    let segments = store.segments_for_task(task_id)?;
-    let mut values = vec![0u64; segments.len()];
-    for segment in &segments {
-        if let Some(slot) = values.get_mut(segment.index as usize) {
-            *slot = segment.downloaded_bytes;
-        }
-    }
-    let progress = Mutex::new(values);
-
-    for segment in &segments {
-        if segment.state == SegmentState::Done {
-            continue;
-        }
-        if segment.state != SegmentState::Pending {
-            let _ = store.transition_segment(
-                task_id,
-                segment.index,
-                segment.state,
-                SegmentState::Pending,
-            );
-        }
-    }
-
-    let pending: Vec<_> = segments
-        .iter()
-        .filter(|segment| segment.state != SegmentState::Done)
-        .collect();
-    let mut interrupted = None;
-    if !pending.is_empty() {
-        let concurrency = (spec.connections as usize).max(1).min(pending.len());
-        let mut results = stream::iter(pending.into_iter().map(|segment| {
-            let downloaded = segment.downloaded_bytes;
-            let (request, progress_start, limit_end) = if !metadata.range_supported {
-                // Without usable ranges the only safe request is a plain body
-                // from the beginning; any persisted bytes are overwritten.
-                (RequestShape::Plain, 0, metadata.total_bytes)
-            } else if segment.end >= OPEN_ENDED_END {
-                (
-                    RequestShape::Range {
-                        start: segment.start.saturating_add(downloaded),
-                        end: None,
-                    },
-                    segment.start,
-                    None,
-                )
-            } else {
-                (
-                    RequestShape::Range {
-                        start: segment.start.saturating_add(downloaded),
-                        end: Some(segment.end),
-                    },
-                    segment.start,
-                    Some(segment.end),
-                )
-            };
-            run_worker(
-                &client,
-                store,
-                task_id,
-                &part,
-                &progress,
-                spec,
-                control,
-                request,
-                segment.index,
-                progress_start,
-                limit_end,
-            )
-        }))
-        .buffer_unordered(concurrency);
-
-        while let Some(result) = results.next().await {
-            match result {
-                Ok(WorkerFlow::Complete) => {}
-                Ok(flow) => interrupted = Some(flow),
-                Err(error) => {
-                    if control.cancel_requested() {
-                        interrupted = Some(WorkerFlow::Cancelled);
-                    } else if control.pause_requested() {
-                        interrupted = Some(WorkerFlow::Paused);
-                    } else {
-                        return Err(mark_failed(store, task_id, error));
-                    }
+    let mut plain = !range_supported;
+    let mut attempt = 0usize;
+    loop {
+        attempt += 1;
+        match run_pool(&client, store, task_id, &part, spec, control, plain).await? {
+            PoolOutcome::Completed => break,
+            PoolOutcome::Interrupted(flow) => {
+                drop(part);
+                return finish_interruption(store, task_id, dest_dir, flow);
+            }
+            PoolOutcome::Fallback => {
+                if attempt > 1 {
+                    return Err(mark_failed(
+                        store,
+                        task_id,
+                        EngineError::new(
+                            "RANGE_IGNORED",
+                            "the server ignored the requested byte range",
+                        ),
+                    ));
                 }
+                // No task bytes were committed, so the multi-segment plan is
+                // discarded and one plain connection restarts from zero.
+                let rows = plain_segment_rows(metadata.total_bytes);
+                store.replace_segments(task_id, &rows)?;
+                if let Some(total) = metadata.total_bytes {
+                    part.file().set_len(total).map_err(|error| {
+                        EngineError::new(
+                            "IO_ERROR",
+                            format!("the part file could not be sized: {error}"),
+                        )
+                    })?;
+                }
+                plain = true;
             }
         }
     }
 
-    if let Some(flow) = interrupted {
-        drop(part);
-        return finish_interruption(store, task_id, dest_dir, flow);
-    }
     if let Some(flow) = requested_flow(control) {
         drop(part);
         return finish_interruption(store, task_id, dest_dir, flow);
@@ -643,8 +996,11 @@ pub async fn download_task(
 }
 
 fn segments_cover(segments: &[Segment], total: Option<u64>) -> bool {
+    let mut ordered: Vec<&Segment> = segments.iter().collect();
+    ordered.sort_by_key(|segment| segment.start);
+
     let mut expected = 0u64;
-    for segment in segments {
+    for segment in ordered {
         if segment.start != expected || segment.end <= segment.start {
             return false;
         }
@@ -657,6 +1013,26 @@ fn segments_cover(segments: &[Segment], total: Option<u64>) -> bool {
     match total {
         Some(total) => expected == total,
         None => segments.len() == 1 && expected >= OPEN_ENDED_END,
+    }
+}
+
+fn plain_segment_rows(total: Option<u64>) -> Vec<SegmentInput> {
+    match total {
+        Some(0) => Vec::new(),
+        Some(total) => vec![SegmentInput {
+            index: 0,
+            start: 0,
+            end: total,
+            downloaded: 0,
+            state: SegmentState::Pending,
+        }],
+        None => vec![SegmentInput {
+            index: 0,
+            start: 0,
+            end: OPEN_ENDED_END,
+            downloaded: 0,
+            state: SegmentState::Pending,
+        }],
     }
 }
 
@@ -687,6 +1063,10 @@ fn finish_interruption(
             Ok(TaskRunOutcome::Cancelled)
         }
         WorkerFlow::Complete => Ok(TaskRunOutcome::Paused),
+        WorkerFlow::RangeFallback => Err(EngineError::new(
+            "INTERNAL_ERROR",
+            "a range fallback was not applied before the task finished",
+        )),
     }
 }
 
@@ -876,20 +1256,24 @@ async fn run_worker(
     )?;
 
     let progress_index = segment_index as usize;
-    let result = stream_segment(
+    let target = WriteTarget::Static {
+        progress,
+        progress_index,
+        limit_end,
+    };
+    let result = stream_request(
         client,
         store,
         task_id,
         part,
-        progress,
         spec,
         control,
         request,
-        progress_index,
         segment_start,
-        limit_end,
+        &target,
     )
-    .await;
+    .await
+    .map(|(_, flow, _)| flow);
 
     match result {
         Ok(WorkerFlow::Complete) => {
@@ -922,38 +1306,241 @@ async fn run_worker(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn stream_segment(
+type PoolFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(u32, WorkerFlow), EngineError>> + 'a>,
+>;
+
+/// Run one registry-backed worker pool until every segment is done.
+async fn run_pool(
     client: &Client,
     store: &Database,
     task_id: &str,
     part: &PartFile,
-    progress: &Mutex<Vec<u64>>,
     spec: &DownloadSpec,
     control: &TaskControl,
-    request: RequestShape,
-    progress_index: usize,
-    segment_start: u64,
-    limit_end: Option<u64>,
-) -> Result<WorkerFlow, EngineError> {
-    // A segment is fetched with one ranged request and streamed in place.
-    // Progress is persisted from the response stream, and a pause or cancel is
-    // honoured before the next chunk is read.
-    let (_, flow, _) = stream_request(
+    plain: bool,
+) -> Result<PoolOutcome, EngineError> {
+    let segments = store.segments_for_task(task_id)?;
+    for segment in &segments {
+        if segment.state == SegmentState::Done || segment.state == SegmentState::Pending {
+            continue;
+        }
+        let _ =
+            store.transition_segment(task_id, segment.index, segment.state, SegmentState::Pending);
+    }
+    let segments = store.segments_for_task(task_id)?;
+    let registry = Mutex::new(SegmentRegistry::from_segments(&segments));
+    let concurrency = (spec.connections as usize).max(1);
+    let mut active: FuturesUnordered<PoolFuture<'_>> = FuturesUnordered::new();
+
+    loop {
+        if active.len() >= concurrency {
+            break;
+        }
+        let pending = lock_registry(&registry)?.take_pending();
+        let Some(segment_index) = pending else {
+            break;
+        };
+        active.push(Box::pin(run_dynamic_worker(
+            client,
+            store,
+            task_id,
+            part,
+            spec,
+            control,
+            &registry,
+            segment_index,
+            plain,
+        )));
+    }
+
+    let mut interrupted = None;
+    while let Some(result) = active.next().await {
+        match result {
+            Ok((_, WorkerFlow::Complete)) => {}
+            Ok((_, WorkerFlow::RangeFallback)) => {
+                drop(active);
+                return Ok(PoolOutcome::Fallback);
+            }
+            Ok((_, flow)) => {
+                interrupted = Some(flow);
+                break;
+            }
+            Err(error) => {
+                if control.cancel_requested() {
+                    interrupted = Some(WorkerFlow::Cancelled);
+                    break;
+                }
+                if control.pause_requested() {
+                    interrupted = Some(WorkerFlow::Paused);
+                    break;
+                }
+                drop(active);
+                return Err(error);
+            }
+        }
+
+        if let Some(flow) = requested_flow(control) {
+            interrupted = Some(flow);
+            break;
+        }
+
+        // An idle worker first takes a pending tail, then cooperatively splits
+        // the active segment with the most remaining bytes.
+        loop {
+            if active.len() >= concurrency {
+                break;
+            }
+            let pending = lock_registry(&registry)?.take_pending();
+            if let Some(segment_index) = pending {
+                active.push(Box::pin(run_dynamic_worker(
+                    client,
+                    store,
+                    task_id,
+                    part,
+                    spec,
+                    control,
+                    &registry,
+                    segment_index,
+                    plain,
+                )));
+                continue;
+            }
+            if plain {
+                break;
+            }
+            let Some(tail_index) = split_and_persist(store, task_id, &registry)? else {
+                break;
+            };
+            active.push(Box::pin(run_dynamic_worker(
+                client, store, task_id, part, spec, control, &registry, tail_index, plain,
+            )));
+        }
+    }
+
+    drop(active);
+    match interrupted {
+        Some(flow) => Ok(PoolOutcome::Interrupted(flow)),
+        None => Ok(PoolOutcome::Completed),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_dynamic_worker(
+    client: &Client,
+    store: &Database,
+    task_id: &str,
+    part: &PartFile,
+    spec: &DownloadSpec,
+    control: &TaskControl,
+    registry: &Mutex<SegmentRegistry>,
+    segment_index: u32,
+    plain: bool,
+) -> Result<(u32, WorkerFlow), EngineError> {
+    if let Some(flow) = requested_flow(control) {
+        return Ok((segment_index, flow));
+    }
+    set_dynamic_segment_state(
+        store,
+        registry,
+        task_id,
+        segment_index,
+        SegmentState::Pending,
+        SegmentState::Active,
+    )?;
+
+    let (segment_start, position, end) = {
+        let registry = lock_registry(registry)?;
+        let segment = registry
+            .segments
+            .iter()
+            .find(|segment| segment.index == segment_index)
+            .ok_or_else(|| {
+                EngineError::new(
+                    "INTERNAL_ERROR",
+                    "the requested segment is missing from the registry",
+                )
+            })?;
+        (segment.start, segment.pos, segment.end)
+    };
+
+    let request = if plain {
+        RequestShape::Plain
+    } else if end < OPEN_ENDED_END && position >= end {
+        set_dynamic_segment_state(
+            store,
+            registry,
+            task_id,
+            segment_index,
+            SegmentState::Active,
+            SegmentState::Done,
+        )?;
+        return Ok((segment_index, WorkerFlow::Complete));
+    } else if end >= OPEN_ENDED_END {
+        RequestShape::Range {
+            start: position,
+            end: None,
+        }
+    } else {
+        RequestShape::Range {
+            start: position,
+            end: Some(end),
+        }
+    };
+
+    let target = WriteTarget::Dynamic {
+        registry,
+        segment_index,
+    };
+    let result = stream_request(
         client,
         store,
         task_id,
         part,
-        progress,
         spec,
         control,
         request,
-        limit_end,
         segment_start,
-        progress_index,
+        &target,
     )
-    .await?;
-    Ok(flow)
+    .await;
+
+    match result {
+        Ok((_, WorkerFlow::Complete, _)) => {
+            set_dynamic_segment_state(
+                store,
+                registry,
+                task_id,
+                segment_index,
+                SegmentState::Active,
+                SegmentState::Done,
+            )?;
+            Ok((segment_index, WorkerFlow::Complete))
+        }
+        Ok((_, WorkerFlow::RangeFallback, _)) => Ok((segment_index, WorkerFlow::RangeFallback)),
+        Ok((_, flow, _)) => {
+            let _ = set_dynamic_segment_state(
+                store,
+                registry,
+                task_id,
+                segment_index,
+                SegmentState::Active,
+                SegmentState::Pending,
+            );
+            Ok((segment_index, flow))
+        }
+        Err(error) => {
+            let _ = set_dynamic_segment_state(
+                store,
+                registry,
+                task_id,
+                segment_index,
+                SegmentState::Active,
+                SegmentState::Failed,
+            );
+            Err(error)
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -962,13 +1549,11 @@ async fn stream_request(
     store: &Database,
     task_id: &str,
     part: &PartFile,
-    progress: &Mutex<Vec<u64>>,
     spec: &DownloadSpec,
     control: &TaskControl,
     request: RequestShape,
-    limit_end: Option<u64>,
     segment_start: u64,
-    progress_index: usize,
+    target: &WriteTarget<'_>,
 ) -> Result<(u64, WorkerFlow, Option<u64>), EngineError> {
     let mut position = match request {
         RequestShape::Range { start, .. } => start,
@@ -980,31 +1565,54 @@ async fn stream_request(
 
     loop {
         if let Some(flow) = requested_flow(control) {
-            persist_progress(
-                store,
-                task_id,
-                progress,
-                progress_index,
-                position.saturating_sub(segment_start),
-            )?;
+            persist_target_progress(store, task_id, target, position, segment_start)?;
             return Ok((position, flow, range_total));
         }
         if matches!(request, RequestShape::Plain) {
             // A plain response always starts at byte zero; restarting
             // overwrites earlier bytes instead of appending them.
             position = 0;
+            if let WriteTarget::Dynamic {
+                registry,
+                segment_index,
+            } = target
+            {
+                reset_registry_position(registry, *segment_index)?;
+            }
         }
+
         let current = match request {
-            RequestShape::Range { end, .. } => RequestShape::Range {
-                start: position,
-                end,
-            },
             RequestShape::Plain => RequestShape::Plain,
+            RequestShape::Range { end, .. } => match target {
+                WriteTarget::Dynamic {
+                    registry,
+                    segment_index,
+                } => RequestShape::Range {
+                    start: position,
+                    end: registry_limit(registry, *segment_index)?,
+                },
+                WriteTarget::Static { .. } => RequestShape::Range {
+                    start: position,
+                    end,
+                },
+            },
         };
+
+        if let RequestShape::Range {
+            start,
+            end: Some(end),
+        } = current
+        {
+            if start >= end {
+                persist_target_progress(store, task_id, target, position, segment_start)?;
+                return Ok((position, WorkerFlow::Complete, range_total));
+            }
+        }
 
         let mut send_attempts = 0usize;
         let response = loop {
             if let Some(flow) = requested_flow(control) {
+                persist_target_progress(store, task_id, target, position, segment_start)?;
                 return Ok((position, flow, range_total));
             }
             send_attempts += 1;
@@ -1023,9 +1631,15 @@ async fn stream_request(
             let status = response.status();
             if current.expects_partial() {
                 if status == StatusCode::OK {
-                    if send_attempts < RANGE_REQUEST_ATTEMPTS {
-                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                        continue;
+                    // A full response to a ranged request is never written at
+                    // its nonzero offset. With no committed bytes the pool can
+                    // restart as one plain connection from zero.
+                    if let WriteTarget::Dynamic { registry, .. } = target {
+                        let mut registry = lock_registry(registry)?;
+                        if registry.committed_bytes() == 0 {
+                            registry.fallback = true;
+                            return Ok((position, WorkerFlow::RangeFallback, range_total));
+                        }
                     }
                     return Err(EngineError::new(
                         "RANGE_IGNORED",
@@ -1055,13 +1669,7 @@ async fn stream_request(
         let mut interrupted = false;
         loop {
             if let Some(flow) = requested_flow(control) {
-                persist_progress(
-                    store,
-                    task_id,
-                    progress,
-                    progress_index,
-                    position.saturating_sub(segment_start),
-                )?;
+                persist_target_progress(store, task_id, target, position, segment_start)?;
                 return Ok((position, flow, range_total));
             }
             let Some(chunk) = body.next().await else {
@@ -1071,40 +1679,75 @@ async fn stream_request(
                 interrupted = true;
                 break;
             };
-            let mut bytes: &[u8] = &chunk;
-            if let Some(end) = limit_end {
-                let remaining = end.saturating_sub(position);
-                if remaining == 0 {
-                    break;
+            match target {
+                WriteTarget::Static {
+                    progress,
+                    progress_index,
+                    limit_end,
+                } => {
+                    let mut bytes: &[u8] = &chunk;
+                    if let Some(end) = limit_end {
+                        let remaining = end.saturating_sub(position);
+                        if remaining == 0 {
+                            break;
+                        }
+                        if bytes.len() as u64 > remaining {
+                            bytes = &bytes[..remaining as usize];
+                        }
+                    }
+                    if !bytes.is_empty() {
+                        part.write_at(position, bytes)?;
+                        position += bytes.len() as u64;
+                    }
+                    let downloaded = position.saturating_sub(segment_start);
+                    if downloaded >= last_persisted + PROGRESS_INTERVAL {
+                        persist_progress(store, task_id, progress, *progress_index, downloaded)?;
+                        last_persisted = downloaded;
+                    }
+                    if limit_end.is_some_and(|end| position >= end) {
+                        break;
+                    }
                 }
-                if bytes.len() as u64 > remaining {
-                    bytes = &bytes[..remaining as usize];
-                }
-            }
-            if !bytes.is_empty() {
-                part.write_at(position, bytes)?;
-                position += bytes.len() as u64;
-            }
-            let downloaded = position.saturating_sub(segment_start);
-            if downloaded >= last_persisted + PROGRESS_INTERVAL {
-                persist_progress(store, task_id, progress, progress_index, downloaded)?;
-                last_persisted = downloaded;
-            }
-            if limit_end.is_some_and(|end| position >= end) {
-                break;
+                WriteTarget::Dynamic {
+                    registry,
+                    segment_index,
+                } => match write_dynamic_chunk(registry, part, *segment_index, position, &chunk)? {
+                    ChunkWrite::Written(take) => {
+                        let truncated = take < chunk.len();
+                        position += take as u64;
+                        let downloaded = position.saturating_sub(segment_start);
+                        if downloaded >= last_persisted + PROGRESS_INTERVAL {
+                            persist_registry_progress(store, task_id, registry)?;
+                            last_persisted = downloaded;
+                        }
+                        if truncated {
+                            break;
+                        }
+                    }
+                    ChunkWrite::Closed => break,
+                    ChunkWrite::Fallback => {
+                        return Ok((position, WorkerFlow::RangeFallback, range_total));
+                    }
+                },
             }
         }
 
-        let downloaded = position.saturating_sub(segment_start);
-        persist_progress(store, task_id, progress, progress_index, downloaded)?;
+        persist_target_progress(store, task_id, target, position, segment_start)?;
 
         if !interrupted {
-            if let Some(end) = limit_end {
-                let reached_total = range_total.is_some_and(|total| position >= total);
-                if position >= end || reached_total {
-                    return Ok((position, WorkerFlow::Complete, range_total));
-                }
-            } else {
+            let limit = match target {
+                WriteTarget::Static { limit_end, .. } => *limit_end,
+                WriteTarget::Dynamic {
+                    registry,
+                    segment_index,
+                } => registry_limit(registry, *segment_index)?,
+            };
+            let reached_total = range_total.is_some_and(|total| position >= total);
+            let complete = match limit {
+                Some(end) => position >= end || reached_total,
+                None => true,
+            };
+            if complete {
                 return Ok((position, WorkerFlow::Complete, range_total));
             }
         }
@@ -1145,6 +1788,49 @@ fn request_headers(spec: &DownloadSpec, range: Option<String>) -> Result<HeaderM
         headers.insert(RANGE, value);
     }
     Ok(headers)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeCheck {
+    Accepted,
+    Ignored,
+}
+
+/// Revalidate the first planned range with a short non-empty prefix.
+///
+/// A matching 206 keeps the multi-segment plan. A 200 means the server ignores
+/// ranges, so the caller discards the plan before any worker writes.
+async fn check_first_range(
+    client: &Client,
+    spec: &DownloadSpec,
+    start: u64,
+    end: u64,
+) -> Result<RangeCheck, EngineError> {
+    let length = end.saturating_sub(start);
+    if length == 0 {
+        return Ok(RangeCheck::Accepted);
+    }
+    let prefix = length.min(REVALIDATION_PREFIX_BYTES);
+    let request_end = start.saturating_add(prefix);
+    let headers = request_headers(
+        spec,
+        Some(format!("bytes={start}-{}", request_end.saturating_sub(1))),
+    )?;
+    let (response, _final_url) = get_following_redirects(client, &spec.url, headers).await?;
+    match response.status() {
+        StatusCode::PARTIAL_CONTENT => {
+            let (range_start, _) = parse_content_range(&response)?;
+            if range_start != start {
+                return Err(EngineError::new(
+                    "RANGE_MISMATCH",
+                    "the server returned a different range than requested",
+                ));
+            }
+            Ok(RangeCheck::Accepted)
+        }
+        StatusCode::OK => Ok(RangeCheck::Ignored),
+        status => Err(status_error(status)),
+    }
 }
 
 fn parse_content_range(response: &reqwest::Response) -> Result<(u64, Option<u64>), EngineError> {

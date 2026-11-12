@@ -9,7 +9,7 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Default)]
 pub struct RecordedRequest {
@@ -57,6 +57,13 @@ pub struct FixtureConfig {
     pub stream_delay: Option<Duration>,
     /// Chunk size for delayed streaming.
     pub stream_chunk_size: usize,
+    /// Delay per streamed chunk for ranges that start in the first half of the
+    /// body. When set, first-half ranges stream slower than second-half ranges.
+    pub slow_first_half_delay: Option<Duration>,
+    /// Number of ranged body bytes served with 206 before later range requests
+    /// receive a full 200 response. One 206 stream runs at a time so the
+    /// threshold crossing stays deterministic with concurrent connections.
+    pub ignore_after_bytes: Option<u64>,
 }
 
 impl Default for FixtureConfig {
@@ -81,6 +88,8 @@ impl Default for FixtureConfig {
             large_sparse_logical_size: None,
             stream_delay: None,
             stream_chunk_size: 16 * 1024,
+            slow_first_half_delay: None,
+            ignore_after_bytes: None,
         }
     }
 }
@@ -91,6 +100,11 @@ struct SharedState {
     served_ranges: Vec<ServedRange>,
     highest_offset_served: u64,
     probe206_seen: bool,
+    /// Body bytes already written by honored 206 responses, excluding the
+    /// single-byte probe.
+    ignore_bytes_committed: u64,
+    /// Whether one 206 stream is currently writing its body.
+    ignore_range_active: bool,
     runtime_status_override: Option<Option<u16>>,
     runtime_rate_limit_429: Option<bool>,
     runtime_etag: Option<Option<String>>,
@@ -234,12 +248,17 @@ fn record_served(state: &Arc<Mutex<SharedState>>, start: u64, end: u64) {
     st.highest_offset_served = st.highest_offset_served.max(end);
 }
 
-fn write_body(stream: &mut TcpStream, body: &[u8], config: &FixtureConfig) -> std::io::Result<()> {
+fn write_body(
+    stream: &mut TcpStream,
+    body: &[u8],
+    delay: Option<Duration>,
+    chunk_size: usize,
+) -> std::io::Result<()> {
     if body.is_empty() {
         return Ok(());
     }
-    if let Some(delay) = config.stream_delay {
-        let chunk_size = config.stream_chunk_size.max(1);
+    if let Some(delay) = delay {
+        let chunk_size = chunk_size.max(1);
         for chunk in body.chunks(chunk_size) {
             stream.write_all(chunk)?;
             let _ = stream.flush();
@@ -251,12 +270,23 @@ fn write_body(stream: &mut TcpStream, body: &[u8], config: &FixtureConfig) -> st
     }
 }
 
+fn stream_delay_for(config: &FixtureConfig, start: u64, total: u64) -> Option<Duration> {
+    if start < total / 2 {
+        config.slow_first_half_delay.or(config.stream_delay)
+    } else {
+        config.stream_delay
+    }
+}
+
 fn handle_connection(
     mut stream: TcpStream,
     config: &FixtureConfig,
     state: &Arc<Mutex<SharedState>>,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    // Accepted sockets can inherit the listener's non-blocking flag on some
+    // platforms; response bodies are written with blocking semantics.
+    let _ = stream.set_nonblocking(false);
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     loop {
@@ -436,12 +466,13 @@ fn handle_connection(
         "application/octet-stream".to_string()
     };
 
+    let is_probe_zero = range.as_deref() == Some("bytes=0-0");
     let mut is_probe206_then200_other = false;
-    let use_range = match config.range_mode {
+    let mut use_range = match config.range_mode {
         RangeMode::IgnoreRange => false,
         RangeMode::HonorRange => range.is_some(),
         RangeMode::Probe206Then200 => {
-            if range.as_deref() == Some("bytes=0-0") {
+            if is_probe_zero {
                 let mut st = state.lock().expect("lock");
                 st.probe206_seen = true;
                 true
@@ -451,6 +482,38 @@ fn handle_connection(
             }
         }
     };
+
+    // Cumulative-threshold mode. Ranged requests are honored with 206 until
+    // enough body bytes have been written; a later ranged request then gets a
+    // full 200. Only one 206 body streams at a time so the crossing is
+    // deterministic when the engine opens several connections concurrently.
+    let mut ignore_range_turn = false;
+    if use_range && !is_probe206_then200_other {
+        if let Some(threshold) = config.ignore_after_bytes {
+            if !is_probe_zero {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let mut st = state.lock().expect("lock");
+                    if !st.ignore_range_active {
+                        if st.ignore_bytes_committed >= threshold {
+                            use_range = false;
+                        } else {
+                            st.ignore_range_active = true;
+                            ignore_range_turn = true;
+                        }
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        // Never stall a fixture forever; answer the full body.
+                        use_range = false;
+                        break;
+                    }
+                    drop(st);
+                    thread::sleep(Duration::from_millis(2));
+                }
+            }
+        }
+    }
 
     if let Some(r) = &range {
         if use_range && !is_probe206_then200_other {
@@ -487,10 +550,25 @@ fn handle_connection(
                 ));
                 resp.push_str(&format!("Content-Length: {}\r\n", slice.len()));
                 resp.push_str("Connection: close\r\n\r\n");
-                stream.write_all(resp.as_bytes())?;
-                write_body(&mut stream, &slice, config)?;
-                return Ok(());
+                let delay = stream_delay_for(config, start, effective_total);
+                let result = (|| -> std::io::Result<()> {
+                    stream.write_all(resp.as_bytes())?;
+                    write_body(&mut stream, &slice, delay, config.stream_chunk_size)
+                })();
+                if ignore_range_turn {
+                    let mut st = state.lock().expect("lock");
+                    if result.is_ok() {
+                        st.ignore_bytes_committed =
+                            st.ignore_bytes_committed.saturating_add(slice.len() as u64);
+                    }
+                    st.ignore_range_active = false;
+                }
+                return result;
             } else {
+                if ignore_range_turn {
+                    let mut st = state.lock().expect("lock");
+                    st.ignore_range_active = false;
+                }
                 // Malformed/unsatisfiable as invalid response path; send 416 generic.
                 let resp = format!(
                     "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -528,7 +606,12 @@ fn handle_connection(
     }
     resp.push_str("Connection: close\r\n\r\n");
     stream.write_all(resp.as_bytes())?;
-    write_body(&mut stream, &body, config)?;
+    write_body(
+        &mut stream,
+        &body,
+        config.stream_delay,
+        config.stream_chunk_size,
+    )?;
     Ok(())
 }
 
