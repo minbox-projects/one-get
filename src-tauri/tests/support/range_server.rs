@@ -48,7 +48,22 @@ pub struct FixtureConfig {
     pub range_mode: RangeMode,
     pub truncate_after: Option<usize>,
     pub rate_limit_429: bool,
+    /// Limit how many requests receive a 429. `None` means every request.
+    pub rate_limit_times: Option<usize>,
     pub retry_after: Option<String>,
+    /// Return `fail_status` for the first N requests, then serve normally.
+    pub fail_first_n: usize,
+    pub fail_status: u16,
+    /// On the first N large ranged responses, declare the full Content-Length
+    /// but write only this many body bytes before closing the connection.
+    pub truncate_first_ranged_after: Option<usize>,
+    pub truncate_ranged_times: usize,
+    /// Append this many extra bytes past the requested range in a 206 body.
+    pub overrun_bytes: Option<usize>,
+    /// Report a 206 Content-Range start offset by this delta after the probe.
+    pub invalid_content_range_after_probe: Option<u64>,
+    /// Accept a request and wait before writing any response bytes.
+    pub stall_before_response: Option<Duration>,
     pub unknown_length: bool,
     pub response_416_zero: bool,
     pub response_416_nonzero: Option<u64>,
@@ -81,7 +96,15 @@ impl Default for FixtureConfig {
             range_mode: RangeMode::HonorRange,
             truncate_after: None,
             rate_limit_429: false,
+            rate_limit_times: None,
             retry_after: None,
+            fail_first_n: 0,
+            fail_status: 500,
+            truncate_first_ranged_after: None,
+            truncate_ranged_times: 1,
+            overrun_bytes: None,
+            invalid_content_range_after_probe: None,
+            stall_before_response: None,
             unknown_length: false,
             response_416_zero: false,
             response_416_nonzero: None,
@@ -105,6 +128,8 @@ struct SharedState {
     ignore_bytes_committed: u64,
     /// Whether one 206 stream is currently writing its body.
     ignore_range_active: bool,
+    /// Number of large ranged responses already truncated.
+    truncate_hits: usize,
     runtime_status_override: Option<Option<u16>>,
     runtime_rate_limit_429: Option<bool>,
     runtime_etag: Option<Option<String>>,
@@ -358,6 +383,11 @@ fn handle_connection(
         Some(value) => value,
         None => config.status_override,
     };
+    let request_number = state.lock().expect("lock").requests.len();
+
+    if let Some(delay) = config.stall_before_response {
+        thread::sleep(delay);
+    }
 
     if let Some(expected) = &config.expected_authorization {
         let got = headers.get("authorization").cloned().unwrap_or_default();
@@ -373,7 +403,16 @@ fn handle_connection(
         }
     }
 
-    if effective_rate_limit {
+    if config.fail_first_n > 0 && request_number <= config.fail_first_n {
+        write_status_response(&mut stream, config.fail_status)?;
+        return Ok(());
+    }
+
+    let rate_limit_active = effective_rate_limit
+        && config
+            .rate_limit_times
+            .is_none_or(|limit| request_number <= limit);
+    if rate_limit_active {
         let body = b"rate limited";
         let retry = config
             .retry_after
@@ -390,27 +429,7 @@ fn handle_connection(
     }
 
     if let Some(status) = effective_status_override {
-        let (reason, body): (&str, &[u8]) = match status {
-            401 | 403 => ("Auth Required", b"auth required"),
-            404 => ("Not Found", b"not found"),
-            500 => ("Internal Server Error", b"server error"),
-            _ => ("Error", b"error"),
-        };
-        let status_line = match status {
-            401 => "401 Unauthorized",
-            403 => "403 Forbidden",
-            404 => "404 Not Found",
-            500 => "500 Internal Server Error",
-            _ => "500 Internal Server Error",
-        };
-        let _ = reason;
-        let resp = format!(
-            "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            status_line,
-            body.len()
-        );
-        stream.write_all(resp.as_bytes())?;
-        stream.write_all(body)?;
+        write_status_response(&mut stream, status)?;
         return Ok(());
     }
 
@@ -527,10 +546,29 @@ fn handle_connection(
                 } else {
                     Vec::new()
                 };
-                if !slice.is_empty() {
-                    let actual_end = start + slice.len() as u64 - 1;
+                let mut truncate_limit = None;
+                if let Some(limit) = config.truncate_first_ranged_after {
+                    if !is_probe_zero && slice.len() > 64 * 1024 {
+                        let mut st = state.lock().expect("lock");
+                        if st.truncate_hits < config.truncate_ranged_times {
+                            st.truncate_hits += 1;
+                            truncate_limit = Some(limit);
+                        }
+                    }
+                }
+                let declared_len = slice.len();
+                let write_len =
+                    truncate_limit.map_or(declared_len, |limit| limit.min(declared_len));
+                if write_len > 0 {
+                    let actual_end = start + write_len as u64 - 1;
                     record_served(state, start, actual_end.min(end));
                 }
+                let overrun = config.overrun_bytes.unwrap_or(0);
+                let reported_start = if is_probe_zero {
+                    start
+                } else {
+                    start.saturating_add(config.invalid_content_range_after_probe.unwrap_or(0))
+                };
                 let mut resp = String::new();
                 resp.push_str("HTTP/1.1 206 Partial Content\r\n");
                 resp.push_str("Accept-Ranges: bytes\r\n");
@@ -546,14 +584,27 @@ fn handle_connection(
                 }
                 resp.push_str(&format!(
                     "Content-Range: bytes {}-{}/{}\r\n",
-                    start, end, effective_total
+                    reported_start, end, effective_total
                 ));
-                resp.push_str(&format!("Content-Length: {}\r\n", slice.len()));
+                resp.push_str(&format!(
+                    "Content-Length: {}\r\n",
+                    declared_len.saturating_add(overrun)
+                ));
                 resp.push_str("Connection: close\r\n\r\n");
                 let delay = stream_delay_for(config, start, effective_total);
                 let result = (|| -> std::io::Result<()> {
                     stream.write_all(resp.as_bytes())?;
-                    write_body(&mut stream, &slice, delay, config.stream_chunk_size)
+                    write_body(
+                        &mut stream,
+                        &slice[..write_len],
+                        delay,
+                        config.stream_chunk_size,
+                    )?;
+                    if overrun > 0 {
+                        let extra = vec![0xEEu8; overrun];
+                        write_body(&mut stream, &extra, None, config.stream_chunk_size)?;
+                    }
+                    Ok(())
                 })();
                 if ignore_range_turn {
                     let mut st = state.lock().expect("lock");
@@ -613,6 +664,25 @@ fn handle_connection(
         config.stream_chunk_size,
     )?;
     Ok(())
+}
+
+fn write_status_response(stream: &mut TcpStream, status: u16) -> std::io::Result<()> {
+    let (status_line, body): (&str, &[u8]) = match status {
+        401 => ("401 Unauthorized", b"auth required"),
+        403 => ("403 Forbidden", b"auth required"),
+        404 => ("404 Not Found", b"not found"),
+        500 => ("500 Internal Server Error", b"server error"),
+        502 => ("502 Bad Gateway", b"server error"),
+        503 => ("503 Service Unavailable", b"server error"),
+        _ => ("500 Internal Server Error", b"error"),
+    };
+    let resp = format!(
+        "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        status_line,
+        body.len()
+    );
+    stream.write_all(resp.as_bytes())?;
+    stream.write_all(body)
 }
 
 fn parse_single_range(header: &str, total: u64) -> Option<(u64, u64)> {

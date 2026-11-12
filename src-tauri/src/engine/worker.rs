@@ -28,6 +28,7 @@ use super::http::{build_client, get_following_redirects};
 use super::part_file::PartFile;
 use super::planner::{plan_segments, SegmentPlan, MIN_SEGMENT_BYTES};
 use super::probe::{probe, ProbeOptions, ProbeOutcome};
+use super::retry;
 use super::state::{SegmentState, TaskState};
 
 /// Progress is persisted at least once per this many downloaded bytes.
@@ -40,9 +41,12 @@ const PROGRESS_INTERVAL: u64 = READ_CHUNK_BYTES;
 /// Each ranged segment is fetched as bounded reads of this size.
 const READ_CHUNK_BYTES: u64 = 128 * 1024;
 
-/// Bounded replays for a ranged read that returns 200 or resets before any
-/// response body is written. No bytes are committed for a replayed read.
+/// Bounded replays for a ranged read that resets before the range completes.
+/// Every replay resumes from the current persisted offset.
 const RANGE_REQUEST_ATTEMPTS: usize = 8;
+
+/// Bounded probe and first-range revalidation attempts.
+const PROBE_ATTEMPTS: usize = retry::MAX_ATTEMPTS;
 
 /// Upper bound for the stored end of an unknown-length segment.
 const OPEN_ENDED_END: u64 = i64::MAX as u64;
@@ -564,15 +568,26 @@ pub async fn download_once(
         extra_headers: spec.extra_headers.clone(),
     };
 
-    let metadata = match probe(&spec.url, &options).await {
-        Ok(outcome) => DownloadMetadata::from(outcome),
-        Err(error) if error.code() == "INVALID_RESPONSE" => {
-            match probe_zero_length(&spec.url, &options).await {
-                Ok(metadata) => metadata,
-                Err(_) => return Err(mark_failed(store, task_id, error)),
+    let mut probe_attempts = 0;
+    let metadata = loop {
+        probe_attempts += 1;
+        match probe(&spec.url, &options).await {
+            Ok(outcome) => break DownloadMetadata::from(outcome),
+            Err(error) if error.code() == "INVALID_RESPONSE" => {
+                match probe_zero_length(&spec.url, &options).await {
+                    Ok(metadata) => break metadata,
+                    Err(_) => return Err(mark_failed(store, task_id, error)),
+                }
             }
+            Err(error) if error.is_retryable() && probe_attempts < PROBE_ATTEMPTS => {
+                tokio::time::sleep(retry::delay_for_attempt(
+                    probe_attempts,
+                    error.retry_after(),
+                ))
+                .await;
+            }
+            Err(error) => return Err(mark_failed(store, task_id, error)),
         }
-        Err(error) => return Err(mark_failed(store, task_id, error)),
     };
 
     let mut plan = plan_segments(
@@ -808,10 +823,14 @@ pub async fn download_task(
                 break (metadata, bytes);
             }
             Ok(_) => {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(retry::delay_for_attempt(probe_attempts, None)).await;
             }
-            Err(error) if error.is_retryable() && probe_attempts < 4 => {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            Err(error) if error.is_retryable() && probe_attempts < PROBE_ATTEMPTS => {
+                tokio::time::sleep(retry::delay_for_attempt(
+                    probe_attempts,
+                    error.retry_after(),
+                ))
+                .await;
             }
             Err(error) => {
                 drop(part);
@@ -932,13 +951,13 @@ pub async fn download_task(
     let mut attempt = 0usize;
     loop {
         attempt += 1;
-        match run_pool(&client, store, task_id, &part, spec, control, plain).await? {
-            PoolOutcome::Completed => break,
-            PoolOutcome::Interrupted(flow) => {
+        match run_pool(&client, store, task_id, &part, spec, control, plain).await {
+            Ok(PoolOutcome::Completed) => break,
+            Ok(PoolOutcome::Interrupted(flow)) => {
                 drop(part);
                 return finish_interruption(store, task_id, dest_dir, flow);
             }
-            PoolOutcome::Fallback => {
+            Ok(PoolOutcome::Fallback) => {
                 if attempt > 1 {
                     return Err(mark_failed(
                         store,
@@ -963,6 +982,14 @@ pub async fn download_task(
                 }
                 plain = true;
             }
+            Err(error) if error.code() == "DISK_FULL" => {
+                // A full device is recoverable: keep the part and progress and
+                // leave the task paused so a later resume can finish the file.
+                persist_pause(store, task_id)?;
+                store.update_task_error(task_id, error.code(), &error.to_string())?;
+                return Ok(TaskRunOutcome::Paused);
+            }
+            Err(error) => return Err(error),
         }
     }
 
@@ -1617,17 +1644,18 @@ async fn stream_request(
             }
             send_attempts += 1;
             let headers = request_headers(spec, current.range_header())?;
-            let (response, _final_url) =
-                match get_following_redirects(client, &spec.url, headers).await {
-                    Ok(response) => response,
-                    Err(error) => {
-                        if current.expects_partial() && send_attempts < RANGE_REQUEST_ATTEMPTS {
-                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                            continue;
-                        }
-                        return Err(error);
-                    }
-                };
+            let response = match get_following_redirects(client, &spec.url, headers).await {
+                Ok((response, _final_url)) => response,
+                Err(error) if error.is_retryable() && send_attempts < retry::MAX_ATTEMPTS => {
+                    tokio::time::sleep(retry::delay_for_attempt(
+                        send_attempts,
+                        error.retry_after(),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let status = response.status();
             if current.expects_partial() {
                 if status == StatusCode::OK {
@@ -1647,7 +1675,16 @@ async fn stream_request(
                     ));
                 }
                 if status != StatusCode::PARTIAL_CONTENT {
-                    return Err(status_error(status));
+                    let error = response_status_error(&response);
+                    if error.is_retryable() && send_attempts < retry::MAX_ATTEMPTS {
+                        tokio::time::sleep(retry::delay_for_attempt(
+                            send_attempts,
+                            error.retry_after(),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(error);
                 }
                 let (start, total) = parse_content_range(&response)?;
                 if start != position {
@@ -1658,7 +1695,16 @@ async fn stream_request(
                 }
                 range_total = total;
             } else if status != StatusCode::OK {
-                return Err(status_error(status));
+                let error = response_status_error(&response);
+                if error.is_retryable() && send_attempts < retry::MAX_ATTEMPTS {
+                    tokio::time::sleep(retry::delay_for_attempt(
+                        send_attempts,
+                        error.retry_after(),
+                    ))
+                    .await;
+                    continue;
+                }
+                return Err(error);
             } else {
                 range_total = response.content_length();
             }
@@ -1696,7 +1742,16 @@ async fn stream_request(
                         }
                     }
                     if !bytes.is_empty() {
-                        part.write_at(position, bytes)?;
+                        if let Err(error) = part.write_at(position, bytes) {
+                            persist_target_progress(
+                                store,
+                                task_id,
+                                target,
+                                position,
+                                segment_start,
+                            )?;
+                            return Err(error);
+                        }
                         position += bytes.len() as u64;
                     }
                     let downloaded = position.saturating_sub(segment_start);
@@ -1711,24 +1766,41 @@ async fn stream_request(
                 WriteTarget::Dynamic {
                     registry,
                     segment_index,
-                } => match write_dynamic_chunk(registry, part, *segment_index, position, &chunk)? {
-                    ChunkWrite::Written(take) => {
-                        let truncated = take < chunk.len();
-                        position += take as u64;
-                        let downloaded = position.saturating_sub(segment_start);
-                        if downloaded >= last_persisted + PROGRESS_INTERVAL {
-                            persist_registry_progress(store, task_id, registry)?;
-                            last_persisted = downloaded;
+                } => {
+                    let write =
+                        match write_dynamic_chunk(registry, part, *segment_index, position, &chunk)
+                        {
+                            Ok(write) => write,
+                            Err(error) => {
+                                persist_target_progress(
+                                    store,
+                                    task_id,
+                                    target,
+                                    position,
+                                    segment_start,
+                                )?;
+                                return Err(error);
+                            }
+                        };
+                    match write {
+                        ChunkWrite::Written(take) => {
+                            let truncated = take < chunk.len();
+                            position += take as u64;
+                            let downloaded = position.saturating_sub(segment_start);
+                            if downloaded >= last_persisted + PROGRESS_INTERVAL {
+                                persist_registry_progress(store, task_id, registry)?;
+                                last_persisted = downloaded;
+                            }
+                            if truncated {
+                                break;
+                            }
                         }
-                        if truncated {
-                            break;
+                        ChunkWrite::Closed => break,
+                        ChunkWrite::Fallback => {
+                            return Ok((position, WorkerFlow::RangeFallback, range_total));
                         }
                     }
-                    ChunkWrite::Closed => break,
-                    ChunkWrite::Fallback => {
-                        return Ok((position, WorkerFlow::RangeFallback, range_total));
-                    }
-                },
+                }
             }
         }
 
@@ -1812,24 +1884,39 @@ async fn check_first_range(
     }
     let prefix = length.min(REVALIDATION_PREFIX_BYTES);
     let request_end = start.saturating_add(prefix);
-    let headers = request_headers(
-        spec,
-        Some(format!("bytes={start}-{}", request_end.saturating_sub(1))),
-    )?;
-    let (response, _final_url) = get_following_redirects(client, &spec.url, headers).await?;
-    match response.status() {
-        StatusCode::PARTIAL_CONTENT => {
-            let (range_start, _) = parse_content_range(&response)?;
-            if range_start != start {
-                return Err(EngineError::new(
-                    "RANGE_MISMATCH",
-                    "the server returned a different range than requested",
-                ));
+    let mut attempts = 0usize;
+    loop {
+        attempts += 1;
+        let headers = request_headers(
+            spec,
+            Some(format!("bytes={start}-{}", request_end.saturating_sub(1))),
+        )?;
+        let result = match get_following_redirects(client, &spec.url, headers).await {
+            Ok((response, _final_url)) => match response.status() {
+                StatusCode::PARTIAL_CONTENT => {
+                    let (range_start, _) = parse_content_range(&response)?;
+                    if range_start != start {
+                        Err(EngineError::new(
+                            "RANGE_MISMATCH",
+                            "the server returned a different range than requested",
+                        ))
+                    } else {
+                        Ok(RangeCheck::Accepted)
+                    }
+                }
+                StatusCode::OK => Ok(RangeCheck::Ignored),
+                _ => Err(response_status_error(&response)),
+            },
+            Err(error) => Err(error),
+        };
+
+        match result {
+            Ok(check) => return Ok(check),
+            Err(error) if error.is_retryable() && attempts < PROBE_ATTEMPTS => {
+                tokio::time::sleep(retry::delay_for_attempt(attempts, error.retry_after())).await;
             }
-            Ok(RangeCheck::Accepted)
+            Err(error) => return Err(error),
         }
-        StatusCode::OK => Ok(RangeCheck::Ignored),
-        status => Err(status_error(status)),
     }
 }
 
@@ -1942,12 +2029,20 @@ async fn probe_for_download(
                     "the server returned a different range than requested",
                 ));
             }
-            let body = response.bytes().await.map_err(|_| {
-                EngineError::retryable(
-                    "NETWORK_INTERRUPTED",
-                    "the probe response body was interrupted",
-                )
-            })?;
+            // The probe asks for exactly one byte. Read at most one byte from
+            // the stream so an overlong or mislabelled body cannot contribute
+            // extra bytes to the persisted prefix.
+            let mut body = response.bytes_stream();
+            let first_byte = match body.next().await {
+                Some(Ok(chunk)) => Some(chunk[..chunk.len().min(1)].to_vec()),
+                Some(Err(_)) => {
+                    return Err(EngineError::retryable(
+                        "NETWORK_INTERRUPTED",
+                        "the probe response body was interrupted",
+                    ))
+                }
+                None => None,
+            };
             Ok((
                 DownloadMetadata {
                     total_bytes: total,
@@ -1955,7 +2050,7 @@ async fn probe_for_download(
                     etag,
                     last_modified,
                 },
-                Some(body.to_vec()),
+                first_byte,
             ))
         }
         StatusCode::OK => Ok((
@@ -1976,7 +2071,7 @@ async fn probe_for_download(
             },
             None,
         )),
-        status => Err(status_error(status)),
+        _ => Err(response_status_error(&response)),
     }
 }
 
@@ -2065,6 +2160,14 @@ fn status_error(status: StatusCode) -> EngineError {
         }
         _ => invalid_response(),
     }
+}
+
+fn response_status_error(response: &reqwest::Response) -> EngineError {
+    let mut error = status_error(response.status());
+    if let Some(delay) = retry::retry_after(response.headers()) {
+        error = error.with_retry_after(delay);
+    }
+    error
 }
 
 fn invalid_response() -> EngineError {

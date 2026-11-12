@@ -5,8 +5,12 @@
 //! segment can resume where it stopped, and finalization hashes the finished
 //! bytes before the part is renamed.
 
+#[cfg(debug_assertions)]
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Deref;
+#[cfg(debug_assertions)]
+use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
@@ -17,6 +21,55 @@ use super::error::EngineError;
 
 /// Suffix appended to a destination filename to form its part file.
 const PART_SUFFIX: &str = ".oneget.part";
+
+/// Cumulative write budget installed by a test to simulate a full disk.
+#[cfg(debug_assertions)]
+#[derive(Debug, Default)]
+struct WriteFault {
+    fail_after: u64,
+    written: u64,
+}
+
+/// Per-part write counters used only by debug-build fault injection.
+#[cfg(debug_assertions)]
+static TEST_WRITE_FAULTS: Mutex<Option<HashMap<String, WriteFault>>> = Mutex::new(None);
+
+/// Install a debug-only write fault for one part file.
+///
+/// Writes fail with `DISK_FULL` once the cumulative written bytes would exceed
+/// `fail_after_bytes`. Release builds ignore the request.
+#[cfg(debug_assertions)]
+pub fn set_test_write_fault(part_name: &str, fail_after_bytes: u64) {
+    let mut guard = TEST_WRITE_FAULTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.get_or_insert_with(HashMap::new).insert(
+        part_name.to_string(),
+        WriteFault {
+            fail_after: fail_after_bytes,
+            written: 0,
+        },
+    );
+}
+
+/// Install a debug-only write fault for one part file.
+#[cfg(not(debug_assertions))]
+pub fn set_test_write_fault(_part_name: &str, _fail_after_bytes: u64) {}
+
+/// Clear a previously installed debug-only write fault.
+#[cfg(debug_assertions)]
+pub fn clear_test_write_fault(part_name: &str) {
+    let mut guard = TEST_WRITE_FAULTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(faults) = guard.as_mut() {
+        faults.remove(part_name);
+    }
+}
+
+/// Clear a previously installed debug-only write fault.
+#[cfg(not(debug_assertions))]
+pub fn clear_test_write_fault(_part_name: &str) {}
 
 /// Name carried by a [`PartFile`], also the method lookup target for the
 /// instance-level `part_name` accessor.
@@ -60,10 +113,14 @@ impl PartFile {
         let file = cap.open_rw_create(&name).map_err(platform_error)?;
         if let Some(len) = total {
             file.set_len(len).map_err(|error| {
-                EngineError::new(
-                    "IO_ERROR",
-                    format!("the part file could not be sized: {error}"),
-                )
+                if error.kind() == std::io::ErrorKind::StorageFull {
+                    EngineError::disk_full()
+                } else {
+                    EngineError::new(
+                        "IO_ERROR",
+                        format!("the part file could not be sized: {error}"),
+                    )
+                }
             })?;
         }
         Ok(Self {
@@ -83,8 +140,34 @@ impl PartFile {
     }
 
     /// Write `bytes` at an absolute offset in the part file.
+    ///
+    /// A full destination device maps to `DISK_FULL`; other write failures map
+    /// to `IO_ERROR`. Debug builds also honor an installed cumulative fault so
+    /// tests can exercise the disk-full path without filling a real volume.
     pub fn write_at(&self, offset: u64, bytes: &[u8]) -> Result<(), EngineError> {
-        write_at(&self.file, offset, bytes).map_err(platform_error)
+        #[cfg(debug_assertions)]
+        if self.test_write_limit_reached(bytes.len() as u64) {
+            return Err(EngineError::disk_full());
+        }
+        write_at(&self.file, offset, bytes).map_err(map_write_error)
+    }
+
+    #[cfg(debug_assertions)]
+    fn test_write_limit_reached(&self, length: u64) -> bool {
+        let mut guard = TEST_WRITE_FAULTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(faults) = guard.as_mut() else {
+            return false;
+        };
+        let Some(fault) = faults.get_mut(self.name.0.as_str()) else {
+            return false;
+        };
+        if fault.written.saturating_add(length) > fault.fail_after {
+            return true;
+        }
+        fault.written = fault.written.saturating_add(length);
+        false
     }
 
     /// Flush the part file contents to durable storage.
@@ -158,4 +241,27 @@ impl PartFile {
 
 fn platform_error(error: PlatformError) -> EngineError {
     EngineError::new(error.code, error.message)
+}
+
+fn map_write_error(error: PlatformError) -> EngineError {
+    if is_storage_error(&error.message) {
+        EngineError::disk_full()
+    } else {
+        EngineError::new("IO_ERROR", "the part file could not be written")
+    }
+}
+
+/// The platform layer reports the operating-system text rather than the raw
+/// error kind, so recognize the common out-of-space spellings explicitly.
+fn is_storage_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "no space left",
+        "not enough space",
+        "disk full",
+        "os error 28",
+        "os error 112",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }

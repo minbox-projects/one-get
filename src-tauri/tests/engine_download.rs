@@ -10,10 +10,15 @@
 
 mod support;
 
+#[path = "support/faults.rs"]
+mod faults;
+
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use oneget_lib::engine::error::EngineError;
 use oneget_lib::engine::part_file::PartFile;
+use oneget_lib::engine::scheduler::{Engine, EngineOptions};
 use oneget_lib::engine::state::{SegmentState, TaskState};
 use oneget_lib::engine::worker::{
     download_once, finalize_task, DownloadOutcome, DownloadSpec, FinalizeOutcome,
@@ -25,6 +30,7 @@ use sha2::{Digest, Sha256};
 use support::fixtures::pattern_bytes;
 use support::range_server::{FixtureConfig, RangeMode, RangeServer};
 use tempfile::tempdir;
+use tokio::time::{sleep, timeout, Instant};
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -51,14 +57,60 @@ fn open_store(dir: &tempfile::TempDir) -> Database {
 }
 
 fn make_spec(url: String, filename: &str, connections: u32) -> DownloadSpec {
+    make_spec_with(url, filename, connections, false, None)
+}
+
+fn make_spec_with(
+    url: String,
+    filename: &str,
+    connections: u32,
+    allow_html: bool,
+    expected_sha256: Option<String>,
+) -> DownloadSpec {
     DownloadSpec {
         url,
         filename: filename.to_string(),
         connections,
-        allow_html: false,
-        expected_sha256: None,
+        allow_html,
+        expected_sha256,
         extra_headers: Vec::new(),
     }
+}
+
+const POLL_INTERVAL: Duration = Duration::from_millis(15);
+const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+
+async fn wait_for_terminal(store: &Database, id: &str, deadline: Duration) -> TaskState {
+    let start = Instant::now();
+    loop {
+        let task = store.task(id).expect("load task").expect("task exists");
+        if matches!(
+            task.state,
+            TaskState::Completed | TaskState::Failed | TaskState::Cancelled | TaskState::Paused
+        ) {
+            return task.state;
+        }
+        if start.elapsed() > deadline {
+            panic!(
+                "timed out waiting for task {id}, current {:?}, downloaded={}",
+                task.state, task.downloaded_bytes
+            );
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn run_engine_to_terminal(engine: &Engine, id: &str) -> TaskState {
+    let ((), observed) = tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine.run())
+                .await
+                .expect("engine run timed out")
+                .expect("engine run failed");
+        },
+        wait_for_terminal(engine.store(), id, WAIT_TIMEOUT),
+    );
+    observed
 }
 
 fn read_file(path: &Path) -> Vec<u8> {
@@ -553,5 +605,294 @@ async fn finalize_task_reports_missing_part_and_checksum_mismatch_outcomes() {
         task.state,
         TaskState::Failed,
         "task must be failed on checksum mismatch"
+    );
+}
+
+#[tokio::test]
+async fn disk_full_pauses_with_progress_and_resumes_after_the_fault_clears() {
+    let body = pattern_bytes(77, 512 * 1024);
+    let hash = sha256_hex(&body);
+    let server = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        stream_delay: Some(Duration::from_millis(2)),
+        stream_chunk_size: 64 * 1024,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let store = open_store(&store_dir);
+    let engine = Engine::new(
+        store,
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let filename = "disk-full.bin";
+    let part_name = PartFile::part_name(filename);
+    let spec = make_spec(server.url("/disk-full"), filename, 1);
+    let id = engine.add_task(spec).expect("add task");
+
+    let fault = faults::DiskFullFault::install(&part_name, 256 * 1024);
+    let observed = run_engine_to_terminal(&engine, &id).await;
+
+    assert_eq!(
+        observed,
+        TaskState::Paused,
+        "an injected ENOSPC-equivalent write failure must pause the task"
+    );
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(
+        task.error_code.as_deref(),
+        Some("DISK_FULL"),
+        "expected DISK_FULL, got {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert!(
+        task.downloaded_bytes > 0,
+        "disk-full pause must preserve the bytes and segment progress already written"
+    );
+    let part = dest.path().join(&part_name);
+    assert!(part.exists(), "disk-full pause must preserve the part file");
+    assert_eq!(
+        std::fs::metadata(&part).expect("part metadata").len(),
+        body.len() as u64,
+        "the preallocated part must keep its declared size"
+    );
+    assert!(
+        !dest.path().join(filename).exists(),
+        "disk-full pause must not create a final file"
+    );
+    let segments = engine.store().segments_for_task(&id).expect("segments");
+    assert!(
+        segments.iter().any(|segment| segment.downloaded_bytes > 0),
+        "at least one segment must retain its persisted progress"
+    );
+
+    drop(fault);
+    engine
+        .resume(&id)
+        .await
+        .expect("resume after clearing the fault");
+    let observed = run_engine_to_terminal(&engine, &id).await;
+
+    assert_eq!(
+        observed,
+        TaskState::Completed,
+        "the task must complete after the write fault clears"
+    );
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+    assert_eq!(
+        std::fs::read(dest.path().join(filename)).expect("read final"),
+        body,
+        "resumed bytes must not be corrupted or duplicated"
+    );
+    assert!(!dest.path().join(&part_name).exists());
+}
+
+#[tokio::test]
+async fn html_is_rejected_without_allowance_and_downloaded_with_allowance() {
+    let html = b"<!doctype html><html><body>not a binary payload</body></html>".to_vec();
+    let hash = sha256_hex(&html);
+
+    // Denied through download_once: the probe rejects the page before any part exists.
+    let denied_server = RangeServer::start(FixtureConfig {
+        body: html.clone(),
+        content_type: Some("text/html; charset=utf-8".to_string()),
+        ..Default::default()
+    });
+    let denied_dest = tempdir().expect("denied dest");
+    let denied_store_dir = tempdir().expect("denied store");
+    let denied_store = open_store(&denied_store_dir);
+    let denied_url = denied_server.url("/page.html");
+    let denied_name = "page.html";
+    let denied_id = denied_store
+        .create_task(&denied_url, denied_name)
+        .expect("create denied task");
+    let denied_spec = make_spec_with(denied_url, denied_name, 1, false, None);
+
+    let err = download_once(&denied_store, &denied_id, denied_dest.path(), &denied_spec)
+        .await
+        .expect_err("HTML must be rejected without explicit allowance");
+    assert_code(&err, "HTML_RESPONSE");
+    assert!(
+        !denied_dest.path().join(denied_name).exists(),
+        "a rejected HTML page must not create a final file"
+    );
+    assert!(
+        !denied_dest
+            .path()
+            .join(PartFile::part_name(denied_name))
+            .exists(),
+        "a rejected HTML page must not create a part file"
+    );
+
+    // Denied through the engine: the task records the typed failure.
+    let engine_server = RangeServer::start(FixtureConfig {
+        body: html.clone(),
+        content_type: Some("text/html".to_string()),
+        ..Default::default()
+    });
+    let engine_dest = tempdir().expect("engine dest");
+    let engine_store_dir = tempdir().expect("engine store");
+    let engine_store = open_store(&engine_store_dir);
+    let engine = Engine::new(
+        engine_store,
+        engine_dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let engine_name = "page-engine.html";
+    let engine_id = engine
+        .add_task(make_spec_with(
+            engine_server.url("/page-engine.html"),
+            engine_name,
+            1,
+            false,
+            None,
+        ))
+        .expect("add engine task");
+    let observed = run_engine_to_terminal(&engine, &engine_id).await;
+    assert_eq!(observed, TaskState::Failed);
+    let task = engine
+        .store()
+        .task(&engine_id)
+        .expect("load task")
+        .expect("task");
+    assert_eq!(
+        task.error_code.as_deref(),
+        Some("HTML_RESPONSE"),
+        "expected HTML_RESPONSE, got {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert!(
+        !engine_dest.path().join(engine_name).exists(),
+        "the engine must not finalize a rejected HTML response"
+    );
+
+    // Allowed: the HTML bytes are stored as an ordinary file and hashed.
+    let allowed_server = RangeServer::start(FixtureConfig {
+        body: html.clone(),
+        content_type: Some("text/html; charset=utf-8".to_string()),
+        ..Default::default()
+    });
+    let allowed_dest = tempdir().expect("allowed dest");
+    let allowed_store_dir = tempdir().expect("allowed store");
+    let allowed_store = open_store(&allowed_store_dir);
+    let allowed_url = allowed_server.url("/allowed.html");
+    let allowed_name = "allowed.html";
+    let allowed_id = allowed_store
+        .create_task(&allowed_url, allowed_name)
+        .expect("create allowed task");
+    let allowed_spec = make_spec_with(allowed_url, allowed_name, 1, true, Some(hash.clone()));
+
+    let outcome = download_once(
+        &allowed_store,
+        &allowed_id,
+        allowed_dest.path(),
+        &allowed_spec,
+    )
+    .await
+    .expect("allowed HTML must download as an ordinary file");
+    assert_eq!(outcome.actual_sha256, hash);
+    assert_eq!(
+        read_file(&outcome.final_path),
+        html,
+        "allowed HTML bytes must be preserved exactly"
+    );
+    let task = allowed_store
+        .task(&allowed_id)
+        .expect("load task")
+        .expect("task");
+    assert_eq!(task.state, TaskState::Completed);
+    assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+}
+
+#[tokio::test]
+async fn checksum_mismatch_fails_without_renaming_for_download_once_and_engine_paths() {
+    let body = pattern_bytes(91, 256 * 1024);
+    let wrong_expected = "0".repeat(64);
+    let server = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        ..Default::default()
+    });
+
+    // download_once path.
+    let once_dest = tempdir().expect("once dest");
+    let once_store_dir = tempdir().expect("once store");
+    let once_store = open_store(&once_store_dir);
+    let once_name = "checksum-once.bin";
+    let once_url = server.url("/checksum-once");
+    let once_id = once_store
+        .create_task(&once_url, once_name)
+        .expect("create once task");
+    let once_spec = make_spec_with(once_url, once_name, 1, false, Some(wrong_expected.clone()));
+
+    let err = download_once(&once_store, &once_id, once_dest.path(), &once_spec)
+        .await
+        .expect_err("a wrong expected SHA-256 must fail");
+    assert_code(&err, "CHECKSUM_MISMATCH");
+    let once_part = once_dest.path().join(PartFile::part_name(once_name));
+    assert!(
+        once_part.exists(),
+        "checksum mismatch must preserve the part file"
+    );
+    assert_eq!(
+        std::fs::metadata(&once_part).expect("part metadata").len(),
+        body.len() as u64
+    );
+    assert!(
+        !once_dest.path().join(once_name).exists(),
+        "checksum mismatch must not create a final file"
+    );
+
+    // Engine path.
+    let engine_dest = tempdir().expect("engine dest");
+    let engine_store_dir = tempdir().expect("engine store");
+    let engine_store = open_store(&engine_store_dir);
+    let engine = Engine::new(
+        engine_store,
+        engine_dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let engine_name = "checksum-engine.bin";
+    let engine_id = engine
+        .add_task(make_spec_with(
+            server.url("/checksum-engine"),
+            engine_name,
+            1,
+            false,
+            Some(wrong_expected),
+        ))
+        .expect("add engine task");
+    let observed = run_engine_to_terminal(&engine, &engine_id).await;
+
+    assert_eq!(observed, TaskState::Failed);
+    let task = engine
+        .store()
+        .task(&engine_id)
+        .expect("load task")
+        .expect("task");
+    assert_eq!(
+        task.error_code.as_deref(),
+        Some("CHECKSUM_MISMATCH"),
+        "expected CHECKSUM_MISMATCH, got {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    let engine_part = engine_dest.path().join(PartFile::part_name(engine_name));
+    assert!(
+        engine_part.exists(),
+        "the engine path must preserve the part on checksum mismatch"
+    );
+    assert_eq!(
+        std::fs::metadata(&engine_part)
+            .expect("part metadata")
+            .len(),
+        body.len() as u64
+    );
+    assert!(
+        !engine_dest.path().join(engine_name).exists(),
+        "the engine path must not create a final file on checksum mismatch"
     );
 }

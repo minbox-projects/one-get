@@ -5,6 +5,7 @@
 //! are user-safe and never contain internal filesystem paths.
 
 use std::fmt;
+use std::time::Duration;
 
 use crate::error::AppError;
 
@@ -14,6 +15,7 @@ pub struct EngineError {
     code: String,
     message: String,
     retryable: bool,
+    retry_after: Option<Duration>,
 }
 
 impl EngineError {
@@ -23,6 +25,7 @@ impl EngineError {
             code: code.into(),
             message: message.into(),
             retryable: false,
+            retry_after: None,
         }
     }
 
@@ -32,7 +35,14 @@ impl EngineError {
             code: code.into(),
             message: message.into(),
             retryable: true,
+            retry_after: None,
         }
+    }
+
+    /// Attach the delay advertised by an integer-seconds `Retry-After` header.
+    pub fn with_retry_after(mut self, delay: Duration) -> Self {
+        self.retry_after = Some(delay);
+        self
     }
 
     /// Stable machine-readable code.
@@ -43,6 +53,19 @@ impl EngineError {
     /// Whether a bounded retry policy may try the operation again.
     pub fn is_retryable(&self) -> bool {
         self.retryable
+    }
+
+    /// Delay a retry should honor before the next attempt, when advertised.
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+
+    /// The destination device ran out of free space during a write.
+    pub fn disk_full() -> Self {
+        Self::new(
+            "DISK_FULL",
+            "the destination device does not have enough free space",
+        )
     }
 
     /// A task or segment transition was not permitted by the state machine.

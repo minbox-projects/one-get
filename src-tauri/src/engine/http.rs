@@ -14,6 +14,7 @@ use reqwest::{Client, Response};
 use url::Url;
 
 use super::error::EngineError;
+use super::retry::classify_reqwest_error;
 
 /// Maximum accepted URL length in bytes.
 const MAX_URL_BYTES: usize = 8 * 1024;
@@ -71,11 +72,25 @@ pub fn check_redirect(from: &str, to: &str) -> Result<(), EngineError> {
 }
 
 /// Build the shared client configuration used for probes and downloads.
-pub(crate) fn build_client() -> Result<Client, EngineError> {
+///
+/// The documented transport bounds are a 15-second connect timeout and a
+/// 30-second read timeout.
+pub fn build_client() -> Result<Client, EngineError> {
+    build_client_with_timeouts(Duration::from_secs(15), Duration::from_secs(30))
+}
+
+/// Build a client with explicit connect and read timeouts.
+///
+/// Callers use this to apply tighter bounds for an interactive probe or to
+/// exercise timeout classification with a local fixture.
+pub fn build_client_with_timeouts(
+    connect: Duration,
+    read: Duration,
+) -> Result<Client, EngineError> {
     Client::builder()
         .http1_only()
-        .connect_timeout(Duration::from_secs(15))
-        .read_timeout(Duration::from_secs(30))
+        .connect_timeout(connect)
+        .read_timeout(read)
         .redirect(Policy::none())
         .no_proxy()
         .build()
@@ -102,7 +117,7 @@ pub(crate) async fn get_following_redirects(
             .headers(headers.clone())
             .send()
             .await
-            .map_err(transport_error)?;
+            .map_err(|error| classify_reqwest_error(&error))?;
 
         if !response.status().is_redirection() {
             return Ok((response, current));
@@ -139,14 +154,6 @@ pub(crate) async fn get_following_redirects(
             strip_sensitive_headers(&mut headers);
         }
         current = next;
-    }
-}
-
-fn transport_error(error: reqwest::Error) -> EngineError {
-    if error.is_timeout() {
-        EngineError::retryable("TIMEOUT", "the HTTP request timed out")
-    } else {
-        EngineError::retryable("CONNECT_FAILED", "the HTTP request could not be completed")
     }
 }
 
