@@ -48,9 +48,34 @@ The Rust suites cover the following delivered behavior:
 
 A local macOS run created an RSA self-signed code-signing certificate in a temporary directory outside the repository, imported it into a temporary keychain, confirmed that the identity was discoverable, compiled a temporary Mach-O probe, signed it, and verified the signature with `codesign --verify --strict` plus identifier, authority, and non-ad-hoc checks. Cleanup removed the temporary keychain and certificate files. Runs with missing inputs exited non-zero. This flow is local verification only and is not release signing.
 
-## CI status
+## Hosted CI evidence
 
-The GitHub Actions workflow is delivered with a frontend job, Rust quality gates on macOS and Windows, a three-target build matrix, and a macOS signing dry-run job. No real GitHub Actions run has been performed. The authorized remote configuration, branch push, and workflow execution are pending. CI is not green and is not claimed as green.
+The delivered GitHub Actions workflow ran on the authorized remote and passed.
+
+| Field | Value |
+| --- | --- |
+| Workflow run | `ci #1`, run 43143112787 |
+| URL | https://github.com/minbox-projects/one-get/actions/runs/43143112787 |
+| Head SHA | `e6824885036a7de45255f5eac9805c22f830d8ed` |
+| Conclusion | Success |
+
+| Job | Result |
+| --- | --- |
+| frontend | Passed |
+| rust gates (`macos-15`) | Passed |
+| rust gates (`windows-2025`) | Passed |
+| build (`aarch64-apple-darwin`) | Passed |
+| build (`x86_64-apple-darwin`) | Passed |
+| build (`x86_64-pc-windows-msvc`) | Passed |
+| macOS signing dry-run | Passed |
+
+| Artifact | Size | State |
+| --- | --- | --- |
+| `oneget-aarch64-apple-darwin` | 4,189,769 bytes | Uploaded, not expired |
+| `oneget-x86_64-apple-darwin` | 4,266,731 bytes | Uploaded, not expired |
+| `oneget-x86_64-pc-windows-msvc` | 2,688,038 bytes | Uploaded, not expired |
+
+The run covers hosted CI gates, builds, and the signing dry-run only. It does not cover any manual platform acceptance item below.
 
 ## Manual acceptance status
 
@@ -67,28 +92,27 @@ All items below are pending and were not performed.
 | macOS credential round-trip | Pending | Run the keyring diagnostic against the real operating-system store. |
 | macOS light and dark visual check | Pending | Inspect both appearance modes. |
 | macOS startup network log | Pending | Confirm the startup path makes no remote requests. |
-| macOS x86_64 artifact | Pending | Confirm the CI Intel artifact and, when hardware is available, launch it. |
-| Windows x64 build and install | Pending | Build the NSIS artifact, install, and launch it. |
+| macOS x86_64 launch | Pending | The hosted CI run uploads the x86_64 artifact; launch on Intel hardware remains pending. |
+| Windows x64 install and launch | Pending | The hosted CI run builds the NSIS artifact; install and launch remain pending. |
 | Windows platform checks | Pending | Repeat single-instance, deep-link, tray, autostart, notification, credential, visual, and network checks. |
 | Windows notifications from installed build | Pending | Test from the installed NSIS build rather than the release binary. |
 
 ## Skipped and deferred checks
 
-- Hosted CI workflow execution, run identifier, and artifact names.
 - Every manual acceptance item listed above.
 - macOS x86_64 launch on Intel hardware.
-- Windows build, install, launch, and all Windows platform checks.
+- Windows install, launch, and all Windows platform checks.
 - The startup network-log inspection and the manual light and dark visual review.
 - macOS local signing trust-prompt behavior on the unsigned versus self-signed build.
 
-Phase exit is not claimed. The baseline remains incomplete until the hosted CI run and the manual matrix produce recorded evidence, unless a later decision explicitly narrows the target matrix.
+Phase exit is not claimed. The baseline remains incomplete until the manual acceptance matrix produces recorded evidence, unless a later decision explicitly narrows the target matrix.
 
 ## Risk status
 
 | Priority | Status | Detail |
 | --- | --- | --- |
-| P0 | No failure observed locally | No required behavior failed in the local macOS arm64 automated evidence. |
-| P1 | Pending | Hosted CI, manual macOS arm64 acceptance, Windows build and platform checks, and the macOS x86_64 artifact are pending. |
+| P0 | No failure observed in automated evidence | No required behavior failed in the local macOS arm64 automated evidence or the hosted CI run. |
+| P1 | Pending | Hosted CI is green; manual macOS arm64 acceptance, Windows install and platform checks, and the macOS x86_64 Intel launch remain pending. |
 | P2 | Open with mitigation | Self-signed certificate trust prompts are expected locally; Windows notifications require the installed NSIS build; the Intel runner is available only until its announced retirement; unsigned local builds can change keychain and notification prompt behavior; macOS deep links require LaunchServices registration from a built app. |
 
-The P0 statement is limited to local automated evidence. It is not a phase-exit approval and does not cover the pending manual, hosted CI, Windows, or Intel results.
+The P0 statement is limited to automated evidence. It is not a phase-exit approval and does not cover the pending manual, Windows install, or Intel results.

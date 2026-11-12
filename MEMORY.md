@@ -71,4 +71,4 @@ Run from the repository root unless noted:
 - Rust gates on `macos-15` and `windows-2025`: format, clippy with warnings denied, and tests.
 - Build matrix: `macos-15` for `aarch64-apple-darwin` (`.app`), `macos-15-intel` for `x86_64-apple-darwin` (`.app`), and `windows-2025` for `x86_64-pc-windows-msvc` (NSIS), with uploaded artifacts.
 - A macOS signing dry-run job creates an ephemeral certificate, imports it into a temporary keychain, signs and verifies a probe, cleans up, and checks fail-closed missing inputs.
-- The workflow uses read-only permissions and concurrency cancellation. Hosted CI is not yet evidenced; do not claim it green without a real run identifier.
+- The workflow uses read-only permissions and concurrency cancellation. Hosted CI is green only with a real run identifier: the workflow's first remote run, `ci #1` (run 43143112787), passed all seven jobs on the implementation branch and uploaded the `oneget-aarch64-apple-darwin`, `oneget-x86_64-apple-darwin`, and `oneget-x86_64-pc-windows-msvc` artifacts. This records hosted CI only; manual platform acceptance, Windows install, and the Intel launch remain unproven.

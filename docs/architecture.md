@@ -157,7 +157,7 @@ The non-macOS, non-Windows path code is a development fallback using XDG locatio
 
 Local macOS arm64 evidence covers `npm ci`, the exact-pin check, typecheck, lint, 20 Vitest tests, the production build, and 8 Playwright checks across light and dark projects. Rust evidence covers `cargo check`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`, with 51 integration tests across nine suites. The Tauri application bundle builds locally.
 
-The CI workflow defines a frontend job, Rust quality gates on `macos-15` and `windows-2025`, a build matrix for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`, and a macOS signing dry-run job that creates, imports, signs, verifies, and cleans up an ephemeral identity and fails closed on missing inputs. The workflow is delivered but has not run on the authorized remote; hosted CI, manual platform acceptance, Windows checks, and the Intel artifact remain pending evidence.
+The CI workflow defines a frontend job, Rust quality gates on `macos-15` and `windows-2025`, a build matrix for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`, and a macOS signing dry-run job that creates, imports, signs, verifies, and cleans up an ephemeral identity and fails closed on missing inputs. The hosted workflow has one successful run on the implementation branch: all seven jobs passed and it uploaded the three build artifacts. Manual platform acceptance, Windows install checks, and the macOS x86_64 Intel launch remain pending.
 
 ## Security invariants
 
@@ -173,12 +173,12 @@ The CI workflow defines a frontend job, Rust quality gates on `macos-15` and `wi
 
 ## Open risks
 
-- Hosted CI and every manual platform acceptance item are pending.
-- Windows build, install, deep-link, tray, autostart, notification, credential, visual, and network checks require a Windows environment and the installed NSIS build.
-- macOS x86_64 acceptance requires the CI Intel artifact and, when available, Intel hardware.
+- Hosted CI has one successful run; manual platform acceptance, Windows install checks, and the Intel launch remain pending.
+- Windows install, deep-link, tray, autostart, notification, credential, visual, and network checks require a Windows environment and the installed NSIS build.
+- macOS x86_64 acceptance requires launching the uploaded Intel artifact on Intel hardware when available.
 - Self-signed local signing can produce trust prompts; the identity is for local verification only and is not release signing.
 - Windows notifications, and sometimes macOS prompts, can depend on an installed or stably signed application.
 - The `macos-15-intel` runner is expected to remain available until August 2027; retirement would require cross-compilation or local Intel hardware and a revised risk record.
 - macOS deep links depend on LaunchServices registration from a built application.
 - Keychain and notification permission prompts can vary on unsigned local builds.
-- No P0 failure was observed in the local arm64 evidence, but phase exit is incomplete until hosted CI and the manual matrix are recorded.
+- No P0 failure was observed in the local arm64 or hosted CI evidence, but phase exit is incomplete until the manual acceptance matrix is recorded.
