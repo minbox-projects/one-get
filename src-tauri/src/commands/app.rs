@@ -162,9 +162,18 @@ pub fn settings_get(state: &AppState) -> Settings {
     state.settings()
 }
 
-/// Persist settings and return the stored value.
+/// Persist settings, apply live engine limits, and return the stored value.
 pub fn settings_save(state: &AppState, settings: Settings) -> Result<Settings, AppError> {
-    state.save_settings(settings)
+    let saved = state.save_settings(settings)?;
+    if let Some(engine) = state.engine() {
+        let max_concurrent = usize::try_from(saved.max_concurrent_tasks)
+            .unwrap_or(1)
+            .max(1);
+        engine
+            .apply_settings(max_concurrent, saved.global_rate_limit)
+            .map_err(AppError::from)?;
+    }
+    Ok(saved)
 }
 
 /// The most recently handled deep-link event.
@@ -231,8 +240,9 @@ pub fn diagnostics_autostart_set(
     })
 }
 
-/// Log a shutdown record before requesting a graceful quit.
+/// Log a shutdown record, stop the engine, and request a graceful quit.
 pub fn app_graceful_quit(state: &AppState) -> Result<QuitResult, AppError> {
+    state.shutdown_engine();
     if let Err(error) = state.logger().log(
         LogLevel::Info,
         "shutdown",

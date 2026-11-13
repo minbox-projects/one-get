@@ -20,6 +20,7 @@ use reqwest::Client;
 use tokio::sync::Notify;
 
 use crate::logging::{LogLevel, Logger};
+use crate::platform::opener::open_target;
 use crate::platform::PlatformError;
 use crate::platform::{current_target, sanitize_filename, CapDir};
 use crate::store::types::Task;
@@ -535,6 +536,39 @@ impl Engine {
             Err(error) => return Err(platform_error(error)),
         }
         self.store.delete_task(id)
+    }
+
+    /// Open a completed task's final file with the platform handler.
+    ///
+    /// A missing final file reports `FILE_MISSING` before any process starts.
+    pub fn open_file(&self, id: &str) -> Result<(), EngineError> {
+        let task = load_task(&self.store, id)?;
+        if task.state != TaskState::Completed {
+            return Err(EngineError::invalid_state(
+                "only a completed task's file can be opened",
+            ));
+        }
+
+        let destination = self.destination_for(&task);
+        let cap = CapDir::open(&destination).map_err(platform_error)?;
+        let final_name = match find_completed_final(&cap, &task) {
+            Ok(name) => name,
+            Err(error) if error.code() == "PART_MISSING" => {
+                return Err(EngineError::new(
+                    "FILE_MISSING",
+                    "the completed task's final file is missing",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        open_target(&destination.join(final_name)).map_err(platform_error)
+    }
+
+    /// Open a task's destination folder with the platform handler.
+    pub fn open_folder(&self, id: &str) -> Result<(), EngineError> {
+        let task = load_task(&self.store, id)?;
+        let destination = self.destination_for(&task);
+        open_target(&destination).map_err(platform_error)
     }
 
     /// Requeue a failed task while preserving its part file.

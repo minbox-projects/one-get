@@ -11,5 +11,6 @@ pub mod probe;
 pub mod rate_limit;
 pub mod retry;
 pub mod scheduler;
+pub mod service;
 pub mod state;
 pub mod worker;

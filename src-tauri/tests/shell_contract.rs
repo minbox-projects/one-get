@@ -565,3 +565,39 @@ fn graceful_quit_returns_quitting_logs_shutdown_and_calls_service() {
         "log output must contain a shutdown record"
     );
 }
+
+// 8. AppState engine attachment and shutdown
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn app_state_with_engine_exposes_and_shuts_down_the_service() {
+    let store_dir = tempdir().expect("store tempdir");
+    let dest = tempdir().expect("dest tempdir");
+    let store = oneget_lib::store::Database::open(store_dir.path().join("tasks.db"))
+        .expect("open task store");
+    let engine = Arc::new(
+        oneget_lib::engine::service::EngineService::start(
+            store,
+            dest.path().to_path_buf(),
+            oneget_lib::engine::scheduler::EngineOptions { max_concurrent: 1 },
+        )
+        .expect("start engine service"),
+    );
+
+    let mut harness = build_harness(
+        Arc::new(FakeSecretService::succeeding()),
+        Arc::new(FakeNotificationService::granted()),
+        Arc::new(FakeAutostartService::new(false)),
+        FakeQuitService::default(),
+    );
+    harness.state = harness.state.with_engine(Arc::clone(&engine));
+    assert!(
+        harness.state.engine().is_some(),
+        "with_engine must attach the service"
+    );
+
+    harness.state.shutdown_engine();
+    let error = engine
+        .list()
+        .expect_err("a shut-down service must reject later calls");
+    assert_eq!(error.code(), "SERVICE_STOPPED");
+}

@@ -1,6 +1,7 @@
 //! Tauri command surface and the synchronous service functions behind it.
 
 pub mod app;
+pub mod downloads;
 
 /// Tauri command wrappers registered with the runtime.
 pub mod ipc {
@@ -13,7 +14,7 @@ pub mod ipc {
     use crate::error::AppError;
     use crate::platform::deeplink::DeepLinkEvent;
 
-    use super::app;
+    use super::{app, downloads};
 
     async fn run_blocking<T, F>(task: F) -> Result<T, AppError>
     where
@@ -99,5 +100,112 @@ pub mod ipc {
         let result = run_blocking(move || app::app_graceful_quit(&state)).await?;
         app.exit(0);
         Ok(result)
+    }
+
+    #[tauri::command]
+    pub async fn downloads_list(
+        state: State<'_, Arc<AppState>>,
+    ) -> Result<Vec<downloads::DownloadSummary>, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || downloads::downloads_list(&state)).await
+    }
+
+    #[tauri::command]
+    pub async fn downloads_segments(
+        state: State<'_, Arc<AppState>>,
+        id: String,
+    ) -> Result<Vec<downloads::SegmentView>, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || downloads::downloads_segments(&state, &id)).await
+    }
+
+    #[tauri::command]
+    pub async fn downloads_probe(
+        state: State<'_, Arc<AppState>>,
+        request: downloads::ProbeDownloadRequest,
+    ) -> Result<downloads::ProbeResult, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || downloads::downloads_probe(&state, request)).await
+    }
+
+    #[tauri::command]
+    pub async fn downloads_add(
+        state: State<'_, Arc<AppState>>,
+        request: downloads::AddDownloadRequest,
+    ) -> Result<String, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || downloads::downloads_add(&state, request)).await
+    }
+
+    #[tauri::command]
+    pub async fn downloads_pause(
+        state: State<'_, Arc<AppState>>,
+        id: String,
+    ) -> Result<(), AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || downloads::downloads_pause(&state, &id)).await
+    }
+
+    #[tauri::command]
+    pub async fn downloads_resume(
+        state: State<'_, Arc<AppState>>,
+        id: String,
+    ) -> Result<(), AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || downloads::downloads_resume(&state, &id)).await
+    }
+
+    #[tauri::command]
+    pub async fn downloads_cancel(
+        state: State<'_, Arc<AppState>>,
+        id: String,
+    ) -> Result<(), AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || downloads::downloads_cancel(&state, &id)).await
+    }
+
+    #[tauri::command]
+    pub async fn downloads_retry(
+        state: State<'_, Arc<AppState>>,
+        id: String,
+    ) -> Result<(), AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || downloads::downloads_retry(&state, &id)).await
+    }
+
+    #[tauri::command]
+    pub async fn downloads_delete_record(
+        state: State<'_, Arc<AppState>>,
+        id: String,
+    ) -> Result<(), AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || downloads::downloads_delete_record(&state, &id)).await
+    }
+
+    #[tauri::command]
+    pub async fn downloads_delete_file(
+        state: State<'_, Arc<AppState>>,
+        id: String,
+    ) -> Result<(), AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || downloads::downloads_delete_file(&state, &id)).await
+    }
+
+    #[tauri::command]
+    pub async fn downloads_open_file(
+        state: State<'_, Arc<AppState>>,
+        id: String,
+    ) -> Result<(), AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || downloads::downloads_open_file(&state, &id)).await
+    }
+
+    #[tauri::command]
+    pub async fn downloads_open_folder(
+        state: State<'_, Arc<AppState>>,
+        id: String,
+    ) -> Result<(), AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || downloads::downloads_open_folder(&state, &id)).await
     }
 }

@@ -15,3 +15,16 @@ fn open_target_reports_a_missing_target_with_typed_not_found() {
         "a missing target must report the stable not_found code"
     );
 }
+
+#[test]
+fn open_target_reports_a_missing_directory_with_typed_not_found() {
+    let dir = tempdir().expect("tempdir");
+    let missing = dir.path().join("missing-folder");
+
+    let error = open_target(&missing).expect_err("opening a missing folder must fail");
+
+    assert_eq!(
+        error.code, "not_found",
+        "a missing folder must report the stable not_found code before spawning"
+    );
+}

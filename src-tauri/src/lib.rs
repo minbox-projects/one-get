@@ -23,12 +23,15 @@ use crate::commands::app::{
     AutostartService, KeyringSecretService, NotificationService, PlatformQuitService, QuitService,
     SecretService,
 };
-use crate::config::SettingsStore;
+use crate::config::{CloseBehavior, SettingsStore};
+use crate::engine::scheduler::EngineOptions;
+use crate::engine::service::EngineService;
 use crate::logging::{LogConfig, Logger};
 use crate::platform::autostart::PluginAutostartService;
 use crate::platform::deeplink::register_schemes;
 use crate::platform::notifications::PluginNotificationService;
 use crate::platform::paths::AppPaths;
+use crate::store::Database;
 
 /// Build and run the desktop application.
 pub fn run() {
@@ -54,6 +57,18 @@ pub fn run() {
             commands::ipc::diagnostics_autostart_get,
             commands::ipc::diagnostics_autostart_set,
             commands::ipc::app_graceful_quit,
+            commands::ipc::downloads_list,
+            commands::ipc::downloads_segments,
+            commands::ipc::downloads_probe,
+            commands::ipc::downloads_add,
+            commands::ipc::downloads_pause,
+            commands::ipc::downloads_resume,
+            commands::ipc::downloads_cancel,
+            commands::ipc::downloads_retry,
+            commands::ipc::downloads_delete_record,
+            commands::ipc::downloads_delete_file,
+            commands::ipc::downloads_open_file,
+            commands::ipc::downloads_open_folder,
         ])
         .setup(|app| {
             initialize(app)?;
@@ -63,7 +78,16 @@ pub fn run() {
             if window.label() == "main" {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
-                    let _ = window.hide();
+                    let state = window.state::<Arc<AppState>>();
+                    match state.settings().close_behavior {
+                        CloseBehavior::Tray => {
+                            let _ = window.hide();
+                        }
+                        CloseBehavior::Quit => {
+                            state.shutdown_engine();
+                            window.app_handle().exit(0);
+                        }
+                    }
                 }
             }
         });
@@ -79,8 +103,24 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     paths.ensure()?;
 
     let settings = SettingsStore::load(paths.data.join("settings.json"))?;
-    let level = settings.settings().log_level;
+    let snapshot = settings.settings();
+    let level = snapshot.log_level;
     let logger = Logger::new(LogConfig::with_defaults(paths.logs.clone()).with_level(level))?;
+
+    let destination = snapshot
+        .default_directory
+        .clone()
+        .unwrap_or_else(|| paths.downloads.clone());
+    let max_concurrent = usize::try_from(snapshot.max_concurrent_tasks)
+        .unwrap_or(1)
+        .max(1);
+    let store = Database::open(paths.data.join("tasks.db"))?;
+    let engine = Arc::new(EngineService::start(
+        store,
+        destination,
+        EngineOptions { max_concurrent },
+    )?);
+    engine.apply_settings(max_concurrent, snapshot.global_rate_limit)?;
 
     let secrets: Arc<dyn SecretService> = Arc::new(KeyringSecretService::new());
     let notifications: Arc<dyn NotificationService> =
@@ -89,15 +129,18 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(PluginAutostartService::new(app.handle().clone()));
     let quit: Arc<dyn QuitService> = Arc::new(PlatformQuitService);
 
-    let state = Arc::new(AppState::new(
-        paths,
-        settings,
-        logger,
-        secrets,
-        notifications,
-        autostart,
-        quit,
-    ));
+    let state = Arc::new(
+        AppState::new(
+            paths,
+            settings,
+            logger,
+            secrets,
+            notifications,
+            autostart,
+            quit,
+        )
+        .with_engine(Arc::clone(&engine)),
+    );
     app.manage(Arc::clone(&state));
 
     platform::tray::build_tray(app.handle())?;

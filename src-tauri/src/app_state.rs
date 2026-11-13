@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::commands::app::{AutostartService, NotificationService, QuitService, SecretService};
 use crate::config::{Settings, SettingsStore};
+use crate::engine::service::EngineService;
 use crate::error::AppError;
 use crate::logging::Logger;
 use crate::platform::deeplink::DeepLinkEvent;
@@ -23,6 +24,7 @@ pub struct AppState {
     notifications: Arc<dyn NotificationService>,
     autostart: Arc<dyn AutostartService>,
     quit: Arc<dyn QuitService>,
+    engine: Option<Arc<EngineService>>,
     last_event: Mutex<DeepLinkEvent>,
 }
 
@@ -45,10 +47,29 @@ impl AppState {
             notifications,
             autostart,
             quit,
+            engine: None,
             last_event: Mutex::new(DeepLinkEvent::rejected(
                 "no_deep_link".to_string(),
                 "no deep link has been received".to_string(),
             )),
+        }
+    }
+
+    /// Attach the long-lived download engine service.
+    pub fn with_engine(mut self, engine: Arc<EngineService>) -> Self {
+        self.engine = Some(engine);
+        self
+    }
+
+    /// The attached download engine service, when one has started.
+    pub fn engine(&self) -> Option<&EngineService> {
+        self.engine.as_deref()
+    }
+
+    /// Pause active downloads and stop the engine service.
+    pub fn shutdown_engine(&self) {
+        if let Some(engine) = &self.engine {
+            engine.shutdown();
         }
     }
 
