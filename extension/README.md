@@ -1,8 +1,8 @@
 # OneGet browser extension
 
-The Chromium extension connects Chrome and Edge to the OneGet desktop app. It
-observes page resources, lists them in the popup, sends prefill captures, and
-optionally takes over matching browser downloads.
+The browser extension connects Chromium browsers (Chrome and Edge) and Firefox
+to the OneGet desktop app. It observes page resources, lists them in the popup,
+sends prefill captures, and optionally takes over matching browser downloads.
 
 ## Layout
 
@@ -10,8 +10,11 @@ optionally takes over matching browser downloads.
   storage, page ownership, and bilingual message logic.
 - `chromium/` holds the MV3 manifest, background service worker, isolated
   content script, MAIN-world fetch and XHR observer, and the video overlay.
+- `firefox/` holds the MV3 manifest and the event-page background entry. The
+  shared controller and popup sources are bundled into the same package layout.
 - `popup/` holds the popup document, controller, and styles.
-- `build.mjs` bundles the runtime and writes an unpacked extension.
+- `build.mjs` bundles the runtime and writes an unpacked extension for each
+  browser target.
 - `tests/unit/` covers the shared modules and the background and popup
   controllers.
 
@@ -22,15 +25,18 @@ npm run build:extension
 npm run build:extension:test
 ```
 
-The production build writes `extension/dist/chromium/` and targets
+The production build writes `extension/dist/chromium/` and
+`extension/dist/firefox/` with separate manifests and targets
 `http://127.0.0.1:37652`. Set `ONEGET_API_ORIGIN` to another loopback HTTP
 origin to point the build at a different port; non-loopback, credentialed, and
-path-bearing values are rejected. The test build writes
+path-bearing values are rejected. The test build writes only
 `extension/dist/chromium-test/` with its own loopback test origin.
 
-Load the unpacked directory from `chrome://extensions` or
-`edge://extensions` with developer mode enabled. The app must be running before
-pairing.
+Load the Chromium package from `chrome://extensions` or `edge://extensions` with
+developer mode enabled. Load the Firefox package from
+`about:debugging#/runtime/this-firefox` with **Load Temporary Add-on** and select
+`extension/dist/firefox/manifest.json`; grant the requested site and download
+permissions when Firefox prompts. The app must be running before pairing.
 
 ## Runtime behavior
 
@@ -68,11 +74,15 @@ redacted: credentials, query strings, and fragments are never displayed.
 ```sh
 npm run test:extension
 npm run typecheck:extension
+npm run build:extension
+npm run lint:extension:firefox
 npm run build:extension:test
 npm run test:e2e:extension
 ```
 
-`npm run test:e2e:extension` rebuilds `extension/dist/chromium-test/` and runs
+`npm run lint:extension:firefox` lints the built Firefox package with `web-ext`
+and requires the production build to exist. `npm run test:e2e:extension`
+rebuilds `extension/dist/chromium-test/` and runs
 the Playwright suite in `extension/tests/e2e`. The suite starts its own fixture
 page and mock API on `127.0.0.1` and launches a persistent Chromium profile with
 the test build loaded; it does not contact a public host and does not use the

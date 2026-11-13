@@ -11,7 +11,7 @@ This file records the current standards and behavior of the OneGet desktop downl
 - Browser-integration additions: axum 0.8.9, tower 0.5.3, http-body-util 0.1.5, subtle 2.6.1, hex 0.4.3, plus tokio networking features.
 - Engine additions: rusqlite 0.42.0 (`bundled`, `backup`), reqwest 0.13.5 (`rustls`, `stream`), sha2 0.10.9, uuid 1.29.2 (`v4`), rand 0.10.3, bytes 1.12.1, futures-util 0.3.34, percent-encoding 2.3.2, and Windows-only windows-sys 0.61.2.
 - Extension additions: `@types/chrome` 0.3.7 and esbuild 0.28.2.
-- Every direct npm dependency is an exact version; `npm run check:pins` enforces this (29 entries). Use `cargo --locked` for Rust gates.
+- Every direct npm dependency is an exact version; `npm run check:pins` enforces this (30 entries). Use `cargo --locked` for Rust gates.
 
 ## Repository and module boundaries
 

@@ -31,6 +31,8 @@ jobs:
       - run: npm run test:e2e
       - run: npm run typecheck:extension
       - run: npm run test:extension
+      - run: npm run build:extension
+      - run: npm run lint:extension:firefox
       - run: npm run build:extension:test
       - run: npx playwright test --config playwright.extension.config.ts
 

@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "OneGet Browser Capture",
+  "version": "0.1.0",
+  "description": "Send browser downloads and page resources to the OneGet desktop app.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "oneget@oneget.app",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  },
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "action": {
+    "default_title": "OneGet",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "32": "icons/32x32.png",
+      "128": "icons/128x128.png"
+    }
+  },
+  "permissions": ["webRequest", "downloads", "storage", "tabs", "webNavigation"],
+  "host_permissions": ["http://*/*", "https://*/*", "http://127.0.0.1:37652/*"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';"
+  },
+  "icons": {
+    "32": "icons/32x32.png",
+    "128": "icons/128x128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ]
+}
