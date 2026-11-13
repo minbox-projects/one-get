@@ -12,6 +12,16 @@
       ]
     },
     {
+      "id": "extension",
+      "path": "extension",
+      "owner_role": "shared",
+      "responsibility": "Discovered typescript module at extension",
+      "language": "typescript",
+      "entry_kinds": [
+        "exported-symbol"
+      ]
+    },
+    {
       "id": "root",
       "path": ".",
       "owner_role": "shared",
@@ -42,6 +52,16 @@
       ]
     },
     {
+      "id": "api",
+      "path": "src-tauri/src/api",
+      "owner_role": "shared",
+      "responsibility": "Loopback browser-integration API: admission guards, capture protocol, pairing store, rate limiters, duplicate suppression, and desktop bridge",
+      "language": "rust",
+      "entry_kinds": [
+        "file"
+      ]
+    },
+    {
       "id": "engine",
       "path": "src-tauri/src/engine",
       "owner_role": "shared",
@@ -65,7 +85,7 @@
       "id": "commands",
       "path": "src-tauri/src/commands",
       "owner_role": "shared",
-      "responsibility": "Tauri command surface: typed download, settings, diagnostics, and quit commands plus directly testable service functions",
+      "responsibility": "Tauri command surface: typed download, settings, diagnostics, pairing, and quit commands plus directly testable service functions",
       "language": "rust",
       "entry_kinds": [
         "file"
@@ -108,6 +128,7 @@
       "related_files": [],
       "tests": [
         "e2e/app-shell.spec.ts",
+        "e2e/capture-prefill.spec.ts",
         "e2e/design-system.spec.ts",
         "e2e/downloads.spec.ts",
         "e2e/keyboard.spec.ts",
@@ -120,12 +141,846 @@
       "responsibility": "Discovered typescript module at e2e",
       "read_scope": [
         "e2e/app-shell.spec.ts",
+        "e2e/capture-prefill.spec.ts",
         "e2e/design-system.spec.ts",
         "e2e/downloads.spec.ts",
         "e2e/keyboard.spec.ts",
         "e2e/settings.spec.ts",
         "e2e/smoke.spec.ts",
         "e2e/support/mock-ipc.ts"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "extension",
+      "name": "extension",
+      "aliases": [],
+      "module_root": "extension",
+      "entries": [
+        "extension/chromium/background.ts",
+        "extension/popup/popup.ts",
+        "extension/shared/classify.ts",
+        "extension/shared/filename.ts",
+        "extension/shared/filter.ts",
+        "extension/shared/i18n.ts",
+        "extension/shared/messages.ts",
+        "extension/shared/pageStore.ts",
+        "extension/shared/protocol.ts",
+        "extension/shared/settings.ts",
+        "extension/shared/storage.ts",
+        "extension/shared/types.ts"
+      ],
+      "symbols": [
+        {
+          "file": "extension/chromium/background.ts",
+          "name": "BackgroundController",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/chromium/background.ts",
+          "name": "BackgroundDependencies",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/chromium/background.ts",
+          "name": "BrowserDownload",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/chromium/background.ts",
+          "name": "DownloadAllowReason",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/chromium/background.ts",
+          "name": "DownloadControl",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/chromium/background.ts",
+          "name": "DownloadOutcome",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/chromium/background.ts",
+          "name": "PairOutcome",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/chromium/background.ts",
+          "name": "RuntimeMessage",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/chromium/background.ts",
+          "name": "RuntimeSender",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/chromium/background.ts",
+          "name": "createBackgroundController",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/chromium/background.ts",
+          "name": "installChromeBackground",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/chromium/background.ts",
+          "name": "resolveApiOrigin",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/popup/popup.ts",
+          "name": "PairingView",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/popup/popup.ts",
+          "name": "ResourceRowView",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/popup/popup.ts",
+          "name": "languageFromNavigator",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/popup/popup.ts",
+          "name": "pairingView",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/popup/popup.ts",
+          "name": "resourceView",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/classify.ts",
+          "name": "CATEGORY_EXTENSIONS",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/classify.ts",
+          "name": "DASH_MIME_TYPES",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/classify.ts",
+          "name": "HLS_MIME_TYPES",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/classify.ts",
+          "name": "classifyResource",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/classify.ts",
+          "name": "isDashManifest",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/classify.ts",
+          "name": "isHlsManifest",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/classify.ts",
+          "name": "isSegmentUrl",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/filename.ts",
+          "name": "displayFilename",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/filename.ts",
+          "name": "filenameFromUrl",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/filename.ts",
+          "name": "isSafeFilename",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/filename.ts",
+          "name": "redactUrl",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/filename.ts",
+          "name": "sanitizeFilename",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/filter.ts",
+          "name": "TakeoverCandidate",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/filter.ts",
+          "name": "TakeoverDecision",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/filter.ts",
+          "name": "TakeoverReason",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/filter.ts",
+          "name": "TakeoverRules",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/filter.ts",
+          "name": "decideTakeover",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/filter.ts",
+          "name": "hostOf",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/filter.ts",
+          "name": "isBlacklistedHost",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/i18n.ts",
+          "name": "EXTENSION_DICTIONARIES",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/i18n.ts",
+          "name": "ExtensionLanguage",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/i18n.ts",
+          "name": "ExtensionMessageKey",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/i18n.ts",
+          "name": "resolveExtensionLanguage",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/i18n.ts",
+          "name": "translateExtension",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/messages.ts",
+          "name": "ExtensionMessage",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/messages.ts",
+          "name": "ExtensionMessageData",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/messages.ts",
+          "name": "ExtensionMessageType",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/messages.ts",
+          "name": "ExtensionRequest",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/messages.ts",
+          "name": "ExtensionResult",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/messages.ts",
+          "name": "PairingSummary",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/pageStore.ts",
+          "name": "ResourceStore",
+          "kind": "class",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/pageStore.ts",
+          "name": "ResourceStoreOptions",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/protocol.ts",
+          "name": "API_HOST",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/protocol.ts",
+          "name": "API_PORT",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/protocol.ts",
+          "name": "API_PROTOCOL_VERSION",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/protocol.ts",
+          "name": "ApiErrorBody",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/protocol.ts",
+          "name": "ApiResult",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/protocol.ts",
+          "name": "DEFAULT_REQUEST_TIMEOUT_MS",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/protocol.ts",
+          "name": "RequestJsonOptions",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/protocol.ts",
+          "name": "apiOrigin",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/protocol.ts",
+          "name": "isProtocolCompatible",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/protocol.ts",
+          "name": "requestJson",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/settings.ts",
+          "name": "DEFAULT_SETTINGS",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/settings.ts",
+          "name": "ExtensionSettings",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/settings.ts",
+          "name": "SettingsDocument",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/settings.ts",
+          "name": "mergeSettingsDocument",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/settings.ts",
+          "name": "normalizeSettings",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/storage.ts",
+          "name": "STORAGE_KEYS",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/storage.ts",
+          "name": "StorageArea",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/storage.ts",
+          "name": "clearToken",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/storage.ts",
+          "name": "isValidToken",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/storage.ts",
+          "name": "loadSettingsDocument",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/storage.ts",
+          "name": "loadToken",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/storage.ts",
+          "name": "saveSettingsDocument",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/storage.ts",
+          "name": "saveToken",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/types.ts",
+          "name": "CaptureDraftItem",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/types.ts",
+          "name": "CaptureIntent",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/types.ts",
+          "name": "CaptureKind",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/types.ts",
+          "name": "Classification",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/types.ts",
+          "name": "RESOURCE_CATEGORIES",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/types.ts",
+          "name": "ResourceCategory",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/types.ts",
+          "name": "ResourceEntry",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/types.ts",
+          "name": "ResourceInput",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/types.ts",
+          "name": "ResourceKind",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/types.ts",
+          "name": "SafeCaptureHeader",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/types.ts",
+          "name": "isResourceCategory",
+          "kind": "function",
+          "visibility": "public"
+        }
+      ],
+      "related_files": [
+        "extension/build.mjs",
+        "extension/chromium/content.ts",
+        "extension/chromium/inject.ts",
+        "extension/tests/e2e/fixtures/hls/segment1.ts",
+        "extension/tests/e2e/fixtures/hls/segment2.ts",
+        "extension/tests/unit/setup.ts"
+      ],
+      "tests": [
+        "extension/tests/e2e/extension.spec.ts",
+        "extension/tests/unit/background.test.ts",
+        "extension/tests/unit/classify.test.ts",
+        "extension/tests/unit/filter.test.ts",
+        "extension/tests/unit/i18n.test.ts",
+        "extension/tests/unit/pageStore.test.ts",
+        "extension/tests/unit/popup.test.ts",
+        "extension/tests/unit/protocol.test.ts",
+        "extension/tests/unit/settings.test.ts",
+        "extension/tests/unit/storage.test.ts",
+        "extension/tests/unit/takeover.test.ts"
+      ],
+      "depends_on": [],
+      "relations": [
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#BackgroundController",
+          "to": "extension/shared/settings.ts#ExtensionSettings"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#BackgroundController",
+          "to": "extension/shared/types.ts#ResourceEntry"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#BackgroundController",
+          "to": "extension/shared/types.ts#ResourceInput"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#BackgroundDependencies",
+          "to": "extension/shared/storage.ts#StorageArea"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#PairOutcome",
+          "to": "extension/shared/protocol.ts#ApiErrorBody"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/classify.ts#classifyResource"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/filter.ts#TakeoverCandidate"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/filter.ts#decideTakeover"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/pageStore.ts#ResourceStore"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/protocol.ts#API_PROTOCOL_VERSION"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/protocol.ts#ApiResult"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/protocol.ts#requestJson"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/settings.ts#ExtensionSettings"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/settings.ts#normalizeSettings"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/storage.ts#clearToken"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/storage.ts#isValidToken"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/storage.ts#loadSettingsDocument"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/storage.ts#loadToken"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/storage.ts#saveSettingsDocument"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/storage.ts#saveToken"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/types.ts#CaptureDraftItem"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/types.ts#ResourceEntry"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/chromium/background.ts#createBackgroundController",
+          "to": "extension/shared/types.ts#ResourceInput"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#languageFromNavigator",
+          "to": "extension/shared/i18n.ts#ExtensionLanguage"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#languageFromNavigator",
+          "to": "extension/shared/i18n.ts#resolveExtensionLanguage"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#pairingView",
+          "to": "extension/shared/i18n.ts#ExtensionLanguage"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#pairingView",
+          "to": "extension/shared/i18n.ts#translateExtension"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#resourceView",
+          "to": "extension/shared/filename.ts#redactUrl"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#resourceView",
+          "to": "extension/shared/i18n.ts#ExtensionLanguage"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#resourceView",
+          "to": "extension/shared/i18n.ts#translateExtension"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#resourceView",
+          "to": "extension/shared/types.ts#ResourceEntry"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/classify.ts#CATEGORY_EXTENSIONS",
+          "to": "extension/shared/types.ts#ResourceCategory"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/classify.ts#classifyResource",
+          "to": "extension/shared/types.ts#Classification"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/filter.ts#TakeoverCandidate",
+          "to": "extension/shared/types.ts#ResourceCategory"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/filter.ts#TakeoverCandidate",
+          "to": "extension/shared/types.ts#ResourceKind"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/filter.ts#TakeoverRules",
+          "to": "extension/shared/types.ts#ResourceCategory"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/messages.ts#ExtensionMessage",
+          "to": "extension/shared/settings.ts#ExtensionSettings"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/messages.ts#ExtensionMessage",
+          "to": "extension/shared/types.ts#CaptureDraftItem"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/messages.ts#ExtensionMessageData",
+          "to": "extension/shared/settings.ts#ExtensionSettings"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/messages.ts#ExtensionMessageData",
+          "to": "extension/shared/types.ts#ResourceEntry"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/messages.ts#ExtensionResult",
+          "to": "extension/shared/protocol.ts#ApiErrorBody"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/pageStore.ts#ResourceStore",
+          "to": "extension/shared/classify.ts#classifyResource"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/pageStore.ts#ResourceStore",
+          "to": "extension/shared/classify.ts#isSegmentUrl"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/pageStore.ts#ResourceStore",
+          "to": "extension/shared/filename.ts#displayFilename"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/pageStore.ts#ResourceStore",
+          "to": "extension/shared/types.ts#ResourceEntry"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/pageStore.ts#ResourceStore",
+          "to": "extension/shared/types.ts#ResourceInput"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/settings.ts#ExtensionSettings",
+          "to": "extension/shared/types.ts#ResourceCategory"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/settings.ts#normalizeSettings",
+          "to": "extension/shared/types.ts#RESOURCE_CATEGORIES"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/storage.ts#saveSettingsDocument",
+          "to": "extension/shared/settings.ts#ExtensionSettings"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/storage.ts#saveSettingsDocument",
+          "to": "extension/shared/settings.ts#SettingsDocument"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/storage.ts#saveSettingsDocument",
+          "to": "extension/shared/settings.ts#mergeSettingsDocument"
+        }
+      ],
+      "owner_role": "shared",
+      "responsibility": "Chromium MV3 browser-capture extension: shared protocol, classification, HLS and DASH recognition, segment filtering, page ownership, bounded stores, settings, background takeover and prefill, popup, and video overlay",
+      "read_scope": [
+        "extension/build.mjs",
+        "extension/chromium/background.ts",
+        "extension/chromium/content.ts",
+        "extension/chromium/inject.ts",
+        "extension/popup/popup.ts",
+        "extension/shared/classify.ts",
+        "extension/shared/filename.ts",
+        "extension/shared/filter.ts",
+        "extension/shared/i18n.ts",
+        "extension/shared/messages.ts",
+        "extension/shared/pageStore.ts",
+        "extension/shared/protocol.ts",
+        "extension/shared/settings.ts",
+        "extension/shared/storage.ts",
+        "extension/shared/types.ts",
+        "extension/tests/e2e/extension.spec.ts",
+        "extension/tests/e2e/fixtures/hls/segment1.ts",
+        "extension/tests/e2e/fixtures/hls/segment2.ts",
+        "extension/tests/unit/background.test.ts",
+        "extension/tests/unit/classify.test.ts",
+        "extension/tests/unit/filter.test.ts",
+        "extension/tests/unit/i18n.test.ts",
+        "extension/tests/unit/pageStore.test.ts",
+        "extension/tests/unit/popup.test.ts",
+        "extension/tests/unit/protocol.test.ts",
+        "extension/tests/unit/settings.test.ts",
+        "extension/tests/unit/setup.ts",
+        "extension/tests/unit/storage.test.ts",
+        "extension/tests/unit/takeover.test.ts"
       ],
       "shared_entry": false
     },
@@ -137,6 +992,7 @@
       "entries": [
         "eslint.config.js",
         "playwright.config.ts",
+        "playwright.extension.config.ts",
         "vite.config.ts",
         "vitest.config.ts"
       ],
@@ -150,6 +1006,7 @@
       "read_scope": [
         "eslint.config.js",
         "playwright.config.ts",
+        "playwright.extension.config.ts",
         "vite.config.ts",
         "vitest.config.ts"
       ],
@@ -210,6 +1067,9 @@
         "src/features/downloads/format.ts",
         "src/features/downloads/useDownloads.ts",
         "src/features/downloads/useProbe.ts",
+        "src/features/pairing/PairingRevokeDialog.tsx",
+        "src/features/pairing/PairingSettings.tsx",
+        "src/features/pairing/usePairing.ts",
         "src/features/settings/DownloadSettings.tsx",
         "src/features/settings/GeneralSettings.tsx",
         "src/features/settings/NetworkPlaceholder.tsx",
@@ -221,10 +1081,12 @@
         "src/lib/downloads.ts",
         "src/lib/events.ts",
         "src/lib/format.ts",
+        "src/lib/pairing.ts",
         "src/lib/tauri.ts",
         "src/test/mocks/tauri.ts",
         "src/types/app.ts",
-        "src/types/downloads.ts"
+        "src/types/downloads.ts",
+        "src/types/pairing.ts"
       ],
       "symbols": [
         {
@@ -565,6 +1427,12 @@
         },
         {
           "file": "src/features/downloads/NewDownloadDialog.tsx",
+          "name": "BrowserPrefill",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/NewDownloadDialog.tsx",
           "name": "DownloadDefaults",
           "kind": "interface",
           "visibility": "public"
@@ -810,6 +1678,36 @@
           "visibility": "public"
         },
         {
+          "file": "src/features/pairing/PairingRevokeDialog.tsx",
+          "name": "PairingRevokeDialog",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/pairing/PairingRevokeDialog.tsx",
+          "name": "PairingRevokeDialogProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/pairing/PairingSettings.tsx",
+          "name": "PairingSettings",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/pairing/usePairing.ts",
+          "name": "UsePairingResult",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/pairing/usePairing.ts",
+          "name": "usePairing",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
           "file": "src/features/settings/DownloadSettings.tsx",
           "name": "DownloadSettings",
           "kind": "function",
@@ -1051,6 +1949,12 @@
         },
         {
           "file": "src/lib/events.ts",
+          "name": "CAPTURE_PREFILL_EVENT",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/events.ts",
           "name": "DEEP_LINK_EVENT",
           "kind": "variable",
           "visibility": "public"
@@ -1059,6 +1963,12 @@
           "file": "src/lib/events.ts",
           "name": "Unsubscribe",
           "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/events.ts",
+          "name": "subscribeToCapturePrefill",
+          "kind": "function",
           "visibility": "public"
         },
         {
@@ -1100,6 +2010,36 @@
         {
           "file": "src/lib/format.ts",
           "name": "formatSpeed",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/pairing.ts",
+          "name": "generatePairingCode",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/pairing.ts",
+          "name": "getPairingStatus",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/pairing.ts",
+          "name": "listPairedClients",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/pairing.ts",
+          "name": "revokePairing",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/pairing.ts",
+          "name": "takePendingPrefill",
           "kind": "function",
           "visibility": "public"
         },
@@ -1348,6 +2288,42 @@
           "name": "SegmentState",
           "kind": "type",
           "visibility": "public"
+        },
+        {
+          "file": "src/types/pairing.ts",
+          "name": "PairedClientView",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/pairing.ts",
+          "name": "PairingCodeView",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/pairing.ts",
+          "name": "PairingStatus",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/pairing.ts",
+          "name": "PendingPrefill",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/pairing.ts",
+          "name": "PendingPrefillItem",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/pairing.ts",
+          "name": "PrefillHeader",
+          "kind": "interface",
+          "visibility": "public"
         }
       ],
       "related_files": [
@@ -1387,10 +2363,14 @@
         "src/features/downloads/useDownloads.actions.test.ts",
         "src/features/downloads/useDownloads.test.ts",
         "src/features/downloads/useProbe.test.ts",
+        "src/features/pairing/PairingSettings.test.tsx",
+        "src/features/pairing/usePairing.test.ts",
         "src/features/settings/SettingsDialog.test.tsx",
         "src/features/settings/useSettings.test.ts",
         "src/i18n/index.test.tsx",
-        "src/lib/dialog.test.ts"
+        "src/lib/dialog.test.ts",
+        "src/lib/events.test.ts",
+        "src/lib/pairing.test.ts"
       ],
       "depends_on": [],
       "relations": [
@@ -1453,6 +2433,11 @@
           "kind": "imports",
           "from": "src/app/AppShell.tsx#AppShell",
           "to": "src/features/downloads/DownloadsView.tsx#DownloadsView"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/NewDownloadDialog.tsx#BrowserPrefill"
         },
         {
           "kind": "imports",
@@ -1537,6 +2522,16 @@
         {
           "kind": "imports",
           "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/lib/events.ts#subscribeToCapturePrefill"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/lib/pairing.ts#takePendingPrefill"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
           "to": "src/lib/tauri.ts#invokeCommand"
         },
         {
@@ -1558,6 +2553,16 @@
           "kind": "imports",
           "from": "src/app/AppShell.tsx#AppShell",
           "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/types/downloads.ts#HeaderPair"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/types/pairing.ts#PendingPrefill"
         },
         {
           "kind": "imports",
@@ -1838,6 +2843,11 @@
           "kind": "imports",
           "from": "src/features/downloads/DownloadsView.tsx#DownloadsViewProps",
           "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#BrowserPrefill",
+          "to": "src/types/downloads.ts#HeaderPair"
         },
         {
           "kind": "imports",
@@ -2186,6 +3196,86 @@
         },
         {
           "kind": "imports",
+          "from": "src/features/pairing/PairingRevokeDialog.tsx#PairingRevokeDialog",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/PairingRevokeDialog.tsx#PairingRevokeDialog",
+          "to": "src/components/ui/Dialog.tsx#Dialog"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/PairingRevokeDialog.tsx#PairingRevokeDialog",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/PairingRevokeDialog.tsx#PairingRevokeDialogProps",
+          "to": "src/types/pairing.ts#PairedClientView"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/PairingSettings.tsx#PairingSettings",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/PairingSettings.tsx#PairingSettings",
+          "to": "src/features/pairing/PairingRevokeDialog.tsx#PairingRevokeDialog"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/PairingSettings.tsx#PairingSettings",
+          "to": "src/features/pairing/usePairing.ts#usePairing"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/PairingSettings.tsx#PairingSettings",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/PairingSettings.tsx#PairingSettings",
+          "to": "src/types/pairing.ts#PairedClientView"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/usePairing.ts#UsePairingResult",
+          "to": "src/types/app.ts#AppError"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/usePairing.ts#UsePairingResult",
+          "to": "src/types/pairing.ts#PairingStatus"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/usePairing.ts#usePairing",
+          "to": "src/lib/pairing.ts#generatePairingCode"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/usePairing.ts#usePairing",
+          "to": "src/lib/pairing.ts#getPairingStatus"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/usePairing.ts#usePairing",
+          "to": "src/lib/pairing.ts#revokePairing"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/usePairing.ts#usePairing",
+          "to": "src/types/app.ts#AppError"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/pairing/usePairing.ts#usePairing",
+          "to": "src/types/pairing.ts#PairingStatus"
+        },
+        {
+          "kind": "imports",
           "from": "src/features/settings/DownloadSettings.tsx#DownloadSettings",
           "to": "src/components/ui/Input.tsx#Input"
         },
@@ -2268,6 +3358,11 @@
           "kind": "imports",
           "from": "src/features/settings/SettingsDialog.tsx#SettingsDialog",
           "to": "src/components/ui/Dialog.tsx#Dialog"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/SettingsDialog.tsx#SettingsDialog",
+          "to": "src/features/pairing/PairingSettings.tsx#PairingSettings"
         },
         {
           "kind": "imports",
@@ -2506,13 +3601,83 @@
         },
         {
           "kind": "imports",
-          "from": "src/lib/events.ts#subscribeToDeepLink",
-          "to": "src/lib/tauri.ts#isTauriRuntime"
+          "from": "src/lib/events.ts#subscribeToCapturePrefill",
+          "to": "src/types/pairing.ts#PendingPrefill"
         },
         {
           "kind": "imports",
           "from": "src/lib/events.ts#subscribeToDeepLink",
           "to": "src/types/app.ts#DeepLinkResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#generatePairingCode",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#generatePairingCode",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#generatePairingCode",
+          "to": "src/types/pairing.ts#PairingCodeView"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#getPairingStatus",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#getPairingStatus",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#getPairingStatus",
+          "to": "src/types/pairing.ts#PairingStatus"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#listPairedClients",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#listPairedClients",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#listPairedClients",
+          "to": "src/types/pairing.ts#PairedClientView"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#revokePairing",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#revokePairing",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#takePendingPrefill",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#takePendingPrefill",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/pairing.ts#takePendingPrefill",
+          "to": "src/types/pairing.ts#PendingPrefill"
         },
         {
           "kind": "imports",
@@ -2611,6 +3776,11 @@
         "src/features/downloads/useDownloads.ts",
         "src/features/downloads/useProbe.test.ts",
         "src/features/downloads/useProbe.ts",
+        "src/features/pairing/PairingRevokeDialog.tsx",
+        "src/features/pairing/PairingSettings.test.tsx",
+        "src/features/pairing/PairingSettings.tsx",
+        "src/features/pairing/usePairing.test.ts",
+        "src/features/pairing/usePairing.ts",
         "src/features/settings/DownloadSettings.tsx",
         "src/features/settings/GeneralSettings.tsx",
         "src/features/settings/NetworkPlaceholder.tsx",
@@ -2626,15 +3796,221 @@
         "src/lib/dialog.test.ts",
         "src/lib/dialog.ts",
         "src/lib/downloads.ts",
+        "src/lib/events.test.ts",
         "src/lib/events.ts",
         "src/lib/format.ts",
+        "src/lib/pairing.test.ts",
+        "src/lib/pairing.ts",
         "src/lib/tauri.ts",
         "src/main.tsx",
         "src/test/mocks/tauri.ts",
         "src/test/setup.ts",
         "src/types/app.ts",
         "src/types/downloads.ts",
+        "src/types/pairing.ts",
         "src/vite-env.d.ts"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "api",
+      "name": "api",
+      "aliases": [],
+      "module_root": "api",
+      "entries": [
+        "src-tauri/src/api/auth.rs",
+        "src-tauri/src/api/capture.rs",
+        "src-tauri/src/api/clock.rs",
+        "src-tauri/src/api/desktop.rs",
+        "src-tauri/src/api/error.rs",
+        "src-tauri/src/api/mod.rs",
+        "src-tauri/src/api/pairing.rs",
+        "src-tauri/src/api/pairing_store.rs",
+        "src-tauri/src/api/protocol.rs",
+        "src-tauri/src/api/rate_limit.rs",
+        "src-tauri/src/api/routes.rs",
+        "src-tauri/src/api/server.rs"
+      ],
+      "symbols": [
+        {
+          "file": "src-tauri/src/api/error.rs",
+          "name": "ApiError",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/pairing_store.rs",
+          "name": "PairingStore",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/pairing_store.rs",
+          "name": "PairedClient",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/pairing_store.rs",
+          "name": "PairingCode",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/pairing_store.rs",
+          "name": "PairResult",
+          "kind": "enum",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/protocol.rs",
+          "name": "CaptureIntent",
+          "kind": "enum",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/protocol.rs",
+          "name": "CaptureKind",
+          "kind": "enum",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/protocol.rs",
+          "name": "CaptureItem",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/protocol.rs",
+          "name": "CaptureHeader",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/protocol.rs",
+          "name": "CaptureRequest",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/protocol.rs",
+          "name": "CaptureValidation",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/capture.rs",
+          "name": "CaptureDedupe",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/desktop.rs",
+          "name": "DesktopBridge",
+          "kind": "trait",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/desktop.rs",
+          "name": "PendingPrefill",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/server.rs",
+          "name": "ApiServerConfig",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/server.rs",
+          "name": "ApiState",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/server.rs",
+          "name": "ApiServerHandle",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/rate_limit.rs",
+          "name": "RateLimitPolicy",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/rate_limit.rs",
+          "name": "RateLimitDecision",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/rate_limit.rs",
+          "name": "RateLimiter",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/clock.rs",
+          "name": "Clock",
+          "kind": "trait",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/clock.rs",
+          "name": "SystemClock",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/pairing.rs",
+          "name": "hash_secret",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/api/pairing.rs",
+          "name": "generate_token",
+          "kind": "function",
+          "visibility": "public"
+        }
+      ],
+      "related_files": [
+        "src-tauri/src/app_state.rs",
+        "src-tauri/src/lib.rs"
+      ],
+      "tests": [
+        "src-tauri/tests/api_pairing.rs",
+        "src-tauri/tests/api_capture.rs",
+        "src-tauri/tests/pairing_commands.rs"
+      ],
+      "depends_on": [
+        "engine",
+        "store"
+      ],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Loopback browser-integration API: fixed admission guards, capture protocol and validation, dedicated pairing database, bounded rate limiters, duplicate suppression, and the desktop takeover and prefill bridge",
+      "read_scope": [
+        "src-tauri/src/api/auth.rs",
+        "src-tauri/src/api/capture.rs",
+        "src-tauri/src/api/clock.rs",
+        "src-tauri/src/api/desktop.rs",
+        "src-tauri/src/api/error.rs",
+        "src-tauri/src/api/mod.rs",
+        "src-tauri/src/api/pairing.rs",
+        "src-tauri/src/api/pairing_store.rs",
+        "src-tauri/src/api/protocol.rs",
+        "src-tauri/src/api/rate_limit.rs",
+        "src-tauri/src/api/routes.rs",
+        "src-tauri/src/api/server.rs",
+        "src-tauri/tests/api_pairing.rs",
+        "src-tauri/tests/api_capture.rs",
+        "src-tauri/tests/pairing_commands.rs",
+        "src-tauri/src/app_state.rs",
+        "src-tauri/src/lib.rs"
       ],
       "shared_entry": false
     },
@@ -2792,26 +4168,20 @@
         },
         {
           "file": "src-tauri/src/store/types.rs",
-          "name": "Task",
+          "name": "TaskRecord",
           "kind": "struct",
           "visibility": "public"
         },
         {
           "file": "src-tauri/src/store/types.rs",
-          "name": "Segment",
+          "name": "SegmentRecord",
           "kind": "struct",
           "visibility": "public"
         },
         {
           "file": "src-tauri/src/store/types.rs",
-          "name": "SegmentInput",
-          "kind": "struct",
-          "visibility": "public"
-        },
-        {
-          "file": "src-tauri/src/store/types.rs",
-          "name": "SegmentProgressInput",
-          "kind": "struct",
+          "name": "TaskState",
+          "kind": "enum",
           "visibility": "public"
         }
       ],
@@ -2842,64 +4212,75 @@
       "entries": [
         "src-tauri/src/commands/downloads.rs",
         "src-tauri/src/commands/app.rs",
+        "src-tauri/src/commands/pairing.rs",
         "src-tauri/src/commands/mod.rs"
       ],
       "symbols": [
         {
           "file": "src-tauri/src/commands/app.rs",
-          "name": "SettingsStatus",
-          "kind": "struct",
+          "name": "handle_deep_link",
+          "kind": "function",
           "visibility": "public"
         },
         {
           "file": "src-tauri/src/commands/downloads.rs",
-          "name": "AddDownloadRequest",
-          "kind": "struct",
+          "name": "downloads_add",
+          "kind": "function",
           "visibility": "public"
         },
         {
-          "file": "src-tauri/src/commands/downloads.rs",
-          "name": "ProbeDownloadRequest",
-          "kind": "struct",
+          "file": "src-tauri/src/commands/pairing.rs",
+          "name": "pairing_status",
+          "kind": "function",
           "visibility": "public"
         },
         {
-          "file": "src-tauri/src/commands/downloads.rs",
-          "name": "DownloadSummary",
-          "kind": "struct",
+          "file": "src-tauri/src/commands/pairing.rs",
+          "name": "pairing_generate_code",
+          "kind": "function",
           "visibility": "public"
         },
         {
-          "file": "src-tauri/src/commands/downloads.rs",
-          "name": "SegmentView",
-          "kind": "struct",
+          "file": "src-tauri/src/commands/pairing.rs",
+          "name": "pairing_list_clients",
+          "kind": "function",
           "visibility": "public"
         },
         {
-          "file": "src-tauri/src/commands/downloads.rs",
-          "name": "ProbeResult",
-          "kind": "struct",
+          "file": "src-tauri/src/commands/pairing.rs",
+          "name": "pairing_revoke",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/pairing.rs",
+          "name": "pairing_take_pending_prefill",
+          "kind": "function",
           "visibility": "public"
         }
       ],
       "related_files": [],
       "tests": [
         "src-tauri/tests/downloads_commands.rs",
-        "src-tauri/tests/shell_contract.rs"
+        "src-tauri/tests/shell_contract.rs",
+        "src-tauri/tests/pairing_commands.rs"
       ],
       "depends_on": [
+        "api",
         "engine",
         "store"
       ],
       "relations": [],
       "owner_role": "shared",
-      "responsibility": "Tauri command surface: typed download, settings, diagnostics, and quit commands plus directly testable service functions",
+      "responsibility": "Tauri command surface: typed download, settings, diagnostics, pairing, and quit commands plus directly testable service functions",
       "read_scope": [
         "src-tauri/src/commands/downloads.rs",
         "src-tauri/src/commands/app.rs",
+        "src-tauri/src/commands/pairing.rs",
         "src-tauri/src/commands/mod.rs",
         "src-tauri/tests/downloads_commands.rs",
-        "src-tauri/tests/shell_contract.rs"
+        "src-tauri/tests/shell_contract.rs",
+        "src-tauri/tests/pairing_commands.rs"
       ],
       "shared_entry": false
     },

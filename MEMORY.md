@@ -1,6 +1,6 @@
 # Project memory
 
-This file records the current standards and behavior of the OneGet desktop downloader, its task-first React interface, its download engine, and its durable task store. Agent Notes record why decisions were made; keep both consistent in the same change.
+This file records the current standards and behavior of the OneGet desktop downloader, its task-first React interface, its download engine, its durable task store, and its loopback browser-capture boundary. Agent Notes record why decisions were made; keep both consistent in the same change.
 
 ## Stack and pins
 
@@ -8,23 +8,29 @@ This file records the current standards and behavior of the OneGet desktop downl
 - React 19.3.1, React DOM 19.3.1, TypeScript 6.0.3, Vite 8.3.8, Tailwind 4.3.5, Vitest 5.1.0, Playwright 1.65.0, and ESLint 10.14.0.
 - Tauri 2.12.5 with `@tauri-apps/api` and CLI 2.12.4; Rust edition 2021 on stable, with committed `src-tauri/Cargo.lock`.
 - Rust boundaries: cap-std 4.0.3, keyring 4.2.0, ed25519-dalek 3.0.0, process-wrap 10.0.1, secrecy 0.10.3, zeroize 1.9.1, unicode-normalization 0.1, url 2.5.8.
+- Browser-integration additions: axum 0.8.9, tower 0.5.3, http-body-util 0.1.5, subtle 2.6.1, hex 0.4.3, plus tokio networking features.
 - Engine additions: rusqlite 0.42.0 (`bundled`, `backup`), reqwest 0.13.5 (`rustls`, `stream`), sha2 0.10.9, uuid 1.29.2 (`v4`), rand 0.10.3, bytes 1.12.1, futures-util 0.3.34, percent-encoding 2.3.2, and Windows-only windows-sys 0.61.2.
-- Every direct npm dependency is an exact version; `npm run check:pins` enforces this. Use `cargo --locked` for Rust gates.
+- Extension additions: `@types/chrome` 0.3.7 and esbuild 0.28.2.
+- Every direct npm dependency is an exact version; `npm run check:pins` enforces this (29 entries). Use `cargo --locked` for Rust gates.
 
 ## Repository and module boundaries
 
 - `src/` is the React UI: task-first shell, downloads and settings features, i18n, error boundary, design-system primitives, diagnostics, typed IPC wrappers, deep-link subscription, formatting helpers, and shared types.
 - `src/features/downloads/` owns the list and fixed-height virtualization, categories, sorting, filtering, search, bounded polling, new and batch dialogs with the native directory picker, probe handling, state-aware controls, details, deletion confirmations, localized engine-error mapping, and download formatting.
 - `src/features/settings/` owns general and download settings, the read-only network placeholder, and live language, theme, close-behavior, and engine-limit application; `src/i18n/` owns the Simplified Chinese and English dictionaries and locale formatting.
-- `src-tauri/src/commands/` is the Tauri command surface plus directly testable download, settings, diagnostics, and quit service functions.
+- `src/features/pairing/` owns browser-integration availability, one-time code generation and countdown, paired-client listing, confirmed revocation, and the typed pairing hook; `src/lib/pairing.ts` and `src/types/pairing.ts` carry the typed command and payload surface.
+- `src-tauri/src/commands/` is the Tauri command surface plus directly testable download, settings, diagnostics, pairing, and quit service functions.
+- `src-tauri/src/api/` owns the loopback HTTP service, fixed admission guards, capture protocol and validation, dedicated pairing database, bounded rate limiters, duplicate suppression, and the desktop bridge for takeover and prefill.
 - `src-tauri/src/engine/` owns the headless probe, safe HTTP transport, planner, part file, worker pool, scheduler, long-lived service actor, retry, rate limiting, cookies, per-task destinations, deletion, state machines, and typed engine errors.
 - `src-tauri/src/store/` owns the SQLite connection, schema version 1 and 2 migrations, per-task destinations, part names, minimized final URLs, task and segment records, and progress persistence.
+- `extension/shared/` is framework-free extension logic: protocol client, classification, HLS and DASH recognition, segment filtering, page ownership, bounded resource store, settings validation, typed messages, bilingual strings, and filename display.
+- `extension/chromium/` owns the MV3 manifest, background service worker, isolated content script and overlay, MAIN-world request observer, and styles; `extension/popup/` owns the resources, pairing, and settings views; `extension/build.mjs` writes the production and test builds.
 - `src-tauri/src/bin/engine_harness.rs` is the command-line harness (`run`, `status`, `pause`, `resume`, `cancel`) for local fixture checks and crash recovery.
 - `src-tauri/tests/support/` holds the deterministic local range, proxy, cookie, fault, and fixture helpers; `scripts/soak-test.sh` wraps the ignored long soak.
 - `src-tauri/src/platform/` owns all target-specific behavior: paths, filenames, capability files, shell-free opener, processes, secrets, deep links, tray, autostart, and notifications.
 - `src-tauri/src/kernel/` owns canonical JSON and Ed25519 manifest verification only.
 - `src-tauri/src/config.rs`, `logging/`, and `error.rs` own settings, JSON-line logs, and typed errors.
-- `src-tauri/tests/` holds the Rust integration suites for download commands, settings, store, opener, shell, engine, and soak; `e2e/` holds Playwright checks backed by deterministic mock IPC in `e2e/support/mock-ipc.ts`; `scripts/` holds the pin check, the soak wrapper, and local macOS signing helpers.
+- `src-tauri/tests/` holds the Rust integration suites for download commands, settings, store, opener, shell, engine, soak, the loopback API, and pairing commands; `extension/tests/` holds shared and controller unit tests plus the extension Playwright harness; `e2e/` holds Playwright checks backed by deterministic mock IPC in `e2e/support/mock-ipc.ts`; `scripts/` holds the pin check, the soak wrapper, and local macOS signing helpers.
 - `localdocs/` is ignored local reference material, not shipped product documentation.
 
 ## Platform-layer rule
@@ -54,14 +60,29 @@ Target-specific branches belong only in `src-tauri/src/platform/**` and platform
 - Platform: macOS uses sparse `set_len`; Windows attempts `FSCTL_SET_SPARSE` before extending and reports sparse or an explicit fallback. Both use the capability-scoped replace path.
 - Harness and soak: `cargo run --bin engine_harness -- run|status|pause|resume|cancel` against a local fixture. The short smoke runs in `cargo test --test soak`; the ignored long run is `ONEGET_SOAK_SECONDS=86400 cargo test --test soak -- --ignored --nocapture` in `src-tauri/` or `bash scripts/soak-test.sh 86400`.
 
+## Browser integration and capture protocol
+
+- The loopback API binds `127.0.0.1:37652` synchronously before serving on a dedicated current-thread Tokio thread. It is optional: a bind or pairing-database failure leaves downloads and settings usable and reports browser integration unavailable. Shut the API down before the engine on quit.
+- Routes are `GET /health`, `POST /pair`, `POST /capture`, and `POST /pair/revoke`. Admission order is the request-header budget, exact loopback `Host`, route origin, JSON content type for the two body routes, bearer authentication for capture and revoke, then the route rate limit and body validation. `/health` allows an absent `Origin`, rejects a present non-extension origin, and returns app version, protocol version 1, and capture, prefill, and takeover capabilities without authentication.
+- Limits: 64 KiB body, 50 capture items, 8 KiB URL, 255-byte filename, 10 safe capture headers with 128-byte names and 2048-byte values, 64 request headers and 16 KiB combined header bytes, 10 pairing requests per origin per minute, 120 capture requests per token per minute, and 256 retained keys per limiter. Rejections use typed `{ code, message }` bodies and create no task or prefill.
+- Pairing codes are eight digits with a ten-minute lifetime, one active code at a time, superseded by a new code. A token is 256 random bits as 64 lowercase hexadecimal characters and is returned exactly once. `pairing.db` stores only SHA-256 hashes of codes and tokens plus the exact `chrome-extension://` origin, label, and timestamps, with schema version 1, WAL, `synchronous=NORMAL`, a five-second busy timeout, and `0600` on Unix. Five failed codes lock pairing for five minutes; authorization requires the exact bound origin; last-used updates are throttled to once per minute; revocation deletes the client.
+- Capture intents are `takeover` and `prefill`. A takeover carries exactly one item, creates one task, and returns the existing task with `duplicate: true` for a repeated token-bound `sourceId`. A prefill carries one or more items, stores one in-memory pending list, emits `app://capture-prefill`, and creates no task. Only the safe headers `Referer`, `User-Agent`, `Accept`, and `Accept-Language` are accepted; cookies, authorization values, arbitrary headers, credentialed URLs, and kinds other than `file` are rejected.
+- Prefill delivery uses the event plus a fetch-on-open command. One item opens New Download with URL, filename, and a `Referer` header; multiple items open Batch Download with their URLs. A busy dialog defers the prefill until it closes, a second prefill replaces the pending one, dismissing the dialog drops it, and no prefill survives an app restart.
+- The extension is MV3 with `webRequest`, `downloads`, `storage`, `tabs`, and `webNavigation`, host permissions for HTTP(S) pages and loopback, and `script-src 'self'`. The isolated content script owns the overlay and forwards metadata; a MAIN-world script observes fetch, XHR, media elements, and SPA navigation without extension APIs. The token and settings live in `chrome.storage.local`; bounded resource metadata lives only in `chrome.storage.session`.
+- Resource categories are `video`, `audio`, `archive`, `program`, `document`, `model`, and `other`, derived from the lowercased filename extension first and MIME type second. HLS is `.m3u8` or an HLS manifest MIME; DASH is `.mpd` or `application/dash+xml`. Manifests are listed but never takeover candidates and are never fetched for parsing. `.ts`, `.m4s`, `.m4f`, `.cmfv`, `.cmfa`, `init.mp4`, and `videoplayback` range, sequence, or fragment URLs are filtered.
+- Takeover reads the current token and settings per decision, checks enablement, category, blacklist host and subdomain, incognito, extension-originated, non-HTTP, manifest, unsupported kind, and known size, and exempts unknown sizes from the minimum-size rule. It sends the capture before canceling and erasing the browser download; a failed capture leaves the download intact; a 401 clears the token; a 409 requests an update. The per-tab store keeps at most 500 entries per tab and 50 tabs and resets on frame, tab, or SPA navigation and tab close.
+
+
+
 ## Command and event contract
 
-- Commands: `app_info`, `settings_get`, `settings_status`, `settings_save`, `deep_link_last`, `diagnostics_secret_roundtrip`, `diagnostics_notification_status`, `diagnostics_send_notification`, `diagnostics_autostart_get`, `diagnostics_autostart_set`, `app_graceful_quit`, `downloads_list`, `downloads_segments`, `downloads_probe`, `downloads_add`, `downloads_pause`, `downloads_resume`, `downloads_cancel`, `downloads_retry`, `downloads_delete_record`, `downloads_delete_file`, `downloads_open_file`, and `downloads_open_folder`.
+- Commands: `app_info`, `settings_get`, `settings_status`, `settings_save`, `deep_link_last`, `diagnostics_secret_roundtrip`, `diagnostics_notification_status`, `diagnostics_send_notification`, `diagnostics_autostart_get`, `diagnostics_autostart_set`, `app_graceful_quit`, `downloads_list`, `downloads_segments`, `downloads_probe`, `downloads_add`, `downloads_pause`, `downloads_resume`, `downloads_cancel`, `downloads_retry`, `downloads_delete_record`, `downloads_delete_file`, `downloads_open_file`, `downloads_open_folder`, `pairing_status`, `pairing_generate_code`, `pairing_list_clients`, `pairing_revoke`, and `pairing_take_pending_prefill`.
 - `settings_status` reports whether the loaded document is read-only because of a future schema and whether corrupt input was recovered; it never returns the document content.
-- Event: `app://deep-link` with `{ accepted, url?, error? }`.
+- Events: `app://deep-link` with `{ accepted, url?, error? }` and `app://capture-prefill` with `{ items, receivedAtMs }`.
+- Pairing commands never return a bearer token: status and client views carry only identifiers, origins, labels, and timestamps. `pairing_take_pending_prefill` takes the one pending prefill exactly once.
 - `downloads_list` summaries and task details expose the minimized post-redirect target as `finalUrl`.
 - Rust payloads use camelCase and typed `{ code, message }` errors. A missing engine reports `engine_unavailable`.
-- The frontend calls only `src/lib/tauri.ts` or the typed wrappers in `src/lib/downloads.ts`; components never invoke Tauri directly. A missing Tauri runtime yields `runtime_unavailable`; the shell must not crash in a browser preview.
+- The frontend calls only `src/lib/tauri.ts` or the typed wrappers in `src/lib/downloads.ts` and `src/lib/pairing.ts`; components never invoke Tauri directly. A missing Tauri runtime yields `runtime_unavailable`; the shell must not crash in a browser preview.
 - Blocking keyring, file, settings, and download work runs through `spawn_blocking` or the engine service thread; no command blocks the UI thread.
 - Polling: the UI calls `downloads_list` at most once per second while the window is visible, pauses while it is hidden, and refreshes after a control action or mutation. Do not add a per-task progress event stream.
 - Quitting: `app_graceful_quit`, the close behavior, and the tray path shut the engine service down before exit; do not start a second engine over the same task database.
@@ -91,6 +112,11 @@ Target-specific branches belong only in `src-tauri/src/platform/**` and platform
 - The platform opener runs without a shell, launches the operating-system handler detached without a process group or Job Object, and refuses to launch a path that does not exist or a non-completed task.
 - The engine rejects non-HTTP schemes, credentialed targets, HTTPS-to-HTTP redirects, URLs over 8 KiB, forbidden headers, and CRLF-bearing header values before a request.
 - Cookie values, proxy credentials, authorization values, URL query tokens, and custom header values never enter the SQLite store or the structured log. The store keeps only necessary recovery fields.
+- The local API binds only `127.0.0.1`, requires the exact loopback `Host` on every route and the exact paired Chromium extension origin on every write, reads bearer tokens only from the `Authorization` header, and returns no wildcard CORS. It enforces body, item, URL, header, protocol, and rate limits before creating a task or prefill.
+- `pairing.db` stores only SHA-256 hashes of single-use codes and bearer tokens plus the exact bound origin, label, and timestamps. Never return a token from a desktop command, log it, write it to settings, or render it in the UI.
+- Capture accepts only URL, filename, referer, MIME type, size, file kind, and the four safe headers. Reject cookies, authorization values, arbitrary headers, credentialed URLs, and unsupported kinds before the engine or dialog sees them; prefill content stays in memory and is never persisted.
+- The extension uses bundled-only MV3 scripts with no remote code or eval, no cookies or native messaging, and no telemetry. The MAIN-world observer never reads response bodies or credentials, and resource metadata stays session-only and bounded.
+- Takeover posts the capture before canceling or erasing the browser download, creates at most one task per token-bound source, and leaves the browser download intact on failure.
 
 ## Settings, logging, and errors
 
@@ -99,6 +125,7 @@ Target-specific branches belong only in `src-tauri/src/platform/**` and platform
 - Rotation defaults to 10 MiB per file and five files including the current file; a record is never split across files. Debug builds also write the redacted line to stderr.
 - Errors are user-safe typed `AppError` values with stable codes and no internal paths, stack traces, or credential values. `EngineError` follows the same rule and carries an internal retryability flag and optional retry delay.
 - The task database is not a settings store. It holds minimized task URLs, filenames, per-task destinations, states, offsets, remote metadata, hashes, error codes, connection counts, timestamps, and safe header names with empty values.
+- The pairing database is a separate `pairing.db`, not part of the task store. Deleting it revokes every paired client and affects no task, completed file, or setting. The settings schema stays version 2 and the task-store schema stays version 2.
 
 ## Quality gates
 
@@ -110,17 +137,19 @@ Run from the repository root unless noted:
 - `npm run lint`
 - `npm run test`
 - `npm run build`
-- `npx playwright install chromium` once, then `npm run test:e2e`
+- `npm run typecheck:extension`, `npm run test:extension`, `npm run build:extension`, and `npm run build:extension:test`
+- `npx playwright install chromium` once, then `npm run test:e2e` and `npm run test:e2e:extension`
 - `cargo check --locked`, `cargo fmt -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --locked` in `src-tauri/`
+- `cargo test --test api_pairing --locked`, `cargo test --test api_capture --locked`, and `cargo test --test pairing_commands --locked` in `src-tauri/`
 - `cargo test --test soak` in `src-tauri/` for the short smoke; `bash scripts/soak-test.sh 86400` for the ignored long soak and its duration record
-- Frontend suites include task list, virtualization, filters, dialogs, validation, controls, deletion, details, settings, i18n, polling, and fallback behavior; Rust suites include `downloads_commands`, `config`, `store`, `shell_contract`, and `platform_opener`.
+- Frontend suites include task list, virtualization, filters, dialogs, validation, controls, deletion, details, settings, pairing, prefill, i18n, polling, and fallback behavior; extension suites include classification, filtering, page ownership, settings, protocol, storage, background control flow, popup views, and takeover; Rust suites include `downloads_commands`, `config`, `store`, `shell_contract`, `platform_opener`, `api_pairing`, `api_capture`, and `pairing_commands`.
 - `npm run tauri build -- --bundles app` on macOS or `npm run tauri build -- --bundles nsis` on Windows
 - `bash -n scripts/*.sh` before using the macOS signing helpers
 
 ## CI matrix
 
-- Frontend job on Ubuntu: locked install, pin check, typecheck, lint, unit tests, build, and Playwright.
+- Frontend job on Ubuntu: locked install, pin check, typecheck, lint, unit tests, build, Playwright, extension typecheck, extension unit tests, extension test build, and extension Playwright.
 - Rust gates on `macos-15` and `windows-2025`: format, clippy with warnings denied, and tests.
 - Build matrix: `macos-15` for `aarch64-apple-darwin` (`.app`), `macos-15-intel` for `x86_64-apple-darwin` (`.app`), and `windows-2025` for `x86_64-pc-windows-msvc` (NSIS), with uploaded artifacts.
 - A macOS signing dry-run job creates an ephemeral certificate, imports it into a temporary keychain, signs and verifies a probe, cleans up, and checks fail-closed missing inputs.
-- The workflow uses read-only permissions and concurrency cancellation. Hosted CI is green only with a real run identifier: the workflow's first remote run, `ci #1` (run 43143112787), passed all seven jobs on the implementation branch and uploaded the `oneget-aarch64-apple-darwin`, `oneget-x86_64-apple-darwin`, and `oneget-x86_64-pc-windows-msvc` artifacts. That remains the only hosted run; the desktop downloader revision claims no new hosted run. Manual platform acceptance, the real-application local HTTP download, Windows install, and the Intel launch remain unproven, and exit remains blocked while the manual platform matrix, long soak, Windows compatibility, manual download, and the design-review targeted recheck are pending or unwaived.
+- The workflow uses read-only permissions and concurrency cancellation. Hosted CI is green only with a real run identifier: the workflow's first remote run, `ci #1` (run 43143112787), passed all seven jobs on the implementation branch and uploaded the `oneget-aarch64-apple-darwin`, `oneget-x86_64-apple-darwin`, and `oneget-x86_64-pc-windows-msvc` artifacts. That remains the only hosted run; the browser-capture revision claims no new hosted run. Manual Chrome and Edge pairing, sniffing, HLS filtering, takeover, unpaired and revoked behavior, Windows install and launch, the manual platform matrix, long soak, Windows compatibility, manual real-application download, and the design-review targeted recheck remain pending or unwaived, so browser-capture exit remains blocked.

@@ -350,3 +350,122 @@ The implemented architecture note triplet records the repaired delivery facts an
 ### Exit statement
 
 Phase 2 exit is blocked. It requires the Phase 0 manual matrix and the Phase 1 24-hour soak and Windows compatibility records, or a dated explicit user waiver, plus a recorded manual real-application local HTTP download and a completed design review with its final targeted recheck recorded. The cycle-2 post-repair automated evidence is green, but it is not a phase-exit approval.
+
+## Phase 3: local API and browser capture
+
+Date: 2026-11-13
+
+This section records the delivered loopback browser-integration API, dedicated pairing store, capture protocol, desktop prefill and takeover bridge, Chromium extension, and build and test harness. The automated evidence below is accepted for this revision; it does not include manual Chrome or Edge interaction, Windows install or launch, or the earlier pending platform gates. Implementation completion and automated green results are not Phase 3 exit.
+
+### Environment
+
+| Component | Value |
+| --- | --- |
+| Host | macOS 27.3, arm64 |
+| Node.js | 24.18.0 |
+| npm | 11.16.0 |
+| rustc | 1.99.1 |
+| cargo | 1.99.1 |
+| OpenSSL | 4.1.0 |
+
+### Automated commands and results
+
+Frontend and extension commands ran from the repository root; Rust commands ran in `src-tauri/`.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --test api_pairing --locked` | Passed: 23 tests. |
+| `cargo test --test api_capture --locked` | Passed: 21 tests. |
+| `cargo test --test pairing_commands --locked` | Passed: 15 tests. |
+| `cargo test --locked` | Passed: full suite with the one pre-existing ignored long soak. |
+| `cargo fmt -- --check` | Passed: exit 0. |
+| `cargo clippy --all-targets -- -D warnings` | Passed: exit 0. |
+| `cargo check --locked` | Passed: exit 0. |
+| `npm run typecheck` | Passed: strict TypeScript project build. |
+| `npm run lint` | Passed: ESLint with React hooks and refresh rules. |
+| `npm run test` | Passed: 47 Vitest files, 397 tests. |
+| `npm run build` | Passed: production Vite build. |
+| `npx playwright test e2e/capture-prefill.spec.ts` | Passed: 4 tests. |
+| `npm run test:e2e` | Passed: 34 Playwright tests. |
+| `npm run test:extension` | Passed: 94 tests. |
+| `npm run typecheck:extension` | Passed: exit 0. |
+| `npm run build:extension` | Passed: production unpacked extension written to `extension/dist/chromium/`. |
+| `npm run build:extension:test` | Passed: test unpacked extension written to `extension/dist/chromium-test/`. |
+| `npm run test:e2e:extension` | Passed: 7 tests, including a real `downloads.onDeterminingFilename` takeover case after restoring Playwright download interception through the DevTools protocol. |
+| `npm run check:pins` | Passed: 29 direct npm entries are exact versions. |
+
+### Automated layers
+
+- Rust integration tests cover pairing code lifetime, supersession, failure lockout, hash-only token storage, exact-origin authorization, revocation, host and origin admission, content type, bearer extraction, body and item limits, protocol mismatch, rate limits, capture intents, takeover task creation, token-bound duplicate suppression, prefill storage and delivery, graceful bind failure, pairing commands, and log and database redaction.
+- Vitest covers the pairing surface, typed wrappers, capture event and fetch-on-open delivery, deferred prefill, no auto-submit, extension classification, HLS and DASH recognition, segment filtering, page ownership, bounded stores, settings validation and unknown-field preservation, takeover decisions, background control flow, popup views, and bilingual strings.
+- The main Playwright suite uses deterministic mock IPC in `e2e/support/mock-ipc.ts`; the capture-prefill spec proves single and multi-item prefill, no task before confirmation, and one task per submitted item.
+- The extension Playwright suite builds and loads the unpacked test extension in a persistent Chromium profile, starts a local fixture page and mock loopback API, and asserts pairing, resource listing, HLS manifest presence with segment absence, SPA reset, overlay presence, one credential-free prefill request, and one real takeover.
+- `npm run check:pins` enforces exact direct npm versions, and every Rust gate runs with `--locked` against the committed lockfile. No automated layer contacts a public host.
+
+### Acceptance criteria
+
+Every criterion below is a status for the current revision. Automated evidence is macOS arm64; no manual browser or Windows result is inferred from it.
+
+| Criterion | Status | Evidence |
+| --- | --- | --- |
+| AC-001 | Passed (automated) | Rust API tests bind loopback, report health fields, and keep the app usable on a bind failure. |
+| AC-002 | Passed (automated) | `api_capture` and `api_pairing` reject a wrong host, a present non-extension health origin, and a write without an extension origin. |
+| AC-003 | Passed (automated) | Pairing tests issue one token, list one client, and reject code reuse. |
+| AC-004 | Passed (automated) | Pairing tests inspect hash-only storage, log redaction, and the token-free command views. |
+| AC-005 | Passed (automated) | Pairing tests cover the ten-minute expiry, replacement, and five-failure lockout with `Retry-After`. |
+| AC-006 | Passed (automated) | Command and API tests revoke a client and reject later captures with that token. |
+| AC-007 | Passed (automated) | Admission tests cover host, origin, content type, and header-only bearer rejection. |
+| AC-008 | Passed (automated) | Admission and capture tests cover the 64 KiB body, 50 items, 8 KiB URL, header bounds, protocol mismatch, and takeover arity. |
+| AC-009 | Passed (automated) | Rate-limit tests cover both limiter budgets, `Retry-After`, no side effects, and bounded keys. |
+| AC-010 | Passed (automated) | Component and Playwright tests open New Download with captured metadata and create one task only on submit. |
+| AC-011 | Passed (automated) | Component and Playwright tests open Batch Download with captured URLs and create one task per submitted item. |
+| AC-012 | Passed (automated) | Protocol tests reject invalid URLs, unsafe filenames, invalid referers, forbidden headers, and unsupported kinds with stable per-item codes. |
+| AC-013 | Passed (automated) | Component tests cover idle delivery, deferral while a dialog is open, one delivery, and no survival across restart. |
+| AC-014 | Passed (automated) | Extension unit and Playwright tests prove one takeover task and cleanup only after success. |
+| AC-015 | Passed (automated) | Takeover tests cover unpaired, disabled, blacklisted, too-small, non-HTTP, incognito, and extension-originated downloads. |
+| AC-016 | Passed (automated) | Takeover tests prove a failed capture leaves the browser download intact and reports a localized reason. |
+| AC-017 | Passed (automated) | Desktop and extension tests prove token-bound duplicate suppression returns the existing task and does not cancel twice. |
+| AC-018 | Passed (automated) | Capture tests prove the extension sends only URL, filename, referer, MIME, size, and safe headers. |
+| AC-019 | Passed (automated) | Store and extension tests cover deduplication by URL without fragment and page and frame ownership. |
+| AC-020 | Passed (automated) | Classification and extension Playwright tests list the HLS manifest, filter the segments, and fetch no manifest body. |
+| AC-021 | Passed (automated) | Store and Playwright tests cover SPA, tab, frame, and close resets within the bound. |
+| AC-022 | Passed (automated) | Popup tests cover resource listing, one prefill action, and a disabled manifest send action. |
+| AC-023 | Passed (automated) | Playwright asserts one localized overlay button that creates no capture. |
+| AC-024 | Passed (automated) | Manifest inspection and unit tests cover MV3 permissions, bundled-only CSP, local and session storage boundaries, and no telemetry. |
+| AC-025 | Passed (automated) | Settings tests cover valid persistence, clamping, invalid blacklist entries, media defaults, and unknown-field preservation. |
+| AC-026 | Passed (automated) | Takeover tests use saved settings, match blacklist subdomains, and exempt manifests and unknown sizes from the minimum size. |
+| AC-027 | Passed (automated) | Component tests render availability, code generation and copy, countdown, clients, timestamps, and confirmed revocation. |
+| AC-028 | Passed (automated) | Component tests cover keyboard access, accessible names, code clearing on expiry or success, and no token rendering. |
+| AC-029 | Passed (automated) | Component and Playwright tests prove one delivery, deferral, no auto-submit, and no persistence. |
+| AC-030 | Passed (automated) | The commands in the table above pass with exact pins, committed lockfiles, and no public-network dependency. |
+| AC-031 | Pending | Manual Chrome and Edge pairing, sniffing, HLS filtering, takeover, prefill, and unpaired or revoked behavior were not performed; Windows install and launch were not performed. |
+| AC-032 | Blocked | The exit statement below records the blocked status and every pending gate without marking a pending item passed. |
+
+### Manual browser and platform status
+
+| Item | Status | Notes |
+| --- | --- | --- |
+| Chrome pairing, sniffing, HLS filtering, prefill, and takeover | Pending | Not performed. |
+| Chrome unpaired or revoked behavior | Pending | Not performed. |
+| Edge pairing, sniffing, HLS filtering, prefill, and takeover | Pending | Not performed. |
+| Edge unpaired or revoked behavior | Pending | Not performed. |
+| Windows install and launch | Pending | Not performed. |
+| Windows browser capture checks | Pending | Not performed. |
+
+### Pending gates
+
+| Gate | Status |
+| --- | --- |
+| Phase 0 manual platform acceptance matrix | Pending |
+| Phase 1 24-hour soak | Pending |
+| Phase 1 Windows x64 compatibility | Pending |
+| Phase 2 manual real-application local HTTP download | Pending |
+| Phase 2 final targeted design-review recheck | Pending |
+| Phase 3 manual Chrome and Edge records | Pending |
+| Phase 3 Windows install, launch, and browser checks | Pending |
+
+No pending gate or manual item above is recorded as passed. Automated, mock-service, and headless results do not replace manual browser evidence.
+
+### Exit statement
+
+Phase 3 exit is BLOCKED. It requires the Phase 0 manual platform matrix, the Phase 1 24-hour soak and Windows compatibility records, the Phase 2 manual real-application download and final targeted design-review recheck, and complete Phase 3 manual Chrome and Edge records plus Windows install and launch, or a dated explicit user waiver. The automated suites are green, but they are not a phase-exit approval.
