@@ -88,6 +88,10 @@ export interface BrowserAdapter {
   ): string | null;
 }
 
+// Callback-style APIs declare at least a value plus a completion callback, so
+// an arity of 2 or more marks them. Messaging accepts an explicit
+// options.messaging override because a host may expose promise-style
+// sendMessage with the same declared arity.
 function takesCallback(fn: unknown): boolean {
   return typeof fn === "function" && fn.length >= 2;
 }

@@ -23,10 +23,12 @@ const SAFE_HEADERS = new Set(["referer", "user-agent", "accept", "accept-languag
 interface Area {
   area: StorageArea;
   store: Record<string, unknown>;
+  sets: Array<Record<string, unknown>>;
 }
 
 function createArea(initial: Record<string, unknown> = {}): Area {
   const store: Record<string, unknown> = { ...initial };
+  const sets: Array<Record<string, unknown>> = [];
   const area: StorageArea = {
     async get(keys) {
       if (keys === null) {
@@ -38,6 +40,7 @@ function createArea(initial: Record<string, unknown> = {}): Area {
       );
     },
     async set(items) {
+      sets.push({ ...items });
       Object.assign(store, items);
     },
     async remove(keys) {
@@ -46,7 +49,7 @@ function createArea(initial: Record<string, unknown> = {}): Area {
       }
     },
   };
-  return { area, store };
+  return { area, store, sets };
 }
 
 function savedSettings(overrides: Partial<ExtensionSettings> = {}): ExtensionSettings {
@@ -826,7 +829,12 @@ describe("takeover failure surface", () => {
     expect(Object.keys(persistent.store).sort()).toEqual(["oneget.settings", "oneget.token"]);
     expect(JSON.stringify(persistent.store)).not.toContain("takeoverError");
     expect(JSON.stringify(persistent.store)).not.toContain("https://cdn.test/files/movie.mp4");
-    expect(JSON.stringify(session.store)).not.toContain("takeoverError");
+    expect(
+      session.sets.some((items) =>
+        Object.values(items).some((value) => JSON.stringify(value).includes("downloadId")),
+      ),
+    ).toBe(false);
+    expect(JSON.stringify(session.store)).not.toContain("downloadId");
   });
 
   it("maps 401, 409, and 500 responses to the matching failure reason", async () => {

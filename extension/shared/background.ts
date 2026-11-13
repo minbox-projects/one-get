@@ -97,6 +97,12 @@ export interface BackgroundDependencies {
   now: () => number;
   downloads: DownloadControl;
   pairLabel?: string;
+  /**
+   * Persist the bounded takeover-failure record in session storage so it can be
+   * rehydrated after the background context restarts. Chromium keeps it in
+   * memory only; Firefox persists and rehydrates it.
+   */
+  persistTakeoverFailure?: boolean;
   log?: (event: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -224,6 +230,7 @@ export function createBackgroundController(
 ): BackgroundController {
   const log = dependencies.log ?? (() => {});
   const pairLabel = dependencies.pairLabel ?? DEFAULT_PAIR_LABEL;
+  const persistTakeoverFailure = dependencies.persistTakeoverFailure === true;
   const processed = new Map<string, string>();
   const trackedTabs = new Set<number>();
   let storePromise: Promise<ResourceStore> | null = null;
@@ -240,6 +247,9 @@ export function createBackgroundController(
       return takeoverStatePromise;
     }
     takeoverStatePromise = (async () => {
+      if (!persistTakeoverFailure) {
+        return;
+      }
       try {
         const values = await dependencies.session.get(TAKEOVER_ERROR_KEY);
         const restored = parseTakeoverFailure(values[TAKEOVER_ERROR_KEY]);
@@ -254,6 +264,9 @@ export function createBackgroundController(
   }
 
   async function persistTakeoverState(): Promise<void> {
+    if (!persistTakeoverFailure) {
+      return;
+    }
     try {
       if (takeoverError === null) {
         await dependencies.session.remove(TAKEOVER_ERROR_KEY);
@@ -455,9 +468,13 @@ export function createBackgroundController(
     processed.set(key, taskId);
     try {
       await dependencies.downloads.cancel(download.id);
+    } catch {
+      log("download.cancel_failed", { downloadId: download.id });
+    }
+    try {
       await dependencies.downloads.erase({ id: download.id });
     } catch {
-      log("download.cleanup_failed", { downloadId: download.id });
+      log("download.erase_failed", { downloadId: download.id });
     }
     log("capture.succeeded", { intent: "takeover", taskId });
     return { action: "takeover", taskId };

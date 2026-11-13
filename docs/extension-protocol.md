@@ -80,7 +80,7 @@ The desktop generates an eight-digit decimal code with a ten-minute lifetime. On
 }
 ```
 
-The token is 256 random bits rendered as 64 lowercase hexadecimal characters. It is returned exactly once. The desktop stores only its SHA-256 hash, bound to the exact origin that paired. A Firefox client returns its `moz-extension://<lowercase 8-4-4-4-12 UUID>` origin in the same field, and its label defaults to `Firefox extension` when none is supplied. The code is deleted in the same transaction that inserts the client, so a second use of the same code fails. A pending code is held in memory and is discarded when the app reopens, so a code shown before a restart cannot pair.
+The token is 256 random bits rendered as 64 lowercase hexadecimal characters. It is returned exactly once. The desktop stores only its SHA-256 hash, bound to the exact origin that paired. A Firefox client returns its `moz-extension://<lowercase 8-4-4-4-12 UUID>` origin in the same field, and the Firefox extension always sends the `Firefox extension` label. The desktop keeps its `Chrome extension` default for a label that is empty after cleaning, and that default is not derived from the origin scheme. The code is deleted in the same transaction that inserts the client, so a second use of the same code fails. A pending code is held in memory and is discarded when the app reopens, so a code shown before a restart cannot pair.
 
 A wrong or expired code returns 401 with `INVALID_CODE`. Five failed attempts lock pairing for five minutes; while locked, requests return 429 with `PAIRING_LOCKED` and a `Retry-After` value. A successful pairing resets the failure count. Authorization compares the token hash and requires the exact bound origin; the last-used timestamp is persisted at most once per minute.
 
@@ -233,7 +233,7 @@ The popup and content scripts exchange typed messages with the extension backgro
 | `content/spa` | Content to worker | Reset the tab after a top-frame SPA route change, or only the sending frame after a subframe one. |
 | `content/clear-frame` | Content to worker | Clear one frame's resources. |
 
-Both packages listen to `webRequest.onResponseStarted`, `webNavigation.onCommitted`, and `tabs.onRemoved`. Chromium additionally listens to `downloads.onDeterminingFilename`; Firefox listens to `downloads.onCreated` and has no `onDeterminingFilename`. The background never reads a response body. The MAIN-world script wraps `fetch`, `XMLHttpRequest`, `history.pushState`, `history.replaceState`, `popstate`, and `hashchange`; it posts `{ source: "oneget-inject", kind, payload }` to the isolated content script, which forwards only HTTP(S) resource metadata.
+Both packages listen to `webRequest.onResponseStarted`, `webNavigation.onCommitted`, and `tabs.onRemoved`. Firefox also listens to `webNavigation.onHistoryStateUpdated` and applies the same navigation reset, so a same-document SPA route change that emits no `onCommitted` event still resets the navigated tab or frame. Chromium additionally listens to `downloads.onDeterminingFilename`; Firefox listens to `downloads.onCreated` and has no `onDeterminingFilename`. The background never reads a response body. The MAIN-world script wraps `fetch`, `XMLHttpRequest`, `history.pushState`, `history.replaceState`, `popstate`, and `hashchange`; it posts `{ source: "oneget-inject", kind, payload }` to the isolated content script, which forwards only HTTP(S) resource metadata.
 
 ## Permissions, CSP, and storage
 

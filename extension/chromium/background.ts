@@ -33,6 +33,7 @@ export function installChromeBackground(): void {
     fetchImpl: globalThis.fetch.bind(globalThis),
     apiOrigin: resolveApiOrigin(),
     now: () => Date.now(),
+    persistTakeoverFailure: false,
     downloads: {
       async cancel(id) {
         await chrome.downloads.cancel(id);

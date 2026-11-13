@@ -109,6 +109,7 @@ interface MockOptions {
   token?: string;
   settings?: Record<string, unknown>;
   session?: Record<string, unknown>;
+  cancelError?: Error;
 }
 
 function firefoxMock(options: MockOptions = {}) {
@@ -132,6 +133,9 @@ function firefoxMock(options: MockOptions = {}) {
     onCreated: { addListener: (listener: Listener) => listeners.downloadCreated.push(listener) },
     cancel: async (id: number) => {
       events.push(`cancel:${id}`);
+      if (options.cancelError !== undefined) {
+        throw options.cancelError;
+      }
     },
     erase: async (query: { id: number }) => {
       events.push(`erase:${query.id}`);
@@ -366,6 +370,48 @@ describe("Firefox takeover orchestration", () => {
     expect(mock.events).toEqual(["cancel:7", "erase:7"]);
   });
 
+  it("still erases exactly once when the browser cancel rejects after a successful capture", async () => {
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      let captures = 0;
+      const fetch = createFetch(() => {
+        captures += 1;
+        return takeoverAccepted("task-7");
+      });
+      const mock = firefoxMock({
+        token: TOKEN_A,
+        settings: settingsDocument(),
+        cancelError: new Error("download already completed"),
+      });
+      await install(mock, { fetchImpl: fetch.fetchImpl });
+
+      await created(mock, firefoxDownload());
+
+      await vi.waitFor(() => expect(mock.events).toContain("erase:7"));
+      expect(captures).toBe(1);
+      expect(fetch.calls).toHaveLength(1);
+      expect(mock.events.filter((event) => event === "cancel:7")).toHaveLength(1);
+      expect(mock.events.filter((event) => event === "erase:7")).toHaveLength(1);
+      expect((await popupState(mock)).takeoverError ?? null).toBeNull();
+      const cancelFailureLogged = debug.mock.calls.some(([prefix, event]) => {
+        return (
+          prefix === "[oneget]" &&
+          typeof event === "string" &&
+          event.startsWith("download.") &&
+          (event.includes("cancel") || event.includes("cleanup"))
+        );
+      });
+      expect(cancelFailureLogged).toBe(true);
+
+      await created(mock, firefoxDownload());
+      expect(captures).toBe(1);
+      expect(fetch.calls).toHaveLength(1);
+      expect(mock.events.filter((event) => event === "erase:7")).toHaveLength(1);
+    } finally {
+      debug.mockRestore();
+    }
+  });
+
   it("leaves the browser download intact when the capture fails", async () => {
     const failures: Array<{ name: string; handler: FetchHandler }> = [
       {
@@ -561,7 +607,12 @@ describe("Firefox event-page lifecycle", () => {
 
     await created(mock, firefoxDownload());
     await vi.waitFor(() => {
-      expect(JSON.stringify(mock.session.store)).toContain("capture_failed");
+      expect(mock.session.store["oneget.takeover-error"]).toMatchObject({
+        downloadId: 7,
+        url: "https://cdn.test/files/movie.mp4",
+        filename: "movie.mp4",
+        reason: "capture_failed",
+      });
     });
     expect(JSON.stringify(mock.local.store)).not.toContain("capture_failed");
 

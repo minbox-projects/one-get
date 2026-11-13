@@ -64,6 +64,7 @@ export function createFirefoxBackground(
     apiOrigin: dependencies.apiOrigin,
     now: dependencies.now,
     pairLabel: PAIR_LABEL,
+    persistTakeoverFailure: true,
     downloads: {
       async cancel(id) {
         await api.downloads.cancel(id);
