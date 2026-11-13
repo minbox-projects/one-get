@@ -14,10 +14,11 @@
     "preview": "vite preview",
     "typecheck": "tsc -b",
     "typecheck:extension": "tsc -p extension/tsconfig.json --noEmit",
-    "lint": "eslint .",
+    "lint": "eslint . --ignore-pattern extension/tests/e2e/fixtures",
     "test": "vitest run",
     "test:extension": "vitest run extension/tests/unit",
     "test:e2e": "playwright test",
+    "test:e2e:extension": "npm run build:extension:test && playwright test --config playwright.extension.config.ts",
     "tauri": "tauri",
     "check:pins": "node scripts/check-direct-dependency-pins.mjs"
   },

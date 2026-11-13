@@ -29,6 +29,10 @@ jobs:
       - run: npm run build
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
+      - run: npm run typecheck:extension
+      - run: npm run test:extension
+      - run: npm run build:extension:test
+      - run: npx playwright test --config playwright.extension.config.ts
 
   rust-gates:
     name: rust gates (${{ matrix.os }})

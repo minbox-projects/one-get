@@ -8,3 +8,5 @@ src-tauri/gen/
 .signing/
 playwright-report/
 test-results/
+extension/dist/
+extension/test-results/

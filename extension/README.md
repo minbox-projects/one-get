@@ -68,5 +68,24 @@ redacted: credentials, query strings, and fragments are never displayed.
 ```sh
 npm run test:extension
 npm run typecheck:extension
-npm run build:extension
+npm run build:extension:test
+npm run test:e2e:extension
 ```
+
+`npm run test:e2e:extension` rebuilds `extension/dist/chromium-test/` and runs
+the Playwright suite in `extension/tests/e2e`. The suite starts its own fixture
+page and mock API on `127.0.0.1` and launches a persistent Chromium profile with
+the test build loaded; it does not contact a public host and does not use the
+main application's Playwright projects.
+
+Playwright's default download interception can suppress
+`downloads.onDeterminingFilename`. The extension suite restores browser-managed
+downloads through the DevTools protocol so the takeover scenario exercises the
+real event, and the scenario is skipped only when the API itself is
+unavailable. Headless Chromium can still differ from a user's browser, so real
+takeover, pairing, sniffing, HLS filtering, and unpaired or revoked behavior
+must be verified manually in current stable Chrome and Edge against the running
+desktop app. Record the browser versions, operating system, build, steps, and
+results in the verification record, mark unperformed items pending, and never
+claim automated takeover evidence for a skipped case.
+
