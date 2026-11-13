@@ -10,7 +10,7 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use super::error::{self, ApiError};
-use super::protocol::is_chromium_extension_origin;
+use super::protocol::is_browser_extension_origin;
 
 /// Maximum accepted request-header count.
 pub const MAX_HEADER_COUNT: usize = 64;
@@ -53,15 +53,15 @@ pub(crate) fn check_host(headers: &HeaderMap, authority: &str) -> Result<(), Api
 pub(crate) fn check_health_origin(headers: &HeaderMap) -> Result<(), ApiError> {
     match header_text(headers, header::ORIGIN) {
         None => Ok(()),
-        Some(origin) if is_chromium_extension_origin(&origin) => Ok(()),
+        Some(origin) if is_browser_extension_origin(&origin) => Ok(()),
         Some(_) => Err(error::forbidden("INVALID_ORIGIN")),
     }
 }
 
-/// Require a Chromium extension Origin and return it.
+/// Require an exact browser-extension Origin and return it.
 pub(crate) fn check_write_origin(headers: &HeaderMap) -> Result<String, ApiError> {
     match header_text(headers, header::ORIGIN) {
-        Some(origin) if is_chromium_extension_origin(&origin) => Ok(origin),
+        Some(origin) if is_browser_extension_origin(&origin) => Ok(origin),
         _ => Err(error::forbidden("INVALID_ORIGIN")),
     }
 }

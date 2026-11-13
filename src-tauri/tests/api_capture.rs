@@ -1284,6 +1284,374 @@ async fn bridge_event_log_never_contains_codes_tokens_urls_filenames_or_authoriz
     }
 }
 
+// --- Firefox extension origins ---
+
+const FIREFOX_ORIGIN: &str = "moz-extension://12345678-90ab-cdef-1234-567890abcdef";
+
+fn write_request_without_origin(
+    path: &str,
+    token: Option<&str>,
+    content_type: Option<&str>,
+    body: impl Into<Body>,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header(header::HOST, host_value());
+    if let Some(content_type) = content_type {
+        builder = builder.header(header::CONTENT_TYPE, content_type);
+    }
+    if let Some(token) = token {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    builder.body(body.into()).expect("write request")
+}
+
+fn has_wildcard_cors(response: &Response<Body>) -> bool {
+    match response
+        .headers()
+        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(value) => value == "*",
+        None => false,
+    }
+}
+
+#[tokio::test]
+async fn firefox_extension_origin_pairs_captures_and_revokes_with_its_token() {
+    let harness = Harness::new(10, 10);
+
+    let health = send(
+        &harness.router,
+        health_request(&host_value(), Some(FIREFOX_ORIGIN)),
+    )
+    .await;
+    assert_eq!(
+        health.status().as_u16(),
+        200,
+        "health must accept an exact Firefox extension origin"
+    );
+    assert!(!has_wildcard_cors(&health));
+
+    let code = harness.generate_code();
+    let paired = send(
+        &harness.router,
+        write_request(
+            "/pair",
+            FIREFOX_ORIGIN,
+            None,
+            Some("application/json"),
+            pairing_body(&code, API_PROTOCOL_VERSION),
+        ),
+    )
+    .await;
+    assert_eq!(
+        paired.status().as_u16(),
+        200,
+        "pairing must accept an exact Firefox extension origin"
+    );
+    let paired_body = response_json(paired).await;
+    let token = paired_body["token"]
+        .as_str()
+        .expect("pairing returns a token")
+        .to_string();
+    assert_eq!(
+        paired_body["client"]["origin"],
+        json!(FIREFOX_ORIGIN),
+        "the token must be bound to the exact Firefox origin"
+    );
+
+    let capture = send(
+        &harness.router,
+        write_request(
+            "/capture",
+            FIREFOX_ORIGIN,
+            Some(&token),
+            Some("application/json"),
+            capture_body(
+                CaptureIntent::Takeover,
+                Some("firefox-download-1"),
+                vec![file_item("https://example.com/file.bin", "file.bin")],
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(
+        capture.status().as_u16(),
+        200,
+        "a Firefox-bound token must authorize a capture"
+    );
+    assert!(!has_wildcard_cors(&capture));
+    let capture_result = response_json(capture).await;
+    assert!(capture_result["taskId"].as_str().is_some());
+    assert_eq!(harness.bridge.records().takeovers.len(), 1);
+
+    let revoke = send(
+        &harness.router,
+        write_request(
+            "/pair/revoke",
+            FIREFOX_ORIGIN,
+            Some(&token),
+            None,
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(
+        revoke.status().as_u16(),
+        200,
+        "revocation must accept an exact Firefox extension origin"
+    );
+    assert_eq!(response_json(revoke).await["revoked"], json!(true));
+
+    let after = send(
+        &harness.router,
+        write_request(
+            "/capture",
+            FIREFOX_ORIGIN,
+            Some(&token),
+            Some("application/json"),
+            capture_body(
+                CaptureIntent::Takeover,
+                Some("firefox-download-2"),
+                vec![file_item("https://example.com/other.bin", "other.bin")],
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(after.status().as_u16(), 401);
+    assert_eq!(response_json(after).await["code"], json!("UNAUTHORIZED"));
+    assert_eq!(
+        harness.bridge.records().takeovers.len(),
+        1,
+        "a revoked token must not create another task"
+    );
+}
+
+#[tokio::test]
+async fn malformed_and_non_extension_origins_are_rejected_without_creating_work() {
+    let harness = Harness::new(10, 10);
+    let chrome_origin = extension_origin('a');
+    let token = harness.issue_token(&chrome_origin, "Chrome extension");
+    let invalid_origins = [
+        "moz-extension://",
+        "moz-extension://12345678-90ab-cdef-1234-567890abcdef/x",
+        "moz-extension://12345678-90AB-CDEF-1234-567890ABCDEF",
+        "http://example.com",
+        "file:///tmp/extension",
+        "null",
+    ];
+
+    for origin in invalid_origins {
+        let health = send(&harness.router, health_request(&host_value(), Some(origin))).await;
+        assert_eq!(health.status().as_u16(), 403, "health origin {origin}");
+        assert_eq!(response_json(health).await["code"], json!("INVALID_ORIGIN"));
+
+        let pair = send(
+            &harness.router,
+            write_request(
+                "/pair",
+                origin,
+                None,
+                Some("application/json"),
+                pairing_body("12345678", API_PROTOCOL_VERSION),
+            ),
+        )
+        .await;
+        assert_eq!(pair.status().as_u16(), 403, "pair origin {origin}");
+        assert_eq!(response_json(pair).await["code"], json!("INVALID_ORIGIN"));
+
+        let capture = send(
+            &harness.router,
+            write_request(
+                "/capture",
+                origin,
+                Some(&token),
+                Some("application/json"),
+                capture_body(
+                    CaptureIntent::Takeover,
+                    Some("browser-download-1"),
+                    vec![file_item("https://example.com/file.bin", "file.bin")],
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(capture.status().as_u16(), 403, "capture origin {origin}");
+        assert_eq!(
+            response_json(capture).await["code"],
+            json!("INVALID_ORIGIN")
+        );
+
+        let revoke = send(
+            &harness.router,
+            write_request("/pair/revoke", origin, Some(&token), None, Body::empty()),
+        )
+        .await;
+        assert_eq!(revoke.status().as_u16(), 403, "revoke origin {origin}");
+        assert_eq!(response_json(revoke).await["code"], json!("INVALID_ORIGIN"));
+    }
+
+    let missing_origin_pair = send(
+        &harness.router,
+        write_request_without_origin(
+            "/pair",
+            None,
+            Some("application/json"),
+            pairing_body("12345678", API_PROTOCOL_VERSION),
+        ),
+    )
+    .await;
+    assert_eq!(missing_origin_pair.status().as_u16(), 403);
+    assert_eq!(
+        response_json(missing_origin_pair).await["code"],
+        json!("INVALID_ORIGIN")
+    );
+
+    let missing_origin_capture = send(
+        &harness.router,
+        write_request_without_origin(
+            "/capture",
+            Some(&token),
+            Some("application/json"),
+            capture_body(
+                CaptureIntent::Prefill,
+                None,
+                vec![file_item("https://example.com/file.bin", "file.bin")],
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(missing_origin_capture.status().as_u16(), 403);
+    assert_eq!(
+        response_json(missing_origin_capture).await["code"],
+        json!("INVALID_ORIGIN")
+    );
+
+    let missing_origin_revoke = send(
+        &harness.router,
+        write_request_without_origin("/pair/revoke", Some(&token), None, Body::empty()),
+    )
+    .await;
+    assert_eq!(missing_origin_revoke.status().as_u16(), 403);
+    assert_eq!(
+        response_json(missing_origin_revoke).await["code"],
+        json!("INVALID_ORIGIN")
+    );
+
+    let records = harness.bridge.records();
+    assert!(records.takeovers.is_empty());
+    assert!(records.prefills.is_empty());
+}
+
+#[tokio::test]
+async fn tokens_bound_to_another_extension_scheme_are_rejected() {
+    let harness = Harness::new(10, 10);
+    let chrome_origin = extension_origin('a');
+    let chrome_token = harness.issue_token(&chrome_origin, "Chrome extension");
+    let firefox_token = harness.issue_token(FIREFOX_ORIGIN, "Firefox extension");
+    let body = || {
+        capture_body(
+            CaptureIntent::Takeover,
+            Some("browser-download-1"),
+            vec![file_item("https://example.com/file.bin", "file.bin")],
+        )
+    };
+
+    let chrome_token_at_firefox = send(
+        &harness.router,
+        write_request(
+            "/capture",
+            FIREFOX_ORIGIN,
+            Some(&chrome_token),
+            Some("application/json"),
+            body(),
+        ),
+    )
+    .await;
+    assert_eq!(
+        chrome_token_at_firefox.status().as_u16(),
+        401,
+        "a Chrome-bound token must not authorize a Firefox origin"
+    );
+    assert!(!has_wildcard_cors(&chrome_token_at_firefox));
+    assert_eq!(
+        response_json(chrome_token_at_firefox).await["code"],
+        json!("UNAUTHORIZED")
+    );
+
+    let revoke_chrome_token_at_firefox = send(
+        &harness.router,
+        write_request(
+            "/pair/revoke",
+            FIREFOX_ORIGIN,
+            Some(&chrome_token),
+            None,
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(revoke_chrome_token_at_firefox.status().as_u16(), 401);
+    assert_eq!(
+        response_json(revoke_chrome_token_at_firefox).await["code"],
+        json!("UNAUTHORIZED")
+    );
+
+    let firefox_token_at_chrome = send(
+        &harness.router,
+        write_request(
+            "/capture",
+            &chrome_origin,
+            Some(&firefox_token),
+            Some("application/json"),
+            body(),
+        ),
+    )
+    .await;
+    assert_eq!(
+        firefox_token_at_chrome.status().as_u16(),
+        401,
+        "a Firefox-bound token must not authorize a Chrome origin"
+    );
+    assert!(!has_wildcard_cors(&firefox_token_at_chrome));
+    assert_eq!(
+        response_json(firefox_token_at_chrome).await["code"],
+        json!("UNAUTHORIZED")
+    );
+
+    assert!(
+        harness.bridge.records().takeovers.is_empty(),
+        "a cross-scheme token must not create a task"
+    );
+
+    let own_chrome = send(
+        &harness.router,
+        write_request(
+            "/capture",
+            &chrome_origin,
+            Some(&chrome_token),
+            Some("application/json"),
+            body(),
+        ),
+    )
+    .await;
+    assert_eq!(own_chrome.status().as_u16(), 200);
+    assert!(!has_wildcard_cors(&own_chrome));
+
+    let own_firefox = send(
+        &harness.router,
+        write_request(
+            "/capture",
+            FIREFOX_ORIGIN,
+            Some(&firefox_token),
+            Some("application/json"),
+            body(),
+        ),
+    )
+    .await;
+    assert_eq!(own_firefox.status().as_u16(), 200);
+}
+
 // --- Real socket and bind failure ---
 
 fn raw_http(port: u16, request: &str) -> String {

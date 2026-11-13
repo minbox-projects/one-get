@@ -42,8 +42,10 @@ pub const MAX_FILENAME_BYTES: usize = 255;
 /// Header names a capture may carry, normalized to lowercase.
 pub const SAFE_CAPTURE_HEADERS: [&str; 4] = ["referer", "user-agent", "accept", "accept-language"];
 
-const EXTENSION_ORIGIN_PREFIX: &str = "chrome-extension://";
-const EXTENSION_ID_LEN: usize = 32;
+const CHROMIUM_EXTENSION_ORIGIN_PREFIX: &str = "chrome-extension://";
+const CHROMIUM_EXTENSION_ID_LEN: usize = 32;
+const FIREFOX_EXTENSION_ORIGIN_PREFIX: &str = "moz-extension://";
+const FIREFOX_UUID_LEN: usize = 36;
 
 /// Why a capture request intends to use the captured items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,12 +181,38 @@ pub fn validate_capture_request(request: &CaptureRequest) -> Result<CaptureValid
 
 /// Whether `origin` is an exact Chromium extension origin.
 pub fn is_chromium_extension_origin(origin: &str) -> bool {
-    match origin.strip_prefix(EXTENSION_ORIGIN_PREFIX) {
+    match origin.strip_prefix(CHROMIUM_EXTENSION_ORIGIN_PREFIX) {
         Some(id) => {
-            id.len() == EXTENSION_ID_LEN && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+            id.len() == CHROMIUM_EXTENSION_ID_LEN
+                && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
         }
         None => false,
     }
+}
+
+/// Whether `origin` is an exact Chromium or Firefox extension origin.
+///
+/// A Chromium origin is the scheme plus 32 `a`-`p` characters. A Firefox
+/// origin is the scheme plus a lowercase UUID in canonical 8-4-4-4-12 form
+/// with no path, query, fragment, or uppercase digits.
+pub fn is_browser_extension_origin(origin: &str) -> bool {
+    if is_chromium_extension_origin(origin) {
+        return true;
+    }
+    match origin.strip_prefix(FIREFOX_EXTENSION_ORIGIN_PREFIX) {
+        Some(id) => is_lowercase_uuid(id),
+        None => false,
+    }
+}
+
+fn is_lowercase_uuid(value: &str) -> bool {
+    if value.len() != FIREFOX_UUID_LEN {
+        return false;
+    }
+    value.bytes().enumerate().all(|(index, byte)| match index {
+        8 | 13 | 18 | 23 => byte == b'-',
+        _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+    })
 }
 
 /// The exact loopback authority for a port.

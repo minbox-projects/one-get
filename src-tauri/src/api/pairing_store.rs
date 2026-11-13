@@ -56,7 +56,7 @@ pub struct PairingCode {
 pub struct PairedClient {
     /// Stable client identifier used for revocation.
     pub id: String,
-    /// Exact Chromium extension origin bound to the token.
+    /// Exact browser-extension origin bound to the token.
     pub origin: String,
     /// User-visible label.
     pub label: String,
