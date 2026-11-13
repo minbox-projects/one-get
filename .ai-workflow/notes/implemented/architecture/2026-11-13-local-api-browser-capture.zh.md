@@ -18,7 +18,7 @@ OneGet 此前只能在用户把 URL 复制到桌面应用后下载文件。浏�
 
 扩展把纯逻辑与浏览器运行时分开。`extension/shared` 保存无框架依赖的协议、分类、清单识别、分段过滤、页面归属、有界存储、设置校验和双语文案，因此这些规则无需浏览器即可单元测试。`extension/chromium` 保存 MV3 清单、service worker、隔离内容脚本与覆盖层，以及 MAIN-world 观察器；`extension/popup` 保存资源、配对和设置视图。MAIN-world 脚本必须包装页面的 `fetch`、XHR 和历史 API，才能看到不会到达 `webRequest` 的请求，但它没有扩展权限，只向隔离内容脚本发送 URL、MIME 类型和大小元数据。隔离脚本拥有所有特权行为和覆盖层。
 
-资源数据保持有界且仅限会话。每标签页存储按去掉 fragment 的 URL 去重，每标签页最多 500 个条目、最多 50 个标签页，并在 frame 导航时清除该 frame、在标签页或 SPA 导航时清除该标签页、在关闭时清除该标签页的全部内容。service worker 重启后，后台会从有界的 `chrome.storage.session` 快照恢复。配对令牌和设置是唯一持久的扩展数据，位于 `chrome.storage.local`。分类先按文件名扩展名、再按 MIME 类型推导类别。HLS 和 DASH 清单会列出但永不接管，也永不为了解析而抓取；`.ts`、`.m4s`、`.m4f`、`.cmfv`、`.cmfa`、`init.mp4` 和媒体 `videoplayback` 分段 URL 会被过滤。接管还会遵循启用状态、类别开关、精确或子域黑名单主机、隐身与扩展自身发起的下载、非 HTTP URL，以及不适用于未知大小的最小大小限制。
+资源数据保持有界且仅限会话。每标签页存储按去掉 fragment 的 URL 去重，每标签页最多 500 个条目、最多 50 个标签页，并在 frame 导航或子 frame 的 SPA 路由变化时清除发起该导航的 frame、在顶层 frame 的标签页导航或 SPA 路由变化时清除整个标签页、在标签页关闭时清除该标签页。service worker 重启后，后台会从有界的 `chrome.storage.session` 快照恢复。配对令牌和设置是唯一持久的扩展数据，位于 `chrome.storage.local`。分类先按文件名扩展名、再按 MIME 类型推导类别。HLS 和 DASH 清单会列出但永不接管，也永不为了解析而抓取；`.ts`、`.m4s`、`.m4f`、`.cmfv`、`.cmfa`、`init.mp4` 和媒体 `videoplayback` 分段 URL 会被过滤。接管还会遵循启用状态、类别开关、精确或子域黑名单主机、隐身与扩展自身发起的下载、非 HTTP URL，以及不适用于未知大小的最小大小限制。
 
 隐私和内容安全策略是决策的一部分，而不是后续加固。MV3 清单只请求 `webRequest`、`downloads`、`storage`、`tabs` 和 `webNavigation`，以及 HTTP(S) 和回环主机权限。它不请求 Cookie、原生消息、远程代码或遥测。扩展页面 CSP 为 `script-src 'self'`，构建打包所有运行时代码，展示的 URL 会移除凭据、查询和 fragment。桌面命令从不返回令牌，也从不显示令牌。覆盖层只在顶层 frame 运行，复用一个按钮，并说明视频解析尚不可用。
 
