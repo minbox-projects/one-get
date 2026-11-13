@@ -1,4 +1,4 @@
-import type { TakeoverFailure } from "../chromium/background";
+import type { TakeoverFailure } from "../shared/background";
 import { redactUrl } from "../shared/filename";
 import { resolveExtensionLanguage, translateExtension } from "../shared/i18n";
 import type { ExtensionLanguage } from "../shared/i18n";

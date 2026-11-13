@@ -7,6 +7,7 @@ import { build } from "esbuild";
 const extensionRoot = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(extensionRoot, "..");
 const sourceRoot = path.join(extensionRoot, "chromium");
+const sharedRoot = path.join(extensionRoot, "shared");
 const popupRoot = path.join(extensionRoot, "popup");
 
 const DEFAULT_ORIGIN = "http://127.0.0.1:37652";
@@ -77,8 +78,8 @@ async function bundleJavaScript(outdir, origin) {
   await build({
     ...common,
     entryPoints: [
-      { in: path.join(sourceRoot, "content.ts"), out: "content" },
-      { in: path.join(sourceRoot, "inject.ts"), out: "inject" },
+      { in: path.join(sharedRoot, "content.ts"), out: "content" },
+      { in: path.join(sharedRoot, "inject.ts"), out: "inject" },
       { in: path.join(popupRoot, "popup.ts"), out: "popup" },
     ],
     outdir,
@@ -111,7 +112,7 @@ async function main() {
 
   await cp(path.join(popupRoot, "popup.html"), path.join(outdir, "popup.html"));
   await cp(path.join(popupRoot, "popup.css"), path.join(outdir, "popup.css"));
-  await cp(path.join(sourceRoot, "overlay.css"), path.join(outdir, "overlay.css"));
+  await cp(path.join(sharedRoot, "overlay.css"), path.join(outdir, "overlay.css"));
   await writeFile(path.join(outdir, "manifest.json"), manifestFor(origin, manifest));
 
   for (const icon of ICONS) {
