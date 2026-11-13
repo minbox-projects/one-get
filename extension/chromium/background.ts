@@ -62,6 +62,18 @@ export interface PairOutcome {
   label?: string;
 }
 
+export type TakeoverFailureReason =
+  | "capture_failed"
+  | "token_revoked"
+  | "update_required";
+
+export interface TakeoverFailure {
+  downloadId: number;
+  url: string;
+  filename: string;
+  reason: TakeoverFailureReason;
+}
+
 export interface RuntimeMessage {
   type?: unknown;
   [key: string]: unknown;
@@ -222,9 +234,22 @@ export function createBackgroundController(
   const trackedTabs = new Set<number>();
   let storePromise: Promise<ResourceStore> | null = null;
   let prefillSequence = 0;
+  let takeoverError: TakeoverFailure | null = null;
 
   function storeKey(token: string, downloadId: number): string {
     return `${token}:${downloadId}`;
+  }
+
+  function rememberTakeoverFailure(
+    download: BrowserDownload,
+    reason: TakeoverFailureReason,
+  ): void {
+    takeoverError = {
+      downloadId: download.id,
+      url: download.url,
+      filename: download.filename,
+      reason,
+    };
   }
 
   async function loadStore(): Promise<ResourceStore> {
@@ -360,22 +385,28 @@ export function createBackgroundController(
     if (!result.ok) {
       if (result.status === 401) {
         await clearToken(dependencies.storage);
+        rememberTakeoverFailure(download, "token_revoked");
         log("capture.token_revoked", { intent: "takeover" });
         return { action: "allow", reason: "token_revoked" };
       }
       if (result.status === 409) {
+        rememberTakeoverFailure(download, "update_required");
         log("capture.update_required", { intent: "takeover" });
         return { action: "allow", reason: "update_required" };
       }
+      rememberTakeoverFailure(download, "capture_failed");
       log("capture.failed", { intent: "takeover", status: result.status, code: result.error.code });
       return { action: "allow", reason: "capture_failed" };
     }
 
     const taskId = result.data.taskId;
     if (typeof taskId !== "string" || taskId.length === 0) {
+      rememberTakeoverFailure(download, "capture_failed");
       log("capture.failed", { intent: "takeover", status: result.status, code: "NO_TASK" });
       return { action: "allow", reason: "capture_failed" };
     }
+
+    takeoverError = null;
 
     if (result.data.duplicate === true) {
       processed.set(key, taskId);
@@ -529,6 +560,9 @@ export function createBackgroundController(
       return { ok: false, error: result.error, reason: "capture_failed" };
     }
 
+    if (takeoverError !== null && takeoverError.url === url) {
+      takeoverError = null;
+    }
     log("capture.succeeded", { intent: "prefill" });
     return { ok: true, duplicate: result.data.duplicate === true, taskId: result.data.taskId };
   }
@@ -547,7 +581,13 @@ export function createBackgroundController(
           getSettings(),
           pairingState(),
         ]);
-        return { resources, settings, paired: pairing.paired, pairing };
+        return {
+          resources,
+          settings,
+          paired: pairing.paired,
+          pairing,
+          takeoverError,
+        };
       }
       case "popup/capture-prefill":
       case "capture:prefill": {
@@ -614,7 +654,8 @@ export function createBackgroundController(
         if (tabId < 0) {
           return null;
         }
-        await handleNavigation(tabId, 0, stringOr(message.pageUrl, ""));
+        const frameId = numberOr(sender?.frameId ?? message.frameId, 0);
+        await handleNavigation(tabId, frameId, stringOr(message.pageUrl, ""));
         return null;
       }
       case "content/clear-frame": {

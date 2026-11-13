@@ -870,3 +870,39 @@ fn api_errors_expose_status_codes_and_standard_error_behavior() {
     assert_eq!(error::too_many_requests("RATE_LIMITED").status, 429);
     assert_eq!(error::service_unavailable("UNAVAILABLE").status, 503);
 }
+
+#[test]
+fn a_pending_code_does_not_survive_reopening_the_pairing_database() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pairing.db");
+    let origin = extension_origin('a');
+
+    let old_code = {
+        let mut store = PairingStore::open(&path).expect("open pairing database");
+        store
+            .generate_code(NOW_MS)
+            .expect("generate pairing code")
+            .code
+    };
+
+    let mut reopened = PairingStore::open(&path).expect("reopen pairing database");
+
+    let stale = reopened
+        .pair(&old_code, &origin, "Chrome extension", NOW_MS + 1_000)
+        .expect("stale code attempt");
+    assert!(
+        matches!(stale, PairResult::InvalidCode | PairResult::Expired),
+        "a pending code must not survive a restart"
+    );
+
+    let fresh = reopened
+        .generate_code(NOW_MS + 2_000)
+        .expect("fresh pairing code");
+    let paired = reopened
+        .pair(&fresh.code, &origin, "Chrome extension", NOW_MS + 3_000)
+        .expect("fresh code attempt");
+    assert!(
+        matches!(paired, PairResult::Paired { .. }),
+        "a newly generated code must pair after the restart"
+    );
+}

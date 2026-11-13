@@ -163,7 +163,6 @@
         "extension/shared/filename.ts",
         "extension/shared/filter.ts",
         "extension/shared/i18n.ts",
-        "extension/shared/messages.ts",
         "extension/shared/pageStore.ts",
         "extension/shared/protocol.ts",
         "extension/shared/settings.ts",
@@ -227,6 +226,18 @@
         },
         {
           "file": "extension/chromium/background.ts",
+          "name": "TakeoverFailure",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/chromium/background.ts",
+          "name": "TakeoverFailureReason",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/chromium/background.ts",
           "name": "createBackgroundController",
           "kind": "function",
           "visibility": "public"
@@ -257,6 +268,12 @@
         },
         {
           "file": "extension/popup/popup.ts",
+          "name": "TakeoverFailureView",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/popup/popup.ts",
           "name": "languageFromNavigator",
           "kind": "function",
           "visibility": "public"
@@ -270,6 +287,12 @@
         {
           "file": "extension/popup/popup.ts",
           "name": "resourceView",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/popup/popup.ts",
+          "name": "takeoverFailureView",
           "kind": "function",
           "visibility": "public"
         },
@@ -415,42 +438,6 @@
           "file": "extension/shared/i18n.ts",
           "name": "translateExtension",
           "kind": "function",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/shared/messages.ts",
-          "name": "ExtensionMessage",
-          "kind": "type",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/shared/messages.ts",
-          "name": "ExtensionMessageData",
-          "kind": "interface",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/shared/messages.ts",
-          "name": "ExtensionMessageType",
-          "kind": "type",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/shared/messages.ts",
-          "name": "ExtensionRequest",
-          "kind": "type",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/shared/messages.ts",
-          "name": "ExtensionResult",
-          "kind": "type",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/shared/messages.ts",
-          "name": "PairingSummary",
-          "kind": "interface",
           "visibility": "public"
         },
         {
@@ -850,6 +837,26 @@
         },
         {
           "kind": "imports",
+          "from": "extension/popup/popup.ts#takeoverFailureView",
+          "to": "extension/chromium/background.ts#TakeoverFailure"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#takeoverFailureView",
+          "to": "extension/shared/filename.ts#redactUrl"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#takeoverFailureView",
+          "to": "extension/shared/i18n.ts#ExtensionLanguage"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#takeoverFailureView",
+          "to": "extension/shared/i18n.ts#translateExtension"
+        },
+        {
+          "kind": "imports",
           "from": "extension/shared/classify.ts#CATEGORY_EXTENSIONS",
           "to": "extension/shared/types.ts#ResourceCategory"
         },
@@ -872,31 +879,6 @@
           "kind": "imports",
           "from": "extension/shared/filter.ts#TakeoverRules",
           "to": "extension/shared/types.ts#ResourceCategory"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/shared/messages.ts#ExtensionMessage",
-          "to": "extension/shared/settings.ts#ExtensionSettings"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/shared/messages.ts#ExtensionMessage",
-          "to": "extension/shared/types.ts#CaptureDraftItem"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/shared/messages.ts#ExtensionMessageData",
-          "to": "extension/shared/settings.ts#ExtensionSettings"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/shared/messages.ts#ExtensionMessageData",
-          "to": "extension/shared/types.ts#ResourceEntry"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/shared/messages.ts#ExtensionResult",
-          "to": "extension/shared/protocol.ts#ApiErrorBody"
         },
         {
           "kind": "imports",
@@ -961,7 +943,6 @@
         "extension/shared/filename.ts",
         "extension/shared/filter.ts",
         "extension/shared/i18n.ts",
-        "extension/shared/messages.ts",
         "extension/shared/pageStore.ts",
         "extension/shared/protocol.ts",
         "extension/shared/settings.ts",

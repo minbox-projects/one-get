@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { languageFromNavigator, pairingView, resourceView } from "../../popup/popup";
+import {
+  languageFromNavigator,
+  pairingView,
+  resourceView,
+  takeoverFailureView,
+} from "../../popup/popup";
+import type { TakeoverFailure } from "../../chromium/background";
 import { translateExtension } from "../../shared/i18n";
 import type { ResourceEntry, ResourceKind } from "../../shared/types";
 
@@ -139,5 +145,45 @@ describe("popup language selection", () => {
     expect(languageFromNavigator(null)).toBe("en-US");
     expect(languageFromNavigator(undefined)).toBe("en-US");
     expect(languageFromNavigator("fr-FR")).toBe("en-US");
+  });
+});
+
+describe("popup takeover failure view", () => {
+  // AC-016: a failed takeover offers a localized retry over a redacted URL.
+  it("localizes each failure reason and redacts the display URL in both languages", () => {
+    const reasons: TakeoverFailure["reason"][] = [
+      "capture_failed",
+      "token_revoked",
+      "update_required",
+    ];
+
+    for (const reason of reasons) {
+      const failure: TakeoverFailure = {
+        downloadId: 7,
+        url: `https://user:password@cdn.test/files/movie.mp4?token=${TOKEN_SHAPED}#${TOKEN_SHAPED}`,
+        filename: "movie.mp4",
+        reason,
+      };
+
+      const zh = takeoverFailureView(failure, "zh-CN");
+      const en = takeoverFailureView(failure, "en-US");
+
+      for (const view of [zh, en]) {
+        expect(view.message.length).toBeGreaterThan(0);
+        expect(view.action.length).toBeGreaterThan(0);
+        expect(view.url).toBe("https://cdn.test/files/movie.mp4");
+        expect(view.url).not.toContain("user");
+        expect(view.url).not.toContain("password");
+        expect(view.url).not.toContain("token=");
+        expect(view.url).not.toContain("#");
+        expect(JSON.stringify(view)).not.toContain(TOKEN_SHAPED);
+        expect(JSON.stringify(view)).not.toMatch(/[0-9a-f]{64}/i);
+      }
+
+      expect(zh.message).not.toBe(en.message);
+      expect(zh.action).not.toBe(en.action);
+      expect(zh.action).toMatch(/retry|again|try|send|重试|再次|重新/i);
+      expect(en.action).toMatch(/retry|again|try|send|重试|再次|重新/i);
+    }
   });
 });

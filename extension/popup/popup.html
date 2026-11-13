@@ -12,6 +12,21 @@
         <h1 data-i18n="popup.title">OneGet downloads</h1>
       </header>
 
+      <section
+        id="takeover-error"
+        class="panel takeover-error"
+        role="alert"
+        aria-labelledby="takeover-error-heading"
+        hidden
+      >
+        <h2 id="takeover-error-heading" data-i18n="popup.takeoverFailedHeading">
+          Browser download not taken over
+        </h2>
+        <p id="takeover-error-message" class="takeover-error__message"></p>
+        <p id="takeover-error-url" class="resource-url"></p>
+        <button id="takeover-error-retry" type="button" class="secondary"></button>
+      </section>
+
       <section class="panel" aria-labelledby="resources-heading">
         <div class="panel-heading">
           <h2 id="resources-heading" data-i18n="popup.resources">Resources</h2>

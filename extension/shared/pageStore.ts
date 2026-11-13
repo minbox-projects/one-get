@@ -83,7 +83,7 @@ export class ResourceStore {
       capturedAtMs: input.nowMs,
       filename: displayFilename(url, input.filename ?? existing?.filename),
       mime: typeof input.mime === "string" && input.mime.length > 0 ? input.mime : (existing?.mime ?? null),
-      size: input.size === undefined ? (existing?.size ?? null) : normalizeSize(input.size),
+      size: normalizeSize(input.size ?? existing?.size ?? null),
       kind: classification.kind,
       category: classification.category,
     };

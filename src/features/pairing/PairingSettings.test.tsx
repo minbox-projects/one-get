@@ -396,4 +396,55 @@ describe("PairingSettings", () => {
     }
     expect(document.body.textContent ?? "").toMatch(/[\u4e00-\u9fff]/);
   });
+
+  // AC-028: the pairing surface is operable with the keyboard alone.
+  it("generates a code with the keyboard and clears it when a paired client is reported", async () => {
+    const generated = pairingCode({ expiresAtMs: Date.now() + 60_500 });
+    const client = pairedClient();
+    let statusCalls = 0;
+    mockIpc({
+      pairing_status: () => {
+        statusCalls += 1;
+        return {
+          ok: true,
+          data: pairingStatus({
+            clients: statusCalls >= 3 ? [client] : [],
+          }),
+        };
+      },
+      pairing_generate_code: () => ({ ok: true, data: generated }),
+    });
+    const user = userEvent.setup();
+    renderSettings();
+
+    const generate = await screen.findByRole("button", {
+      name: en["settings.pairing.generate"],
+    });
+    for (let attempts = 0; attempts < 5; attempts += 1) {
+      if (document.activeElement === generate) {
+        break;
+      }
+      await user.tab();
+    }
+    expect(document.activeElement).toBe(generate);
+
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByText("1234 5678")).toBeInTheDocument();
+    expect(screen.getByText(/^\d{2}:\d{2}$/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: en["settings.pairing.generate"] }),
+    ).toBeInTheDocument();
+
+    await waitFor(
+      () => {
+        expect(screen.queryByText("1234 5678")).not.toBeInTheDocument();
+      },
+      { timeout: 4_000 },
+    );
+    expect(screen.getByText("Laptop")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: en["settings.pairing.generate"] }),
+    ).toBeInTheDocument();
+  }, 10_000);
 });

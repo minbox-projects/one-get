@@ -11,6 +11,14 @@ const EN_US = {
   "popup.send": "Send to OneGet",
   "popup.captureSent": "Sent to OneGet.",
   "popup.captureFailed": "Could not send this resource to OneGet.",
+  "popup.takeoverFailedHeading": "Browser download not taken over",
+  "popup.takeoverRetry": "Send to OneGet again",
+  "popup.takeoverFailed.capture_failed":
+    "OneGet could not take over {filename}. Check that the app is running, then send it again.",
+  "popup.takeoverFailed.token_revoked":
+    "Pairing expired before {filename} could be taken over. Pair again, then retry.",
+  "popup.takeoverFailed.update_required":
+    "OneGet needs an update before it can take over {filename}.",
   "popup.manifestUnavailable": "HLS and DASH manifests cannot be downloaded directly.",
   "popup.kind.video": "Video",
   "popup.kind.audio": "Audio",
@@ -59,6 +67,14 @@ const ZH_CN = {
   "popup.send": "发送到 OneGet",
   "popup.captureSent": "已发送到 OneGet。",
   "popup.captureFailed": "无法将此资源发送到 OneGet。",
+  "popup.takeoverFailedHeading": "浏览器下载未被接管",
+  "popup.takeoverRetry": "重新发送到 OneGet",
+  "popup.takeoverFailed.capture_failed":
+    "OneGet 无法接管 {filename}。请确认应用正在运行，然后重试。",
+  "popup.takeoverFailed.token_revoked":
+    "在接管 {filename} 之前配对已失效。请重新配对后重试。",
+  "popup.takeoverFailed.update_required":
+    "OneGet 需要更新后才能接管 {filename}。",
   "popup.manifestUnavailable": "HLS 和 DASH 清单无法直接下载。",
   "popup.kind.video": "视频",
   "popup.kind.audio": "音频",

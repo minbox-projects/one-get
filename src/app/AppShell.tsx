@@ -100,6 +100,9 @@ export function AppShell() {
   const [batchDialogKey, setBatchDialogKey] = useState(0);
   const queuedPrefillRef = useRef<PendingPrefill | null>(null);
   const anyDialogOpenRef = useRef(false);
+  // A prefill reaches the shell both as a live event and through the
+  // fetch-on-open snapshot. De-duplicate by the payload's receive timestamp
+  // so the same capture never opens a second dialog.
   const seenPrefillAtRef = useRef<number | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);

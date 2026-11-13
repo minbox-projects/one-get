@@ -160,4 +160,18 @@ describe("resource store ownership", () => {
     expect(store.list(2)).toEqual([]);
     expect(urls(store, 3)).toEqual(["https://cdn.test/tab-3-a.mp4"]);
   });
+
+  // A4: a later observation without a size must not erase a known size.
+  it("keeps a known resource size when a later observation reports null", () => {
+    const store = new ResourceStore();
+    const url = "https://cdn.test/files/sized.mp4";
+
+    const first = store.add(resource(url, 1, { size: 4_194_304, nowMs: 1_000 }));
+    const second = store.add(resource(url, 1, { size: null, nowMs: 2_000 }));
+
+    expect(first?.size).toBe(4_194_304);
+    expect(second?.size).toBe(4_194_304);
+    expect(store.list(1)).toHaveLength(1);
+    expect(store.list(1)[0].size).toBe(4_194_304);
+  });
 });

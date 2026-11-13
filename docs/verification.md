@@ -423,7 +423,7 @@ Every criterion below is a status for the current revision. Automated evidence i
 | AC-013 | Passed (automated) | Component tests cover idle delivery, deferral while a dialog is open, one delivery, and no survival across restart. |
 | AC-014 | Passed (automated) | Extension unit and Playwright tests prove one takeover task and cleanup only after success. |
 | AC-015 | Passed (automated) | Takeover tests cover unpaired, disabled, blacklisted, too-small, non-HTTP, incognito, and extension-originated downloads. |
-| AC-016 | Passed (automated) | Takeover tests prove a failed capture leaves the browser download intact and reports a localized reason. |
+| AC-016 | Passed (automated) | `background.test.ts` takeover-failure cases prove a failed capture leaves the browser download intact, records `takeoverError` only in popup state without persisting it, maps 401, 409, and other failures to `token_revoked`, `update_required`, and `capture_failed`, and clears the failure after a successful takeover or a same-URL prefill retry; `popup.test.ts` asserts the localized banner view message and Send to OneGet retry action for every reason with a redacted URL. |
 | AC-017 | Passed (automated) | Desktop and extension tests prove token-bound duplicate suppression returns the existing task and does not cancel twice. |
 | AC-018 | Passed (automated) | Capture tests prove the extension sends only URL, filename, referer, MIME, size, and safe headers. |
 | AC-019 | Passed (automated) | Store and extension tests cover deduplication by URL without fragment and page and frame ownership. |
@@ -435,7 +435,7 @@ Every criterion below is a status for the current revision. Automated evidence i
 | AC-025 | Passed (automated) | Settings tests cover valid persistence, clamping, invalid blacklist entries, media defaults, and unknown-field preservation. |
 | AC-026 | Passed (automated) | Takeover tests use saved settings, match blacklist subdomains, and exempt manifests and unknown sizes from the minimum size. |
 | AC-027 | Passed (automated) | Component tests render availability, code generation and copy, countdown, clients, timestamps, and confirmed revocation. |
-| AC-028 | Passed (automated) | Component tests cover keyboard access, accessible names, code clearing on expiry or success, and no token rendering. |
+| AC-028 | Passed (automated) | `PairingSettings.test.tsx` "generates a code with the keyboard and clears it when a paired client is reported" tab-focuses the generate control, activates it with Enter, asserts the grouped code and countdown, then asserts the code is removed once the paired client appears; companion cases cover accessible names, expiry clearing, localized status, and no token rendering. |
 | AC-029 | Passed (automated) | Component and Playwright tests prove one delivery, deferral, no auto-submit, and no persistence. |
 | AC-030 | Passed (automated) | The commands in the table above pass with exact pins, committed lockfiles, and no public-network dependency. |
 | AC-031 | Pending | Manual Chrome and Edge pairing, sniffing, HLS filtering, takeover, prefill, and unpaired or revoked behavior were not performed; Windows install and launch were not performed. |

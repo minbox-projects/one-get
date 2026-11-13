@@ -9,6 +9,7 @@ import {
   isHlsManifest,
   isSegmentUrl,
 } from "../../shared/classify";
+import { sanitizeFilename } from "../../shared/filename";
 import type { ResourceCategory } from "../../shared/types";
 
 const DOCUMENTED_EXTENSIONS: Record<ResourceCategory, string[]> = {
@@ -130,4 +131,25 @@ describe("resource classification", () => {
       category: "other",
     });
   });
+});
+
+describe("filename byte bound", () => {
+  // A2: display filenames stay within the 255-byte UTF-8 capture limit.
+  it.each([
+    { name: "three-byte", character: "汉" },
+    { name: "four-byte", character: "😀" },
+  ])(
+    "truncates repeated $name characters without splitting a code point",
+    ({ character }) => {
+      const input = character.repeat(200);
+      expect([...input].length).toBeLessThanOrEqual(255);
+      expect(new TextEncoder().encode(input).length).toBeGreaterThan(255);
+
+      const sanitized = sanitizeFilename(input);
+
+      expect(sanitized.length).toBeGreaterThan(0);
+      expect(new TextEncoder().encode(sanitized).length).toBeLessThanOrEqual(255);
+      expect([...sanitized].every((value) => value === character)).toBe(true);
+    },
+  );
 });

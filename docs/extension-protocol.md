@@ -39,7 +39,7 @@ A Chromium extension origin is exactly `chrome-extension://` followed by 32 lowe
 | Request body | 65,536 bytes (64 KiB) |
 | Capture items per request | 50 |
 | URL length | 8,192 bytes (8 KiB) |
-| Filename length | 255 bytes |
+| Filename length | 255 UTF-8 bytes |
 | Capture headers per item | 10 |
 | Capture header name | 128 bytes |
 | Capture header value | 2,048 bytes |
@@ -80,7 +80,7 @@ The desktop generates an eight-digit decimal code with a ten-minute lifetime. On
 }
 ```
 
-The token is 256 random bits rendered as 64 lowercase hexadecimal characters. It is returned exactly once. The desktop stores only its SHA-256 hash, bound to the exact origin that paired. The code is deleted in the same transaction that inserts the client, so a second use of the same code fails.
+The token is 256 random bits rendered as 64 lowercase hexadecimal characters. It is returned exactly once. The desktop stores only its SHA-256 hash, bound to the exact origin that paired. The code is deleted in the same transaction that inserts the client, so a second use of the same code fails. A pending code is held in memory and is discarded when the app reopens, so a code shown before a restart cannot pair.
 
 A wrong or expired code returns 401 with `INVALID_CODE`. Five failed attempts lock pairing for five minutes; while locked, requests return 429 with `PAIRING_LOCKED` and a `Retry-After` value. A successful pairing resets the failure count. Authorization compares the token hash and requires the exact bound origin; the last-used timestamp is persisted at most once per minute.
 
@@ -116,7 +116,7 @@ The pairing database is a separate SQLite file, `pairing.db`, with schema versio
 | Field | Rule |
 | --- | --- |
 | `url` | Required absolute `http` or `https` URL, at most 8 KiB, no embedded credentials, no control characters. |
-| `filename` | Optional, non-empty other than `.` or `..`, at most 255 bytes, no `/`, `\`, or control characters. |
+| `filename` | Optional, non-empty other than `.` or `..`, at most 255 UTF-8 bytes, no `/`, `\`, or control characters. |
 | `referer` | Optional absolute `http` or `https` URL without embedded credentials or control characters. |
 | `mime` | Optional response MIME type. |
 | `size` | Optional non-negative byte count. |
@@ -169,6 +169,21 @@ The extension evaluates a browser download when `chrome.downloads.onDeterminingF
 7. Call `suggest()` after the decision so a non-taken-over download proceeds normally.
 
 The service-worker duplicate set is in memory; a service-worker restart does not create a second desktop task because the desktop deduplicates by the token-bound `sourceId`.
+
+## Takeover failure surface
+
+The background worker keeps the most recent failed takeover in memory and returns it as `takeoverError` from `popup/get-state`:
+
+```json
+{
+  "downloadId": 7,
+  "url": "https://cdn.test/files/movie.mp4",
+  "filename": "movie.mp4",
+  "reason": "capture_failed"
+}
+```
+
+`reason` is one of `capture_failed` (a request failure or a response without a task identifier), `token_revoked` (401, after which the stored token is cleared), or `update_required` (409). The popup renders a localized banner with the filename-specific explanation and a Send to OneGet retry action that resends the same URL as a prefill, so the user can complete the download through the desktop dialog. The browser download remains in place throughout. The failure record is never written to persistent or session storage, and it is cleared after a later successful takeover or a successful prefill retry of the same URL.
 
 ## Error codes
 

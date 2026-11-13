@@ -149,9 +149,7 @@ impl AppState {
             autostart,
             quit,
             engine: None,
-            pairing: Mutex::new(PairingRuntime::unavailable(
-                "browser integration is not available",
-            )),
+            pairing: Mutex::new(PairingRuntime::unavailable("PAIRING_UNAVAILABLE")),
             api_server: Mutex::new(None),
             last_event: Mutex::new(DeepLinkEvent::rejected(
                 "no_deep_link".to_string(),

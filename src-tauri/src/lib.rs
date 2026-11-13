@@ -155,13 +155,7 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let runtime = PairingRuntime::available(Arc::clone(&store), clock);
             (runtime, Some(store))
         }
-        Err(error) => (
-            PairingRuntime::unavailable(format!(
-                "browser integration is unavailable: {}",
-                error.message
-            )),
-            None,
-        ),
+        Err(error) => (PairingRuntime::unavailable(error.code), None),
     };
 
     let state = Arc::new(
@@ -194,10 +188,7 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         };
         match ApiServerHandle::start(config) {
             Ok(handle) => state.attach_api_server(handle),
-            Err(error) => state.set_pairing_unavailable(&format!(
-                "browser integration is unavailable: {}",
-                error.message
-            )),
+            Err(error) => state.set_pairing_unavailable(&error.code),
         }
     }
 

@@ -4,7 +4,7 @@
 //! rows bind a token hash to the exact extension origin that paired, while a
 //! single pending-code row enforces one-time codes and supersession.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -90,6 +90,7 @@ pub enum PairResult {
 /// A dedicated pairing database.
 pub struct PairingStore {
     conn: Connection,
+    path: PathBuf,
 }
 
 impl PairingStore {
@@ -129,9 +130,15 @@ impl PairingStore {
         )
         .map_err(|_| database_unavailable())?;
 
+        conn.execute("DELETE FROM pending_code", [])
+            .map_err(|_| database_unavailable())?;
+
         restrict_permissions(path).map_err(|_| database_unavailable())?;
 
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            path: path.to_path_buf(),
+        })
     }
 
     /// Generate a new pending code, replacing any earlier pending code.
@@ -152,6 +159,7 @@ impl PairingStore {
             )
             .map_err(|_| operation_failed())?;
         transaction.commit().map_err(|_| operation_failed())?;
+        restrict_permissions(&self.path).map_err(|_| operation_failed())?;
 
         Ok(PairingCode {
             code,
@@ -232,6 +240,7 @@ impl PairingStore {
             )
             .map_err(|_| operation_failed())?;
         transaction.commit().map_err(|_| operation_failed())?;
+        restrict_permissions(&self.path).map_err(|_| operation_failed())?;
 
         Ok(PairResult::Paired {
             token,

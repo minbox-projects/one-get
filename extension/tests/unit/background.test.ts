@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { createBackgroundController } from "../../chromium/background";
-import type { BackgroundController, BrowserDownload } from "../../chromium/background";
+import type {
+  BackgroundController,
+  BrowserDownload,
+  TakeoverFailure,
+} from "../../chromium/background";
 import { DEFAULT_SETTINGS } from "../../shared/settings";
 import type { ExtensionSettings } from "../../shared/settings";
 import type { StorageArea } from "../../shared/storage";
@@ -686,6 +690,170 @@ describe("runtime messages", () => {
     expect((await controller.handleDownload(browserDownload({ id: 9 }))).action).toBe("takeover");
     expect(fetch.calls).toHaveLength(1);
     expect(events).toEqual(["cancel:9", "erase:9"]);
+  });
+});
+
+function popupState(state: unknown): Record<string, unknown> {
+  return state as Record<string, unknown>;
+}
+
+function takeoverErrorOf(state: Record<string, unknown>): TakeoverFailure | null | undefined {
+  return state.takeoverError as TakeoverFailure | null | undefined;
+}
+
+describe("takeover failure surface", () => {
+  // AC-016: the popup exposes the last takeover failure from memory only.
+  it("records a failed takeover in popup state without persisting it or leaking the token", async () => {
+    const { controller, persistent, session } = setUp({
+      token: TOKEN_A,
+      settings: savedSettings(),
+      handler: async () => {
+        throw new Error("offline");
+      },
+    });
+
+    expect(await controller.handleDownload(browserDownload())).toEqual({
+      action: "allow",
+      reason: "capture_failed",
+    });
+
+    const state = popupState(
+      await controller.handleRuntimeMessage(
+        runtimeMessage({ type: "popup/get-state", tabId: 1 }),
+        { tabId: 1 },
+      ),
+    );
+    expect(takeoverErrorOf(state)).toEqual({
+      downloadId: 7,
+      url: "https://cdn.test/files/movie.mp4",
+      filename: "movie.mp4",
+      reason: "capture_failed",
+    });
+    expect(JSON.stringify(state)).not.toContain(TOKEN_A);
+    expect(JSON.stringify(state)).not.toMatch(/[0-9a-f]{64}/i);
+
+    expect(Object.keys(persistent.store).sort()).toEqual(["oneget.settings", "oneget.token"]);
+    expect(JSON.stringify(persistent.store)).not.toContain("takeoverError");
+    expect(JSON.stringify(persistent.store)).not.toContain("https://cdn.test/files/movie.mp4");
+    expect(JSON.stringify(session.store)).not.toContain("takeoverError");
+  });
+
+  it("maps 401, 409, and 500 responses to the matching failure reason", async () => {
+    const cases = [
+      { status: 401, reason: "token_revoked" },
+      { status: 409, reason: "update_required" },
+      { status: 500, reason: "capture_failed" },
+    ] as const;
+
+    for (const entry of cases) {
+      const { controller } = setUp({
+        token: TOKEN_A,
+        settings: savedSettings(),
+        handler: () => jsonResponse({ code: "FAILED", message: "failed" }, entry.status),
+      });
+
+      expect(await controller.handleDownload(browserDownload())).toEqual({
+        action: "allow",
+        reason: entry.reason,
+      });
+
+      const state = popupState(
+        await controller.handleRuntimeMessage(
+          runtimeMessage({ type: "popup/get-state", tabId: 1 }),
+          { tabId: 1 },
+        ),
+      );
+      expect(takeoverErrorOf(state)).toMatchObject({
+        downloadId: 7,
+        url: "https://cdn.test/files/movie.mp4",
+        filename: "movie.mp4",
+        reason: entry.reason,
+      });
+    }
+  });
+
+  it("clears the recorded failure after a later successful takeover", async () => {
+    let succeed = false;
+    const { controller } = setUp({
+      token: TOKEN_A,
+      settings: savedSettings(),
+      handler: () =>
+        succeed
+          ? takeoverAccepted("task-1")
+          : jsonResponse({ code: "INTERNAL", message: "boom" }, 500),
+    });
+
+    expect(await controller.handleDownload(browserDownload())).toEqual({
+      action: "allow",
+      reason: "capture_failed",
+    });
+    const failedState = popupState(
+      await controller.handleRuntimeMessage(
+        runtimeMessage({ type: "popup/get-state", tabId: 1 }),
+        { tabId: 1 },
+      ),
+    );
+    expect(takeoverErrorOf(failedState)).toMatchObject({ reason: "capture_failed" });
+
+    succeed = true;
+    expect(await controller.handleDownload(browserDownload({ id: 8 }))).toMatchObject({
+      action: "takeover",
+    });
+
+    const recoveredState = popupState(
+      await controller.handleRuntimeMessage(
+        runtimeMessage({ type: "popup/get-state", tabId: 1 }),
+        { tabId: 1 },
+      ),
+    );
+    expect(takeoverErrorOf(recoveredState)).toBeNull();
+  });
+
+  it("clears the recorded failure after a successful prefill retry for the same URL", async () => {
+    let calls = 0;
+    const url = "https://cdn.test/files/retry.mp4";
+    const { controller, fetch } = setUp({
+      token: TOKEN_A,
+      settings: savedSettings(),
+      handler: () => {
+        calls += 1;
+        return calls === 1
+          ? jsonResponse({ code: "INTERNAL", message: "boom" }, 500)
+          : jsonResponse({ intent: "prefill", accepted: 1, rejected: [], duplicate: false });
+      },
+    });
+
+    await controller.handleDownload(browserDownload({ url, filename: "retry.mp4" }));
+    const failedState = popupState(
+      await controller.handleRuntimeMessage(
+        runtimeMessage({ type: "popup/get-state", tabId: 1 }),
+        { tabId: 1 },
+      ),
+    );
+    expect(takeoverErrorOf(failedState)).toMatchObject({
+      url,
+      reason: "capture_failed",
+    });
+
+    const retried = await controller.handleRuntimeMessage(
+      runtimeMessage({
+        type: "popup/capture-prefill",
+        tabId: 1,
+        url,
+        resource: { url, filename: "retry.mp4", pageUrl: "https://page.test/watch" },
+      }),
+      { tabId: 1 },
+    );
+    expect(retried).toMatchObject({ ok: true });
+    expect(fetch.calls).toHaveLength(2);
+
+    const recoveredState = popupState(
+      await controller.handleRuntimeMessage(
+        runtimeMessage({ type: "popup/get-state", tabId: 1 }),
+        { tabId: 1 },
+      ),
+    );
+    expect(takeoverErrorOf(recoveredState)).toBeNull();
   });
 });
 

@@ -1,3 +1,4 @@
+import type { TakeoverFailure } from "../chromium/background";
 import { redactUrl } from "../shared/filename";
 import { resolveExtensionLanguage, translateExtension } from "../shared/i18n";
 import type { ExtensionLanguage } from "../shared/i18n";
@@ -32,11 +33,18 @@ export interface PairingView {
   action: string;
 }
 
+export interface TakeoverFailureView {
+  message: string;
+  action: string;
+  url: string;
+}
+
 interface PopupState {
   resources: ResourceEntry[];
   settings: ExtensionSettings;
   paired: boolean;
   pairing?: { paired: boolean; label?: string };
+  takeoverError?: TakeoverFailure | null;
 }
 
 interface RuntimeResult {
@@ -104,6 +112,21 @@ export function pairingView(paired: boolean, language: ExtensionLanguage): Pairi
       ? translateExtension(language, "popup.pairedWith", { name: "OneGet" })
       : translateExtension(language, "popup.unpaired"),
     action: translateExtension(language, paired ? "popup.unpair" : "popup.pair"),
+  };
+}
+
+export function takeoverFailureView(
+  failure: TakeoverFailure,
+  language: ExtensionLanguage,
+): TakeoverFailureView {
+  return {
+    message: translateExtension(
+      language,
+      `popup.takeoverFailed.${failure.reason}`,
+      { filename: failure.filename },
+    ),
+    action: translateExtension(language, "popup.takeoverRetry"),
+    url: redactUrl(failure.url),
   };
 }
 
@@ -244,6 +267,49 @@ async function sendPrefill(
   );
 }
 
+async function retryTakeoverFailure(
+  failure: TakeoverFailure,
+  language: ExtensionLanguage,
+): Promise<void> {
+  const result = await sendMessage<RuntimeResult>({
+    type: "popup/capture-prefill",
+    url: failure.url,
+    resource: { url: failure.url, filename: failure.filename },
+  });
+  showNotice(
+    translateExtension(
+      language,
+      result?.ok === true ? "popup.captureSent" : "popup.captureFailed",
+    ),
+  );
+  await loadState(language);
+}
+
+function renderTakeoverError(
+  language: ExtensionLanguage,
+  failure: TakeoverFailure | null | undefined,
+): void {
+  const banner = byId("takeover-error");
+  if (banner === null) {
+    return;
+  }
+  if (failure === null || failure === undefined) {
+    banner.hidden = true;
+    return;
+  }
+  const view = takeoverFailureView(failure, language);
+  setText("takeover-error-message", view.message);
+  setText("takeover-error-url", view.url);
+  const retry = byId<HTMLButtonElement>("takeover-error-retry");
+  if (retry !== null) {
+    retry.textContent = view.action;
+    retry.onclick = () => {
+      void retryTakeoverFailure(failure, language);
+    };
+  }
+  banner.hidden = false;
+}
+
 function renderPairing(language: ExtensionLanguage, paired: boolean): void {
   const view = pairingView(paired, language);
   setText("pairing-status", view.status);
@@ -280,6 +346,7 @@ function renderSettings(settings: ExtensionSettings): void {
 }
 
 function renderState(language: ExtensionLanguage, state: PopupState): void {
+  renderTakeoverError(language, state.takeoverError);
   renderResources(language, state.resources);
   renderPairing(language, state.paired);
   renderSettings(state.settings);

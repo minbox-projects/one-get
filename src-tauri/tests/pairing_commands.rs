@@ -438,6 +438,22 @@ fn set_pairing_unavailable_reports_a_reason_and_blocks_generation() {
 }
 
 #[test]
+fn pairing_unavailable_reason_is_a_stable_code_not_prose() {
+    let (_temp, state) = base_state();
+    let status = pairing_status(&state).expect("default pairing status");
+    assert!(!status.available);
+    assert_eq!(status.reason.as_deref(), Some("PAIRING_UNAVAILABLE"));
+    assert!(status.code.is_none());
+    assert!(status.clients.is_empty());
+
+    state.set_pairing_unavailable("API_BIND_FAILED");
+    let degraded = pairing_status(&state).expect("degraded pairing status");
+    assert!(!degraded.available);
+    assert_eq!(degraded.reason.as_deref(), Some("API_BIND_FAILED"));
+    assert!(pairing_generate_code(&state).is_err());
+}
+
+#[test]
 fn pairing_command_output_never_contains_a_raw_token() {
     let harness = available_harness();
     let (token, _) = pair_client(&harness, &extension_origin('a'), "Chrome extension");
