@@ -16,7 +16,12 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
 
-    "types": ["chrome"]
+    "types": ["chrome", "node"]
   },
-  "include": ["shared/**/*.ts", "tests/unit/**/*.ts"]
+  "include": [
+    "shared/**/*.ts",
+    "chromium/**/*.ts",
+    "popup/**/*.ts",
+    "tests/unit/**/*.ts"
+  ]
 }

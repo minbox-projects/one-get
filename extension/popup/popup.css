@@ -1,0 +1,289 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f7f7f8;
+  --panel: #ffffff;
+  --text: #17181c;
+  --muted: #5b5f6b;
+  --border: #d6d8de;
+  --accent: #1f6feb;
+  --accent-text: #ffffff;
+  --danger: #a4262c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181d;
+    --panel: #202329;
+    --text: #f2f3f5;
+    --muted: #a8adb8;
+    --border: #3a3e47;
+    --accent: #6ea8ff;
+    --accent-text: #10131a;
+    --danger: #ff8a8a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 340px;
+  max-width: 420px;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.popup {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  max-height: 560px;
+  overflow-y: auto;
+}
+
+.popup-header h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.panel h2 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.panel-heading h2 {
+  margin: 0 0 8px;
+}
+
+.count,
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.empty {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.resources {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.resource {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.resource:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.resource-header {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.resource-kind {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.resource-filename {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.resource-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 2px 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.resource-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.resource-reason {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+button {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font: inherit;
+  font-weight: 600;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.resource-send {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 6px;
+}
+
+.inline-form label,
+.field span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+input[type="text"],
+input[type="number"],
+textarea {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  padding: 6px 8px;
+}
+
+input[type="text"] {
+  width: 120px;
+}
+
+input[type="number"] {
+  width: 100%;
+}
+
+textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.categories {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px 8px;
+}
+
+.categories legend {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 4px;
+}
+
+.category-toggles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 10px;
+}
+
+.category-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pairing-status {
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+
+.notice {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 8px 10px;
+}
+
+.notice[hidden],
+[hidden] {
+  display: none !important;
+}
