@@ -158,7 +158,10 @@
       "module_root": "extension",
       "entries": [
         "extension/chromium/background.ts",
+        "extension/firefox/background.ts",
         "extension/popup/popup.ts",
+        "extension/shared/background.ts",
+        "extension/shared/browser.ts",
         "extension/shared/classify.ts",
         "extension/shared/filename.ts",
         "extension/shared/filter.ts",
@@ -172,84 +175,42 @@
       "symbols": [
         {
           "file": "extension/chromium/background.ts",
-          "name": "BackgroundController",
-          "kind": "interface",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/chromium/background.ts",
-          "name": "BackgroundDependencies",
-          "kind": "interface",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/chromium/background.ts",
-          "name": "BrowserDownload",
-          "kind": "interface",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/chromium/background.ts",
-          "name": "DownloadAllowReason",
-          "kind": "type",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/chromium/background.ts",
-          "name": "DownloadControl",
-          "kind": "interface",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/chromium/background.ts",
-          "name": "DownloadOutcome",
-          "kind": "type",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/chromium/background.ts",
-          "name": "PairOutcome",
-          "kind": "interface",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/chromium/background.ts",
-          "name": "RuntimeMessage",
-          "kind": "interface",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/chromium/background.ts",
-          "name": "RuntimeSender",
-          "kind": "interface",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/chromium/background.ts",
-          "name": "TakeoverFailure",
-          "kind": "interface",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/chromium/background.ts",
-          "name": "TakeoverFailureReason",
-          "kind": "type",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/chromium/background.ts",
-          "name": "createBackgroundController",
-          "kind": "function",
-          "visibility": "public"
-        },
-        {
-          "file": "extension/chromium/background.ts",
           "name": "installChromeBackground",
           "kind": "function",
           "visibility": "public"
         },
         {
           "file": "extension/chromium/background.ts",
+          "name": "resolveApiOrigin",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/firefox/background.ts",
+          "name": "FirefoxBackgroundDependencies",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/firefox/background.ts",
+          "name": "createFirefoxBackground",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/firefox/background.ts",
+          "name": "installFirefoxBackground",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/firefox/background.ts",
+          "name": "mapFirefoxDownload",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/firefox/background.ts",
           "name": "resolveApiOrigin",
           "kind": "function",
           "visibility": "public"
@@ -293,6 +254,138 @@
         {
           "file": "extension/popup/popup.ts",
           "name": "takeoverFailureView",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "BackgroundController",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "BackgroundDependencies",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "BrowserDownload",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "DownloadAllowReason",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "DownloadControl",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "DownloadOutcome",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "PairOutcome",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "RuntimeMessage",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "RuntimeSender",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "TakeoverFailure",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "TakeoverFailureReason",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "createBackgroundController",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/browser.ts",
+          "name": "BrowserAdapter",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/browser.ts",
+          "name": "BrowserAdapterOptions",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/browser.ts",
+          "name": "BrowserApi",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/browser.ts",
+          "name": "BrowserMessageHandler",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/browser.ts",
+          "name": "BrowserMessageSender",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/browser.ts",
+          "name": "BrowserMessagingStyle",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/browser.ts",
+          "name": "BrowserResponseHeader",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/browser.ts",
+          "name": "BrowserTab",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/browser.ts",
+          "name": "BrowserTabQuery",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/browser.ts",
+          "name": "createBrowserAdapter",
           "kind": "function",
           "visibility": "public"
         },
@@ -659,17 +752,20 @@
       ],
       "related_files": [
         "extension/build.mjs",
-        "extension/chromium/content.ts",
-        "extension/chromium/inject.ts",
+        "extension/firefox/browser.d.ts",
+        "extension/shared/content.ts",
+        "extension/shared/inject.ts",
         "extension/tests/e2e/fixtures/hls/segment1.ts",
         "extension/tests/e2e/fixtures/hls/segment2.ts",
         "extension/tests/unit/setup.ts"
       ],
       "tests": [
         "extension/tests/e2e/extension.spec.ts",
+        "extension/tests/unit/adapter.test.ts",
         "extension/tests/unit/background.test.ts",
         "extension/tests/unit/classify.test.ts",
         "extension/tests/unit/filter.test.ts",
+        "extension/tests/unit/firefox.test.ts",
         "extension/tests/unit/i18n.test.ts",
         "extension/tests/unit/pageStore.test.ts",
         "extension/tests/unit/popup.test.ts",
@@ -682,118 +778,53 @@
       "relations": [
         {
           "kind": "imports",
-          "from": "extension/chromium/background.ts#BackgroundController",
-          "to": "extension/shared/settings.ts#ExtensionSettings"
+          "from": "extension/chromium/background.ts#installChromeBackground",
+          "to": "extension/shared/background.ts#RuntimeMessage"
         },
         {
           "kind": "imports",
-          "from": "extension/chromium/background.ts#BackgroundController",
-          "to": "extension/shared/types.ts#ResourceEntry"
+          "from": "extension/chromium/background.ts#installChromeBackground",
+          "to": "extension/shared/background.ts#createBackgroundController"
         },
         {
           "kind": "imports",
-          "from": "extension/chromium/background.ts#BackgroundController",
-          "to": "extension/shared/types.ts#ResourceInput"
+          "from": "extension/chromium/background.ts#installChromeBackground",
+          "to": "extension/shared/browser.ts#BrowserApi"
         },
         {
           "kind": "imports",
-          "from": "extension/chromium/background.ts#BackgroundDependencies",
-          "to": "extension/shared/storage.ts#StorageArea"
+          "from": "extension/chromium/background.ts#installChromeBackground",
+          "to": "extension/shared/browser.ts#createBrowserAdapter"
         },
         {
           "kind": "imports",
-          "from": "extension/chromium/background.ts#PairOutcome",
-          "to": "extension/shared/protocol.ts#ApiErrorBody"
+          "from": "extension/firefox/background.ts#createFirefoxBackground",
+          "to": "extension/shared/background.ts#BackgroundController"
         },
         {
           "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/classify.ts#classifyResource"
+          "from": "extension/firefox/background.ts#createFirefoxBackground",
+          "to": "extension/shared/background.ts#RuntimeMessage"
         },
         {
           "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/filter.ts#TakeoverCandidate"
+          "from": "extension/firefox/background.ts#createFirefoxBackground",
+          "to": "extension/shared/background.ts#createBackgroundController"
         },
         {
           "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/filter.ts#decideTakeover"
+          "from": "extension/firefox/background.ts#createFirefoxBackground",
+          "to": "extension/shared/browser.ts#BrowserApi"
         },
         {
           "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/pageStore.ts#ResourceStore"
+          "from": "extension/firefox/background.ts#createFirefoxBackground",
+          "to": "extension/shared/browser.ts#createBrowserAdapter"
         },
         {
           "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/protocol.ts#API_PROTOCOL_VERSION"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/protocol.ts#ApiResult"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/protocol.ts#requestJson"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/settings.ts#ExtensionSettings"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/settings.ts#normalizeSettings"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/storage.ts#clearToken"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/storage.ts#isValidToken"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/storage.ts#loadSettingsDocument"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/storage.ts#loadToken"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/storage.ts#saveSettingsDocument"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/storage.ts#saveToken"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/types.ts#CaptureDraftItem"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/types.ts#ResourceEntry"
-        },
-        {
-          "kind": "imports",
-          "from": "extension/chromium/background.ts#createBackgroundController",
-          "to": "extension/shared/types.ts#ResourceInput"
+          "from": "extension/firefox/background.ts#mapFirefoxDownload",
+          "to": "extension/shared/background.ts#BrowserDownload"
         },
         {
           "kind": "imports",
@@ -838,7 +869,7 @@
         {
           "kind": "imports",
           "from": "extension/popup/popup.ts#takeoverFailureView",
-          "to": "extension/chromium/background.ts#TakeoverFailure"
+          "to": "extension/shared/background.ts#TakeoverFailure"
         },
         {
           "kind": "imports",
@@ -854,6 +885,126 @@
           "kind": "imports",
           "from": "extension/popup/popup.ts#takeoverFailureView",
           "to": "extension/shared/i18n.ts#translateExtension"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#BackgroundController",
+          "to": "extension/shared/settings.ts#ExtensionSettings"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#BackgroundController",
+          "to": "extension/shared/types.ts#ResourceEntry"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#BackgroundController",
+          "to": "extension/shared/types.ts#ResourceInput"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#BackgroundDependencies",
+          "to": "extension/shared/storage.ts#StorageArea"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#PairOutcome",
+          "to": "extension/shared/protocol.ts#ApiErrorBody"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/classify.ts#classifyResource"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/filter.ts#TakeoverCandidate"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/filter.ts#decideTakeover"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/pageStore.ts#ResourceStore"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/protocol.ts#API_PROTOCOL_VERSION"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/protocol.ts#ApiResult"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/protocol.ts#requestJson"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/settings.ts#ExtensionSettings"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/settings.ts#normalizeSettings"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/storage.ts#clearToken"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/storage.ts#isValidToken"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/storage.ts#loadSettingsDocument"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/storage.ts#loadToken"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/storage.ts#saveSettingsDocument"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/storage.ts#saveToken"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/types.ts#CaptureDraftItem"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/types.ts#ResourceEntry"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/types.ts#ResourceInput"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/browser.ts#BrowserAdapter",
+          "to": "extension/shared/storage.ts#StorageArea"
         },
         {
           "kind": "imports",
@@ -932,17 +1083,21 @@
         }
       ],
       "owner_role": "shared",
-      "responsibility": "Chromium MV3 browser-capture extension: shared protocol, classification, HLS and DASH recognition, segment filtering, page ownership, bounded stores, settings, background takeover and prefill, popup, and video overlay",
+      "responsibility": "Chromium and Firefox MV3 browser-capture extensions: shared browser-agnostic controller and typed adapter, per-browser manifests and event installation, protocol client, classification, HLS and DASH recognition, segment filtering, page ownership, bounded resource store, settings, pairing and prefill views, and bilingual strings",
       "read_scope": [
         "extension/build.mjs",
         "extension/chromium/background.ts",
-        "extension/chromium/content.ts",
-        "extension/chromium/inject.ts",
+        "extension/firefox/background.ts",
+        "extension/firefox/browser.d.ts",
         "extension/popup/popup.ts",
+        "extension/shared/background.ts",
+        "extension/shared/browser.ts",
         "extension/shared/classify.ts",
+        "extension/shared/content.ts",
         "extension/shared/filename.ts",
         "extension/shared/filter.ts",
         "extension/shared/i18n.ts",
+        "extension/shared/inject.ts",
         "extension/shared/pageStore.ts",
         "extension/shared/protocol.ts",
         "extension/shared/settings.ts",
@@ -951,9 +1106,11 @@
         "extension/tests/e2e/extension.spec.ts",
         "extension/tests/e2e/fixtures/hls/segment1.ts",
         "extension/tests/e2e/fixtures/hls/segment2.ts",
+        "extension/tests/unit/adapter.test.ts",
         "extension/tests/unit/background.test.ts",
         "extension/tests/unit/classify.test.ts",
         "extension/tests/unit/filter.test.ts",
+        "extension/tests/unit/firefox.test.ts",
         "extension/tests/unit/i18n.test.ts",
         "extension/tests/unit/pageStore.test.ts",
         "extension/tests/unit/popup.test.ts",
@@ -3973,7 +4130,7 @@
       ],
       "relations": [],
       "owner_role": "shared",
-      "responsibility": "Loopback browser-integration API: fixed admission guards, capture protocol and validation, dedicated pairing database, bounded rate limiters, duplicate suppression, and the desktop takeover and prefill bridge",
+      "responsibility": "Loopback browser-integration API: fixed admission guards with exact Chromium and Firefox extension origins, capture protocol and validation, dedicated pairing database, bounded rate limiters, duplicate suppression, and the desktop takeover and prefill bridge",
       "read_scope": [
         "src-tauri/src/api/auth.rs",
         "src-tauri/src/api/capture.rs",

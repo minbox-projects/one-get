@@ -482,3 +482,92 @@ No pending gate or manual item above is recorded as passed. Automated, mock-serv
 ### Exit statement
 
 Phase 3 exit is BLOCKED. It requires the Phase 0 manual platform matrix, the Phase 1 24-hour soak and Windows compatibility records, the Phase 2 manual real-application download and final targeted design-review recheck, and complete Phase 3 manual Chrome and Edge records plus Windows install and launch, or a dated explicit user waiver. The automated suites are green, but they are not a phase-exit approval.
+
+## Phase 4: Firefox extension parity
+
+Date: 2026-11-13
+
+This section records the delivered Firefox package, the shared cross-browser controller and adapter split, exact `moz-extension://` origin acceptance in the loopback API, the Firefox event-page lifecycle, and the Firefox build and lint gates. The automated evidence below is green in the coding worktree, but no real Firefox browser interaction has been performed and no hosted CI run is claimed. Implementation completion and automated green results are not Phase 4 exit.
+
+### Environment
+
+| Component | Value |
+| --- | --- |
+| Host | macOS 27.3, arm64 |
+| Node.js | 24.18.0 |
+| npm | 11.16.0 |
+| rustc | 1.99.1 |
+| cargo | 1.99.1 |
+
+### Automated commands and results
+
+Frontend and extension commands ran from the repository root; Rust commands ran in `src-tauri/`. The complete transcript is preserved in the run's report set.
+
+| Command | Result |
+| --- | --- |
+| `npm run check:pins` | Passed: 30 direct npm entries are exact versions. |
+| `npm run typecheck` | Passed: exit 0. |
+| `npm run lint` | Passed: exit 0. |
+| `npm run test` | Passed: 49 Vitest files, 435 tests. |
+| `npm run build` | Passed: production Vite build. |
+| `npm run typecheck:extension` | Passed: exit 0. |
+| `npm run test:extension` | Passed: 12 files, 131 tests. |
+| `npm run build:extension` | Passed: `extension/dist/chromium/` and `extension/dist/firefox/` written with separate manifests. |
+| `npm run build:extension:test` | Passed: `extension/dist/chromium-test/` written; no Firefox test package is produced. |
+| `npm run lint:extension:firefox` | Passed: 0 errors, 0 notices, 1 warning. |
+| `npm run test:e2e` | Passed: 34 Playwright tests. |
+| `npm run test:e2e:extension` | Passed: 7 Playwright tests against the Chromium test package. |
+| `cargo fmt -- --check` | Passed: exit 0. |
+| `cargo clippy --all-targets -- -D warnings` | Passed: exit 0. |
+| `cargo check --locked` | Passed: exit 0. |
+| `cargo test --test api_pairing --locked` | Passed: 24 tests. |
+| `cargo test --test api_capture --locked` | Passed: 24 tests. |
+| `cargo test --test pairing_commands --locked` | Passed: 16 tests. |
+
+The `web-ext` warning is `KEY_FIREFOX_ANDROID_UNSUPPORTED_BY_MIN_VERSION`: the `data_collection_permissions` declaration is unsupported on Firefox for Android below version 142. Firefox for Android is out of scope and the desktop floor is 140.0, so the warning is accepted and the no-data-collection declaration stays.
+
+### Automated layers
+
+- Rust API suites cover exact Chromium and Firefox origin acceptance, malformed and uppercase Firefox origins, health, pair, capture, revoke, and rejection of a token presented with a different extension origin.
+- Extension unit suites cover the typed browser adapter, shared controller, Firefox download mapping, one-task takeover, non-matching downloads, capture failure, duplicate suppression, the `Firefox extension` pair label, navigation, session-storage rehydration, and synchronous listener registration.
+- The extension Playwright suite still loads only the Chromium test package. It does not exercise a real Firefox event page, and no automated result is substituted for manual Firefox evidence.
+- Build assertions cover separate manifest and origin substitution for the Chromium and Firefox packages, and the pin check covers the exact `web-ext` addition.
+
+### Manual Firefox acceptance
+
+Record date: 2026-11-13. Operating system: macOS 27.3 arm64. No OneGet app build was launched and no Firefox browser session was opened for this record. The production Firefox package at `extension/dist/firefox` was produced by `npm run build:extension`, but it was not loaded into Firefox.
+
+| Manual acceptance item | Status | Detail |
+| --- | --- | --- |
+| Load the temporary add-on through `about:debugging#/runtime/this-firefox` | PENDING: not performed | No Firefox session was opened and no package was selected. |
+| Grant the requested site and download permissions | PENDING: not performed | No permission prompt was observed or granted. |
+| Pair from the Firefox popup with a desktop-generated code | PENDING: not performed | No code was generated and no real pairing occurred. |
+| Response sniffing with deduplication and tab and frame ownership | PENDING: not performed | No Firefox traffic was observed. |
+| HLS manifest listing with transport and media segment filtering | PENDING: not performed | No manifest was listed and no filtering was observed. |
+| Single-resource prefill into the New Download dialog | PENDING: not performed | No resource was sent and no desktop dialog opened. |
+| Takeover creating exactly one task from `downloads.onCreated` | PENDING: not performed | No Firefox download was started, captured, or cancelled. |
+| Unpaired or revoked rejection leaving the browser download intact | PENDING: not performed | No unpaired or revoked capture was attempted. |
+| Event-page suspension after a failed takeover still shows the popup retry path | PENDING: not performed | No event page was suspended or rehydrated in a real browser. |
+| Windows status | PENDING: not performed | Windows install, launch, and Firefox capture checks were not performed. |
+
+The adapter unit tests and the `web-ext` lint result do not replace any item above.
+
+### Pending gates
+
+| Gate | Status |
+| --- | --- |
+| Phase 0 manual platform acceptance matrix | Pending |
+| Phase 1 24-hour soak | Pending |
+| Phase 1 Windows x64 compatibility | Pending |
+| Phase 2 manual real-application local HTTP download | Pending |
+| Phase 2 final targeted design-review recheck | Pending |
+| Phase 3 manual Chrome and Edge records | Pending |
+| Phase 3 Windows install, launch, and browser checks | Pending |
+| Phase 4 manual Firefox record | Pending |
+| Phase 4 Windows Firefox status | Pending |
+
+No pending gate or manual item above is recorded as passed.
+
+### Exit statement
+
+Phase 3 exit remains BLOCKED with its recorded pending gates and manual Chrome and Edge items. Phase 4 exit is BLOCKED. It requires the complete manual Firefox record, the Phase 3 manual and Windows records, and the earlier Phase 0, Phase 1, and Phase 2 gates above, or a dated explicit user waiver. The automated suites are green, but they are not a phase-exit approval and no real Firefox result is claimed.
