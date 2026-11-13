@@ -19,6 +19,7 @@ import type { CaptureDraftItem, ResourceEntry, ResourceInput } from "./types";
 
 const DEFAULT_PAIR_LABEL = "Chrome extension";
 const RESOURCES_KEY = "oneget.resources";
+const TAKEOVER_ERROR_KEY = "oneget.takeover-error";
 const SESSION_RESOURCE_BOUND = 5000;
 const REVOKE_TIMEOUT_MS = 3000;
 
@@ -176,6 +177,27 @@ function deserializeResources(value: unknown): StoredResource[] {
   return Array.isArray(value) ? value.filter(isRecord) : [];
 }
 
+function parseTakeoverFailure(value: unknown): TakeoverFailure | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const downloadId = value.downloadId;
+  const url = value.url;
+  const filename = value.filename;
+  const reason = value.reason;
+  if (
+    typeof downloadId !== "number" ||
+    !Number.isFinite(downloadId) ||
+    typeof url !== "string" ||
+    url.length === 0 ||
+    typeof filename !== "string" ||
+    (reason !== "capture_failed" && reason !== "token_revoked" && reason !== "update_required")
+  ) {
+    return null;
+  }
+  return { downloadId, url, filename, reason };
+}
+
 function createResourceStoreFromSnapshot(value: unknown): ResourceStore {
   const store = new ResourceStore();
   for (const raw of deserializeResources(value)) {
@@ -207,22 +229,66 @@ export function createBackgroundController(
   let storePromise: Promise<ResourceStore> | null = null;
   let prefillSequence = 0;
   let takeoverError: TakeoverFailure | null = null;
+  let takeoverStatePromise: Promise<void> | null = null;
 
   function storeKey(token: string, downloadId: number): string {
     return `${token}:${downloadId}`;
   }
 
-  function rememberTakeoverFailure(
+  function readyTakeoverState(): Promise<void> {
+    if (takeoverStatePromise !== null) {
+      return takeoverStatePromise;
+    }
+    takeoverStatePromise = (async () => {
+      try {
+        const values = await dependencies.session.get(TAKEOVER_ERROR_KEY);
+        const restored = parseTakeoverFailure(values[TAKEOVER_ERROR_KEY]);
+        if (takeoverError === null && restored !== null) {
+          takeoverError = restored;
+        }
+      } catch {
+        // Session storage being unavailable only loses the retry affordance.
+      }
+    })();
+    return takeoverStatePromise;
+  }
+
+  async function persistTakeoverState(): Promise<void> {
+    try {
+      if (takeoverError === null) {
+        await dependencies.session.remove(TAKEOVER_ERROR_KEY);
+      } else {
+        await dependencies.session.set({ [TAKEOVER_ERROR_KEY]: takeoverError });
+      }
+    } catch {
+      log("takeover.persist_failed");
+    }
+  }
+
+  async function rememberTakeoverFailure(
     download: BrowserDownload,
     reason: TakeoverFailureReason,
-  ): void {
+  ): Promise<void> {
+    await readyTakeoverState();
     takeoverError = {
       downloadId: download.id,
       url: download.url,
       filename: download.filename,
       reason,
     };
+    await persistTakeoverState();
   }
+
+  async function clearTakeoverFailure(): Promise<void> {
+    await readyTakeoverState();
+    if (takeoverError === null) {
+      return;
+    }
+    takeoverError = null;
+    await persistTakeoverState();
+  }
+
+  void readyTakeoverState();
 
   async function loadStore(): Promise<ResourceStore> {
     if (storePromise !== null) {
@@ -357,28 +423,28 @@ export function createBackgroundController(
     if (!result.ok) {
       if (result.status === 401) {
         await clearToken(dependencies.storage);
-        rememberTakeoverFailure(download, "token_revoked");
+        await rememberTakeoverFailure(download, "token_revoked");
         log("capture.token_revoked", { intent: "takeover" });
         return { action: "allow", reason: "token_revoked" };
       }
       if (result.status === 409) {
-        rememberTakeoverFailure(download, "update_required");
+        await rememberTakeoverFailure(download, "update_required");
         log("capture.update_required", { intent: "takeover" });
         return { action: "allow", reason: "update_required" };
       }
-      rememberTakeoverFailure(download, "capture_failed");
+      await rememberTakeoverFailure(download, "capture_failed");
       log("capture.failed", { intent: "takeover", status: result.status, code: result.error.code });
       return { action: "allow", reason: "capture_failed" };
     }
 
     const taskId = result.data.taskId;
     if (typeof taskId !== "string" || taskId.length === 0) {
-      rememberTakeoverFailure(download, "capture_failed");
+      await rememberTakeoverFailure(download, "capture_failed");
       log("capture.failed", { intent: "takeover", status: result.status, code: "NO_TASK" });
       return { action: "allow", reason: "capture_failed" };
     }
 
-    takeoverError = null;
+    await clearTakeoverFailure();
 
     if (result.data.duplicate === true) {
       processed.set(key, taskId);
@@ -532,8 +598,9 @@ export function createBackgroundController(
       return { ok: false, error: result.error, reason: "capture_failed" };
     }
 
+    await readyTakeoverState();
     if (takeoverError !== null && takeoverError.url === url) {
-      takeoverError = null;
+      await clearTakeoverFailure();
     }
     log("capture.succeeded", { intent: "prefill" });
     return { ok: true, duplicate: result.data.duplicate === true, taskId: result.data.taskId };
@@ -548,6 +615,7 @@ export function createBackgroundController(
     switch (type) {
       case "popup/get-state": {
         const tabId = numberOr(message.tabId ?? sender?.tabId, -1);
+        await readyTakeoverState();
         const [resources, settings, pairing] = await Promise.all([
           listResources(tabId),
           getSettings(),
