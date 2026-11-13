@@ -4,11 +4,13 @@ import type { ReactNode } from "react";
 import { cn } from "../../lib/cn";
 
 export interface DialogProps {
-  trigger: ReactNode;
+  trigger?: ReactNode;
   title: string;
   description?: string;
   children?: ReactNode;
   className?: string;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 export function Dialog({
@@ -17,10 +19,14 @@ export function Dialog({
   description,
   children,
   className,
+  open,
+  onOpenChange,
 }: DialogProps) {
   return (
-    <DialogPrimitive.Root>
-      <DialogPrimitive.Trigger asChild>{trigger}</DialogPrimitive.Trigger>
+    <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
+      {trigger ? (
+        <DialogPrimitive.Trigger asChild>{trigger}</DialogPrimitive.Trigger>
+      ) : null}
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="og-dialog__overlay" />
         <DialogPrimitive.Content className={cn("og-dialog__content", className)}>
