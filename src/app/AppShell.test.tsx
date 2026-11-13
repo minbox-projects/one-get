@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dictionaries, I18nProvider } from "../i18n";
 import type {
   AddDownloadRequest,
+  DownloadSegment,
   DownloadSummary,
   ProbeResult,
 } from "../types/downloads";
@@ -550,5 +551,262 @@ describe("AppShell download dialogs", () => {
         .filter((row) => (row.textContent ?? "").includes("existing.bin"));
       expect(rows.length).toBeGreaterThanOrEqual(2);
     });
+  });
+});
+
+describe("AppShell task controls, details, and deletion", () => {
+  afterEach(() => {
+    delete (navigator as { clipboard?: unknown }).clipboard;
+  });
+
+  function commandIds(command: string): string[] {
+    return invokeCommand.mock.calls
+      .filter(([name]) => name === command)
+      .map(([, args]) => (args as { id?: string } | undefined)?.id ?? "")
+      .sort();
+  }
+
+  function selectedTask(overrides: Partial<DownloadSummary> = {}) {
+    return task({
+      id: "task-1",
+      filename: "report.pdf",
+      url: "https://example.com/files/report.pdf",
+      destination: "/Users/me/Downloads",
+      state: "completed",
+      downloadedBytes: 2048,
+      totalBytes: 2048,
+      createdAtMs: 1,
+      updatedAtMs: 2,
+      completedAtMs: 2,
+      ...overrides,
+    });
+  }
+
+  const segments: DownloadSegment[] = [
+    { index: 0, start: 0, end: 1023, downloadedBytes: 1023, state: "done" },
+    { index: 1, start: 1024, end: 2047, downloadedBytes: 1024, state: "done" },
+  ];
+
+  function mockDetailsIpc(
+    downloads: DownloadSummary[],
+    overrides: Partial<Record<string, unknown>> = {},
+  ) {
+    invokeCommand.mockImplementation(async (command: string) => {
+      if (command === "settings_get") {
+        return { ok: true as const, data: settings() };
+      }
+      if (command === "downloads_list") {
+        return { ok: true as const, data: downloads };
+      }
+      if (command === "downloads_segments") {
+        return { ok: true as const, data: segments };
+      }
+      if (command in overrides) {
+        return overrides[command];
+      }
+      if (command.startsWith("downloads_")) {
+        return { ok: true as const, data: undefined };
+      }
+      return {
+        ok: false as const,
+        error: { code: "unexpected_command", message: command },
+      };
+    });
+  }
+
+  async function selectFirstRow(
+    user: ReturnType<typeof userEvent.setup>,
+    filename: string,
+  ) {
+    await screen.findByText(filename);
+    await user.click(screen.getByText(filename));
+  }
+
+  async function findByTextOrValue(value: string) {
+    await waitFor(() => {
+      const matches =
+        screen.queryAllByText(value).length +
+        screen.queryAllByDisplayValue(value).length;
+      expect(matches).toBeGreaterThan(0);
+    });
+  }
+
+  it("loads segments and shows details when a row is selected, with working open actions", async () => {
+    const user = userEvent.setup();
+    const current = selectedTask();
+    mockDetailsIpc([current]);
+    renderShell();
+
+    await selectFirstRow(user, "report.pdf");
+
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith("downloads_segments", {
+        id: "task-1",
+      });
+    });
+
+    await findByTextOrValue("/Users/me/Downloads");
+    await findByTextOrValue(current.url);
+    expect(screen.queryByText(en["details.empty"])).not.toBeInTheDocument();
+    expect(screen.getAllByText(/^done$/i).length).toBeGreaterThan(0);
+    expect(document.body).not.toHaveTextContent(/token=/i);
+
+    await user.click(screen.getByRole("button", { name: /open file/i }));
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith("downloads_open_file", {
+        id: "task-1",
+      });
+    });
+
+    await user.click(screen.getByRole("button", { name: /open folder/i }));
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith("downloads_open_folder", {
+        id: "task-1",
+      });
+    });
+  });
+
+  it("calls the expected bulk commands for every eligible task and refreshes", async () => {
+    const user = userEvent.setup();
+    const downloads = [
+      task({ id: "downloading", filename: "downloading.bin", state: "downloading" }),
+      task({ id: "queued", filename: "queued.bin", state: "queued" }),
+      task({ id: "connecting", filename: "connecting.bin", state: "connecting" }),
+      task({ id: "finalizing", filename: "finalizing.bin", state: "finalizing" }),
+      task({ id: "paused", filename: "paused.bin", state: "paused" }),
+      task({ id: "completed", filename: "completed.bin", state: "completed" }),
+    ];
+    mockDetailsIpc(downloads);
+    renderShell();
+
+    await screen.findByText("downloading.bin");
+    const listCallsBefore = invokeCommand.mock.calls.filter(
+      ([command]) => command === "downloads_list",
+    ).length;
+
+    await user.click(
+      screen.getByRole("button", { name: en["toolbar.pauseAll"] }),
+    );
+
+    await waitFor(() => {
+      expect(commandIds("downloads_pause")).toEqual([
+        "connecting",
+        "downloading",
+        "queued",
+      ]);
+    });
+    expect(commandIds("downloads_pause")).not.toContain("finalizing");
+    expect(commandIds("downloads_pause")).not.toContain("paused");
+    expect(commandIds("downloads_pause")).not.toContain("completed");
+
+    await waitFor(() => {
+      const listCalls = invokeCommand.mock.calls.filter(
+        ([command]) => command === "downloads_list",
+      ).length;
+      expect(listCalls).toBeGreaterThan(listCallsBefore);
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: en["toolbar.resumeAll"] }),
+    );
+
+    await waitFor(() => {
+      expect(commandIds("downloads_resume")).toEqual(["paused"]);
+    });
+  });
+
+  it("deletes a record only after the record confirmation is accepted", async () => {
+    const user = userEvent.setup();
+    mockDetailsIpc([selectedTask()]);
+    renderShell();
+
+    await selectFirstRow(user, "report.pdf");
+    await user.click(screen.getByRole("button", { name: /delete record/i }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      /file.*(keep|stays|remain|preserv)|(keep|preserve).*file/i,
+    );
+
+    await user.click(
+      within(dialog).getByRole("button", { name: /delete record/i }),
+    );
+
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith("downloads_delete_record", {
+        id: "task-1",
+      });
+    });
+    expect(commandIds("downloads_delete_file")).toEqual([]);
+  });
+
+  it("requires the file-deletion acknowledgement before calling the delete-file command", async () => {
+    const user = userEvent.setup();
+    mockDetailsIpc([selectedTask()]);
+    renderShell();
+
+    await selectFirstRow(user, "report.pdf");
+    await user.click(screen.getByRole("button", { name: /delete file/i }));
+
+    const dialog = await screen.findByRole("dialog");
+    const confirm = within(dialog).getByRole("button", {
+      name: /delete file/i,
+    });
+    expect(confirm).toBeDisabled();
+
+    await user.click(within(dialog).getByRole("checkbox"));
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith("downloads_delete_file", {
+        id: "task-1",
+      });
+    });
+    expect(commandIds("downloads_delete_record")).toEqual([]);
+  });
+
+  it("copies the stored redacted URL and reports clipboard failures", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const current = selectedTask();
+    mockDetailsIpc([current]);
+    renderShell();
+
+    await selectFirstRow(user, "report.pdf");
+    await user.click(screen.getByRole("button", { name: /copy (url|link)/i }));
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith(current.url);
+    });
+    expect(document.body).not.toHaveTextContent(/token=/i);
+
+    writeText.mockRejectedValueOnce(new Error("Clipboard permission denied."));
+    await user.click(screen.getByRole("button", { name: /copy (url|link)/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/clipboard|copy/i);
+  });
+
+  it("shows a typed error from an open action without crashing", async () => {
+    const user = userEvent.setup();
+    mockDetailsIpc([selectedTask()], {
+      downloads_open_file: {
+        ok: false as const,
+        error: { code: "file_missing", message: "The file is missing." },
+      },
+    });
+    renderShell();
+
+    await selectFirstRow(user, "report.pdf");
+    await user.click(screen.getByRole("button", { name: /open file/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/missing|could not|open/i);
+    expect(screen.getByText("report.pdf")).toBeInTheDocument();
   });
 });

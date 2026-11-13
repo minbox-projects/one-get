@@ -20,6 +20,7 @@ export type SegmentState = "pending" | "active" | "done" | "failed";
 export interface DownloadSummary {
   id: string;
   url: string;
+  finalUrl?: string | null;
   filename: string;
   destination: string | null;
   state: DownloadState;

@@ -5,7 +5,7 @@ import type { DownloadSummary } from "../../types/downloads";
 import { TaskRow } from "./TaskRow";
 import { VirtualList } from "./VirtualList";
 
-const ROW_HEIGHT = 84;
+const ROW_HEIGHT = 108;
 const DEFAULT_HEIGHT = 520;
 
 export interface TaskListProps {
@@ -13,6 +13,12 @@ export interface TaskListProps {
   ariaLabel: string;
   speedOf: (task: DownloadSummary) => number | null;
   renderActions?: (task: DownloadSummary) => ReactNode;
+  selectedId?: string | null;
+  onSelect?: (task: DownloadSummary) => void;
+  onPause?: (task: DownloadSummary) => void;
+  onResume?: (task: DownloadSummary) => void;
+  onCancel?: (task: DownloadSummary) => void;
+  onRetry?: (task: DownloadSummary) => void;
   height?: number;
 }
 
@@ -22,6 +28,12 @@ export function TaskList({
   ariaLabel,
   speedOf,
   renderActions,
+  selectedId,
+  onSelect,
+  onPause,
+  onResume,
+  onCancel,
+  onRetry,
   height = DEFAULT_HEIGHT,
 }: TaskListProps) {
   return (
@@ -35,6 +47,12 @@ export function TaskList({
           task={task}
           speed={speedOf(task)}
           actions={renderActions?.(task)}
+          selected={selectedId === task.id}
+          onSelect={onSelect}
+          onPause={onPause}
+          onResume={onResume}
+          onCancel={onCancel}
+          onRetry={onRetry}
         />
       )}
     />

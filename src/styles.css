@@ -1206,3 +1206,128 @@ body {
   margin: 0;
   font-weight: 600;
 }
+
+.og-task-row[data-selected="true"] {
+  background-color: color-mix(in srgb, var(--og-primary) 8%, transparent);
+}
+
+.og-task-row__filename {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.og-task-row__filename:hover {
+  color: var(--og-primary);
+}
+
+.og-task-row__filename:focus-visible {
+  outline: 2px solid var(--og-primary);
+  outline-offset: 2px;
+}
+
+.og-details__body {
+  display: grid;
+  gap: var(--og-space-3);
+  padding: 0 var(--og-space-4) var(--og-space-4);
+}
+
+.og-details__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--og-space-2);
+}
+
+.og-details__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: var(--og-space-2) var(--og-space-4);
+  margin: 0;
+}
+
+.og-details__row {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.og-details__label {
+  color: var(--og-text-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.og-details__value {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.875rem;
+}
+
+.og-details__url {
+  font-family: var(--og-font-mono);
+  font-size: 0.8125rem;
+}
+
+.og-details__error {
+  padding: var(--og-space-2) var(--og-space-3);
+  border: 1px solid color-mix(in srgb, var(--og-error) 45%, var(--og-border));
+  border-radius: var(--og-radius-control);
+  background-color: color-mix(in srgb, var(--og-error) 8%, transparent);
+}
+
+.og-details__error-code {
+  margin: 0;
+  font-family: var(--og-font-mono);
+  font-weight: 600;
+}
+
+.og-details__error-message {
+  margin: 0;
+  color: var(--og-text-muted);
+  font-size: 0.875rem;
+}
+
+.og-details__section-title {
+  margin: 0 0 var(--og-space-2);
+  font-size: 0.875rem;
+}
+
+.og-details__segments-status {
+  margin: 0;
+  color: var(--og-text-muted);
+  font-size: 0.8125rem;
+}
+
+.og-details__segment-list {
+  display: grid;
+  gap: var(--og-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.og-details__segment {
+  display: grid;
+  grid-template-columns: auto minmax(6rem, auto) minmax(4rem, 1fr) auto;
+  align-items: center;
+  gap: var(--og-space-2);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.og-details__segment-index {
+  font-weight: 600;
+}
+
+.og-details__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--og-space-2);
+}

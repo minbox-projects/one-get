@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { listDownloads } from "../../lib/downloads";
-import type { AppError } from "../../types/app";
+import {
+  cancelDownload,
+  deleteDownloadFile,
+  deleteDownloadRecord,
+  listDownloads,
+  pauseDownload,
+  resumeDownload,
+  retryDownload,
+} from "../../lib/downloads";
+import type { AppError, IpcResult } from "../../types/app";
 import type { DownloadSummary } from "../../types/downloads";
 
+import { taskActions } from "./controls";
 import type { SidebarView, SortDirection, SortKey } from "./filters";
 
 export interface UseDownloadsOptions {
@@ -17,7 +26,9 @@ interface Sample {
 
 /**
  * Loads task summaries and polls them at a bounded interval while the window
- * is visible. Speeds are derived from successive byte samples.
+ * is visible. Speeds are derived from successive byte samples. Per-task and
+ * bulk controls call the engine wrappers, refresh the list, and surface typed
+ * errors without discarding the current rows.
  */
 export function useDownloads({
   pollIntervalMs = 1000,
@@ -25,6 +36,7 @@ export function useDownloads({
   const [tasks, setTasks] = useState<DownloadSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<AppError | null>(null);
+  const [actionError, setActionError] = useState<AppError | null>(null);
   const [view, setView] = useState<SidebarView>("all");
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("createdAt");
@@ -69,6 +81,82 @@ export function useDownloads({
     setError(null);
     setLoading(false);
   }, []);
+
+  const runAction = useCallback(
+    async (operation: () => Promise<IpcResult<void>>) => {
+      const result = await operation();
+      if (!mountedRef.current) {
+        return;
+      }
+      setActionError(result.ok ? null : result.error);
+      await refresh();
+    },
+    [refresh],
+  );
+
+  const pauseTask = useCallback(
+    (id: string) => runAction(() => pauseDownload(id)),
+    [runAction],
+  );
+
+  const resumeTask = useCallback(
+    (id: string) => runAction(() => resumeDownload(id)),
+    [runAction],
+  );
+
+  const cancelTask = useCallback(
+    (id: string) => runAction(() => cancelDownload(id)),
+    [runAction],
+  );
+
+  const retryTask = useCallback(
+    (id: string) => runAction(() => retryDownload(id)),
+    [runAction],
+  );
+
+  const deleteRecord = useCallback(
+    (id: string) => runAction(() => deleteDownloadRecord(id)),
+    [runAction],
+  );
+
+  const deleteFile = useCallback(
+    (id: string) => runAction(() => deleteDownloadFile(id)),
+    [runAction],
+  );
+
+  const clearActionError = useCallback(() => setActionError(null), []);
+
+  const pauseAll = useCallback(async () => {
+    const eligible = tasks.filter((task) => taskActions(task).pause);
+    let lastError: AppError | null = null;
+    for (const task of eligible) {
+      const result = await pauseDownload(task.id);
+      if (!result.ok) {
+        lastError = result.error;
+      }
+    }
+    if (!mountedRef.current) {
+      return;
+    }
+    setActionError(lastError);
+    await refresh();
+  }, [tasks, refresh]);
+
+  const resumeAll = useCallback(async () => {
+    const eligible = tasks.filter((task) => taskActions(task).resume);
+    let lastError: AppError | null = null;
+    for (const task of eligible) {
+      const result = await resumeDownload(task.id);
+      if (!result.ok) {
+        lastError = result.error;
+      }
+    }
+    if (!mountedRef.current) {
+      return;
+    }
+    setActionError(lastError);
+    await refresh();
+  }, [tasks, refresh]);
 
   const speedOf = useCallback(
     (task: DownloadSummary): number | null =>
@@ -123,6 +211,8 @@ export function useDownloads({
     tasks,
     loading,
     error,
+    actionError,
+    clearActionError,
     view,
     setView,
     search,
@@ -133,5 +223,13 @@ export function useDownloads({
     setSortDirection,
     speedOf,
     refresh,
+    pauseTask,
+    resumeTask,
+    cancelTask,
+    retryTask,
+    deleteRecord,
+    deleteFile,
+    pauseAll,
+    resumeAll,
   };
 }

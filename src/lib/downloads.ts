@@ -9,6 +9,26 @@ import type {
 
 import { invokeCommand } from "./tauri";
 
+/**
+ * Returns the persistence-safe form of a task URL: userinfo, query and fragment
+ * are dropped so a token intentionally kept out of storage is never displayed
+ * or copied.
+ */
+export function redactStoredUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return raw
+      .replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]+@/i, "$1")
+      .replace(/[?#].*$/, "");
+  }
+}
+
 /** Lists the lightweight download summaries used by the task list. */
 export function listDownloads(): Promise<IpcResult<DownloadSummary[]>> {
   return invokeCommand<DownloadSummary[]>("downloads_list");

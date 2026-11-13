@@ -1,17 +1,25 @@
 import type { ReactNode } from "react";
 
 import { Badge } from "../../components/ui/Badge";
+import { Button } from "../../components/ui/Button";
 import { ProgressBar } from "../../components/ui/ProgressBar";
 import { useI18n } from "../../i18n";
 import type { DownloadSummary } from "../../types/downloads";
 
 import { categoryForFilename } from "./categories";
+import { taskActions } from "./controls";
 import { domainFromUrl, progressPercent } from "./format";
 
 export interface TaskRowProps {
   task: DownloadSummary;
   speed: number | null;
   actions?: ReactNode;
+  selected?: boolean;
+  onSelect?: (task: DownloadSummary) => void;
+  onPause?: (task: DownloadSummary) => void;
+  onResume?: (task: DownloadSummary) => void;
+  onCancel?: (task: DownloadSummary) => void;
+  onRetry?: (task: DownloadSummary) => void;
 }
 
 function remainingSeconds(task: DownloadSummary, speed: number | null): number | null {
@@ -25,8 +33,18 @@ function remainingSeconds(task: DownloadSummary, speed: number | null): number |
   return remaining / speed;
 }
 
-/** One task row showing state, metadata, progress and an optional action slot. */
-export function TaskRow({ task, speed, actions }: TaskRowProps) {
+/** One task row showing state, metadata, progress and state-aware controls. */
+export function TaskRow({
+  task,
+  speed,
+  actions,
+  selected = false,
+  onSelect,
+  onPause,
+  onResume,
+  onCancel,
+  onRetry,
+}: TaskRowProps) {
   const { t, formatBytes, formatNumber, formatSpeed, formatEta } = useI18n();
 
   const category = categoryForFilename(task.filename);
@@ -36,14 +54,24 @@ export function TaskRow({ task, speed, actions }: TaskRowProps) {
   const speedValue = formatSpeed(speed);
   const eta = formatEta(remainingSeconds(task, speed));
   const unknown = t("common.unknown");
+  const available = taskActions(task);
 
   return (
-    <div className="og-task-row">
+    <div
+      className="og-task-row"
+      data-selected={selected ? "true" : undefined}
+    >
       <div className="og-task-row__primary">
         <Badge tone={task.state === "failed" ? "danger" : "info"}>
           {t(`state.${task.state}`)}
         </Badge>
-        <span className="og-task-row__filename">{task.filename}</span>
+        <button
+          type="button"
+          className="og-task-row__filename"
+          onClick={() => onSelect?.(task)}
+        >
+          {task.filename}
+        </button>
         <span className="og-task-row__domain">{domain ?? unknown}</span>
         <span className="og-task-row__category">{t(`nav.${category}`)}</span>
       </div>
@@ -68,11 +96,10 @@ export function TaskRow({ task, speed, actions }: TaskRowProps) {
             {t("task.connections")}
           </span>{" "}
           <span className="og-task-row__metric-value">
-            {formatNumber(task.connections) ?? unknown}
+            {formatNumber(task.connections) ?? unknown}{" "}
           </span>
         </span>
       </div>
-      {" "}
 
       <div className="og-task-row__progress">
         <span className="og-task-row__percent">
@@ -84,7 +111,37 @@ export function TaskRow({ task, speed, actions }: TaskRowProps) {
         />
       </div>
 
-      {actions ? <div className="og-task-row__actions">{actions}</div> : null}
+      <div className="og-task-row__actions">
+        {actions}
+        <Button
+          variant="ghost"
+          disabled={!available.pause}
+          onClick={() => onPause?.(task)}
+        >
+          {t("task.pause")}
+        </Button>
+        <Button
+          variant="ghost"
+          disabled={!available.resume}
+          onClick={() => onResume?.(task)}
+        >
+          {t("task.resume")}
+        </Button>
+        <Button
+          variant="ghost"
+          disabled={!available.cancel}
+          onClick={() => onCancel?.(task)}
+        >
+          {t("task.cancel")}
+        </Button>
+        <Button
+          variant="ghost"
+          disabled={!available.retry}
+          onClick={() => onRetry?.(task)}
+        >
+          {t("task.retry")}
+        </Button>
+      </div>
     </div>
   );
 }

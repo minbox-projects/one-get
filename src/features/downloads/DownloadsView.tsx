@@ -20,6 +20,12 @@ export interface DownloadsViewProps {
   speedOf: (task: DownloadSummary) => number | null;
   ariaLabel: string;
   onRetry: () => void;
+  selectedId?: string | null;
+  onSelect?: (task: DownloadSummary) => void;
+  onPause?: (task: DownloadSummary) => void;
+  onResume?: (task: DownloadSummary) => void;
+  onCancel?: (task: DownloadSummary) => void;
+  onRetryTask?: (task: DownloadSummary) => void;
 }
 
 /**
@@ -36,6 +42,12 @@ export function DownloadsView({
   speedOf,
   ariaLabel,
   onRetry,
+  selectedId,
+  onSelect,
+  onPause,
+  onResume,
+  onCancel,
+  onRetryTask,
 }: DownloadsViewProps) {
   const { t } = useI18n();
 
@@ -89,6 +101,12 @@ export function DownloadsView({
       tasks={visibleTasks}
       ariaLabel={ariaLabel}
       speedOf={speedOf}
+      selectedId={selectedId}
+      onSelect={onSelect}
+      onPause={onPause}
+      onResume={onResume}
+      onCancel={onCancel}
+      onRetry={onRetryTask}
     />
   );
 }

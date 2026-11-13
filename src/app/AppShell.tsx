@@ -1,17 +1,27 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
 import { BatchDownloadDialog } from "../features/downloads/BatchDownloadDialog";
+import { DeleteConfirmDialog } from "../features/downloads/DeleteConfirmDialog";
+import type { DeleteMode } from "../features/downloads/DeleteConfirmDialog";
 import { DownloadsView } from "../features/downloads/DownloadsView";
 import { NewDownloadDialog } from "../features/downloads/NewDownloadDialog";
+import { TaskDetails } from "../features/downloads/TaskDetails";
 import type { SidebarView, SortDirection, SortKey } from "../features/downloads/filters";
 import { filterTasks, sidebarCounts } from "../features/downloads/filters";
 import { useDownloads } from "../features/downloads/useDownloads";
 import { useI18n } from "../i18n";
+import {
+  getDownloadSegments,
+  openDownloadFile,
+  openDownloadFolder,
+  redactStoredUrl,
+} from "../lib/downloads";
 import { invokeCommand } from "../lib/tauri";
 import type { AppError, Settings, Theme } from "../types/app";
+import type { DownloadSegment, DownloadSummary } from "../types/downloads";
 
 const FILTER_VIEWS: Array<{ view: SidebarView; key: string }> = [
   { view: "all", key: "nav.all" },
@@ -62,6 +72,12 @@ export function AppShell() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [newOpen, setNewOpen] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [segments, setSegments] = useState<DownloadSegment[]>([]);
+  const [segmentsLoading, setSegmentsLoading] = useState(false);
+  const [segmentsError, setSegmentsError] = useState<AppError | null>(null);
+  const [actionError, setActionError] = useState<AppError | null>(null);
+  const [deleteMode, setDeleteMode] = useState<DeleteMode | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -85,6 +101,35 @@ export function AppShell() {
       active = false;
     };
   }, [setLanguage]);
+
+  useEffect(() => {
+    if (selectedId === null) {
+      return;
+    }
+
+    let active = true;
+
+    void getDownloadSegments(selectedId).then((result) => {
+      if (!active) {
+        return;
+      }
+      if (result.ok) {
+        setSegments(Array.isArray(result.data) ? result.data : []);
+      } else {
+        setSegmentsError(result.error);
+      }
+      setSegmentsLoading(false);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [selectedId]);
+
+  const selectedTask = useMemo(
+    () => downloads.tasks.find((task) => task.id === selectedId) ?? null,
+    [downloads.tasks, selectedId],
+  );
 
   const counts = useMemo(() => sidebarCounts(downloads.tasks), [downloads.tasks]);
   const activeTasks = useMemo(
@@ -111,12 +156,82 @@ export function AppShell() {
         ? t("error.runtimeUnavailable")
         : t("error.settingsLoad");
 
+  const visibleActionError = actionError ?? downloads.actionError;
+
   const busy = loading || downloads.loading;
 
   const downloadDefaults = {
     destination: settings?.defaultDirectory ?? "",
     connections: settings?.defaultConnections ?? 8,
   };
+
+  const clearSelection = useCallback(() => {
+    setSelectedId(null);
+    setSegments([]);
+    setSegmentsError(null);
+    setSegmentsLoading(false);
+  }, []);
+
+  const handleSelect = useCallback((task: DownloadSummary) => {
+    setActionError(null);
+    setSegments([]);
+    setSegmentsError(null);
+    setSegmentsLoading(true);
+    setSelectedId(task.id);
+  }, []);
+
+  const handleOpenFile = useCallback(async (task: DownloadSummary) => {
+    setActionError(null);
+    const result = await openDownloadFile(task.id);
+    if (!result.ok) {
+      setActionError(result.error);
+    }
+  }, []);
+
+  const handleOpenFolder = useCallback(async (task: DownloadSummary) => {
+    setActionError(null);
+    const result = await openDownloadFolder(task.id);
+    if (!result.ok) {
+      setActionError(result.error);
+    }
+  }, []);
+
+  const handleCopyUrl = useCallback(
+    async (task: DownloadSummary) => {
+      setActionError(null);
+      try {
+        if (
+          typeof navigator === "undefined" ||
+          typeof navigator.clipboard?.writeText !== "function"
+        ) {
+          throw new Error("clipboard unavailable");
+        }
+        await navigator.clipboard.writeText(redactStoredUrl(task.url));
+      } catch {
+        setActionError({
+          code: "clipboard_unavailable",
+          message: t("details.copyFailed"),
+        });
+      }
+    },
+    [t],
+  );
+
+  const handleConfirmDelete = useCallback(() => {
+    if (deleteMode === null || selectedTask === null) {
+      return;
+    }
+    const id = selectedTask.id;
+    const mode = deleteMode;
+    setDeleteMode(null);
+    setActionError(null);
+    if (mode === "record") {
+      void downloads.deleteRecord(id);
+    } else {
+      void downloads.deleteFile(id);
+    }
+    clearSelection();
+  }, [clearSelection, deleteMode, downloads, selectedTask]);
 
   const renderSidebarItem = ({ view, key }: { view: SidebarView; key: string }) => (
     <li key={view}>
@@ -167,8 +282,18 @@ export function AppShell() {
             <Button variant="secondary" onClick={() => setBatchOpen(true)}>
               {t("toolbar.batch")}
             </Button>
-            <Button variant="secondary">{t("toolbar.pauseAll")}</Button>
-            <Button variant="secondary">{t("toolbar.resumeAll")}</Button>
+            <Button
+              variant="secondary"
+              onClick={() => void downloads.pauseAll()}
+            >
+              {t("toolbar.pauseAll")}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => void downloads.resumeAll()}
+            >
+              {t("toolbar.resumeAll")}
+            </Button>
             <div className="og-toolbar__search">
               <Input
                 label={t("toolbar.search")}
@@ -205,6 +330,12 @@ export function AppShell() {
             </p>
           ) : null}
 
+          {visibleActionError ? (
+            <p className="og-banner" role="alert">
+              {visibleActionError.message}
+            </p>
+          ) : null}
+
           <section
             className="og-list-region"
             aria-label={t("list.label")}
@@ -221,14 +352,40 @@ export function AppShell() {
               speedOf={downloads.speedOf}
               ariaLabel={t("list.label")}
               onRetry={() => void downloads.refresh()}
+              selectedId={selectedId}
+              onSelect={handleSelect}
+              onPause={(task) => void downloads.pauseTask(task.id)}
+              onResume={(task) => void downloads.resumeTask(task.id)}
+              onCancel={(task) => void downloads.cancelTask(task.id)}
+              onRetryTask={(task) => void downloads.retryTask(task.id)}
             />
           </section>
 
-          <details className="og-details">
+          <details className="og-details" open>
             <summary className="og-details__summary">
               {t("details.label")}
             </summary>
-            <p className="og-details__empty">{t("details.empty")}</p>
+            {selectedTask ? (
+              <TaskDetails
+                task={selectedTask}
+                segments={segments}
+                segmentsLoading={segmentsLoading}
+                segmentsError={segmentsError}
+                speed={speedOf(selectedTask)}
+                onOpenFile={(task) => void handleOpenFile(task)}
+                onOpenFolder={(task) => void handleOpenFolder(task)}
+                onCopyUrl={(task) => void handleCopyUrl(task)}
+                onPause={(task) => void downloads.pauseTask(task.id)}
+                onResume={(task) => void downloads.resumeTask(task.id)}
+                onCancel={(task) => void downloads.cancelTask(task.id)}
+                onRetry={(task) => void downloads.retryTask(task.id)}
+                onDeleteRecord={() => setDeleteMode("record")}
+                onDeleteFile={() => setDeleteMode("file")}
+                onClose={clearSelection}
+              />
+            ) : (
+              <p className="og-details__empty">{t("details.empty")}</p>
+            )}
           </details>
         </div>
       </div>
@@ -266,6 +423,20 @@ export function AppShell() {
           onAdded={() => {
             void downloads.refresh();
           }}
+        />
+      ) : null}
+      {deleteMode !== null && selectedTask !== null ? (
+        <DeleteConfirmDialog
+          key={selectedTask.id}
+          open
+          mode={deleteMode}
+          task={selectedTask}
+          onOpenChange={(open) => {
+            if (!open) {
+              setDeleteMode(null);
+            }
+          }}
+          onConfirm={handleConfirmDelete}
         />
       ) : null}
     </main>
