@@ -49,6 +49,7 @@ export interface BatchDownloadDialogProps {
   onOpenChange: (open: boolean) => void;
   defaults?: DownloadDefaults;
   onAdded?: () => void;
+  prefillUrls?: string[] | null;
 }
 
 /** Parses one URL per line, reporting invalid and in-batch duplicate lines. */
@@ -108,6 +109,7 @@ export function BatchDownloadDialog({
   onOpenChange,
   defaults,
   onAdded,
+  prefillUrls = null,
 }: BatchDownloadDialogProps) {
   const { t } = useI18n();
   const textareaId = useId();
@@ -115,7 +117,7 @@ export function BatchDownloadDialog({
   const defaultDestination = defaults?.destination ?? "";
   const defaultConnections = defaults?.connections ?? 8;
 
-  const [urls, setUrls] = useState("");
+  const [urls, setUrls] = useState(() => prefillUrls?.join("\n") ?? "");
   const [destination, setDestination] = useState(defaultDestination);
   const [connections, setConnections] = useState(String(defaultConnections));
   const [rateLimit, setRateLimit] = useState("");
@@ -219,6 +221,10 @@ export function BatchDownloadDialog({
       closeLabel={t("common.close")}
     >
       <form className="og-dialog__form" noValidate onSubmit={handleSubmit}>
+        {prefillUrls && prefillUrls.length > 0 ? (
+          <p className="og-prefill-note">{t("batch.browserPrefill")}</p>
+        ) : null}
+
         <div className="og-field">
           <label className="og-field__label" htmlFor={textareaId}>
             {t("batch.urls")}

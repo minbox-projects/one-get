@@ -110,6 +110,8 @@ const enUS = {
   "download.htmlRequired": "Confirm that you want to download an HTML page.",
   "download.probeFailed": "The probe failed. Check the URL and try again.",
   "download.addFailed": "The download could not be added.",
+  "download.browserPrefill":
+    "Captured from your browser. Review the values before starting.",
   "probe.error.http_error": "The server returned an error.",
   "probe.error.timeout": "The server did not respond in time.",
   "validation.url_required": "Enter a URL.",
@@ -137,6 +139,8 @@ const enUS = {
   "batch.lineInvalid": "Line {line}: {reason}",
   "batch.lineDuplicate": "Line {line}: duplicate URL skipped.",
   "batch.empty": "Enter at least one URL.",
+  "batch.browserPrefill":
+    "Captured from your browser. Review the URLs before adding them.",
   "task.pause": "Pause",
   "task.resume": "Resume",
   "task.cancel": "Cancel",

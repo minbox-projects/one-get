@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { I18nProvider } from "../../i18n";
+import { dictionaries, I18nProvider } from "../../i18n";
 import type { AddDownloadRequest } from "../../types/downloads";
 
 const { addDownload } = vi.hoisted(() => ({ addDownload: vi.fn() }));
@@ -10,6 +10,9 @@ const { addDownload } = vi.hoisted(() => ({ addDownload: vi.fn() }));
 vi.mock("../../lib/downloads", () => ({ addDownload }));
 
 import { BatchDownloadDialog, parseBatchUrls } from "./BatchDownloadDialog";
+
+const en = dictionaries["en-US"];
+const zh = dictionaries["zh-CN"];
 
 const BATCH = [
   "https://good.test/a.bin",
@@ -216,5 +219,54 @@ describe("BatchDownloadDialog", () => {
         within(container).queryAllByRole("alert").length > 0 ||
         container.querySelectorAll('[aria-invalid="true"]').length > 0,
     ).toBe(true);
+  });
+
+  it("prefills captured URLs, shows the browser note, and adds one task per URL after submit", async () => {
+    const user = userEvent.setup();
+    const urls = [
+      "https://good.test/captured-a.bin",
+      "https://good.test/captured-b.bin",
+    ];
+
+    expect(en["batch.browserPrefill"]).toBeTypeOf("string");
+    expect(zh["batch.browserPrefill"]).toBeTypeOf("string");
+
+    render(
+      <I18nProvider language="en-US">
+        <BatchDownloadDialog
+          open
+          onOpenChange={() => undefined}
+          prefillUrls={urls}
+        />
+      </I18nProvider>,
+    );
+
+    const container = screen.getByRole("dialog", { name: /batch/i });
+    expect(
+      within(container).getByLabelText(/urls|one url per line/i),
+    ).toHaveValue(urls.join("\n"));
+    expect(
+      within(container).getByText(en["batch.browserPrefill"]),
+    ).toBeInTheDocument();
+    expect(addDownload).not.toHaveBeenCalled();
+
+    await setField(
+      user,
+      within(container).getByLabelText(/destination/i),
+      "/tmp/batch",
+    );
+    await user.click(submitButton(container));
+
+    await waitFor(() => {
+      expect(addDownload).toHaveBeenCalledTimes(2);
+    });
+
+    const requests = addDownload.mock.calls.map(
+      ([request]) => request as AddDownloadRequest,
+    );
+    expect(requests.map((request) => request.url).sort()).toEqual(urls);
+    for (const request of requests) {
+      expect(request.extraHeaders).toEqual([]);
+    }
   });
 });

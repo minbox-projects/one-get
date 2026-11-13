@@ -1193,6 +1193,15 @@ body {
   color: var(--og-warning);
 }
 
+.og-prefill-note {
+  margin: 0;
+  padding: var(--og-space-2) var(--og-space-3);
+  border-radius: var(--og-radius-control);
+  background-color: color-mix(in srgb, var(--og-primary) 10%, transparent);
+  color: var(--og-text);
+  font-size: 0.8125rem;
+}
+
 .og-advanced__summary {
   cursor: pointer;
   color: var(--og-text);

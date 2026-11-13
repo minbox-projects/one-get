@@ -6,12 +6,14 @@ import type {
   DownloadSummary,
   ProbeResult,
 } from "../../src/types/downloads";
+import type { PendingPrefill } from "../../src/types/pairing";
 
 export interface MockIpcOptions {
   settings?: Partial<Settings>;
   status?: { readOnly: boolean; recovered: boolean };
   tasks?: DownloadSummary[];
   taskCount?: number;
+  pendingPrefills?: PendingPrefill[];
 }
 
 interface MockCall {
@@ -125,6 +127,7 @@ export async function installMockIpc(
         (typeof config.taskCount === "number"
           ? generatedTasks(config.taskCount)
           : defaultTasks),
+      pendingPrefills: [...(config.pendingPrefills ?? [])],
       files: new Set<string>(["report.pdf"]),
       calls: [] as MockCall[],
       counter: 0,
@@ -202,6 +205,22 @@ export async function installMockIpc(
           return { ...state.settings };
         case "settings_status":
           return { ...state.status };
+        case "pairing_take_pending_prefill":
+          return state.pendingPrefills.shift() ?? null;
+        case "pairing_status":
+          return {
+            available: true,
+            reason: null,
+            protocolVersion: 1,
+            code: null,
+            clients: [],
+          };
+        case "pairing_list_clients":
+          return [];
+        case "pairing_generate_code":
+          return { code: "12345678", expiresAtMs: baseTime + 600_000 };
+        case "pairing_revoke":
+          return true;
         case "settings_save": {
           const next = args.settings as Record<string, unknown>;
           state.settings = { ...state.settings, ...next } as Settings;

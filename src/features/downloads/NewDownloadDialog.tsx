@@ -19,11 +19,18 @@ export interface DownloadDefaults {
   connections: number;
 }
 
+export interface BrowserPrefill {
+  url: string;
+  filename: string | null;
+  headers: HeaderPair[];
+}
+
 export interface NewDownloadDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   defaults?: DownloadDefaults;
   onAdded?: () => void;
+  prefill?: BrowserPrefill | null;
 }
 
 export interface HeaderEditorProps {
@@ -107,6 +114,7 @@ export function NewDownloadDialog({
   onOpenChange,
   defaults,
   onAdded,
+  prefill = null,
 }: NewDownloadDialogProps) {
   const { t, formatBytes } = useI18n();
   const { state: probeState, probe, reset: resetProbe } = useProbe();
@@ -114,8 +122,10 @@ export function NewDownloadDialog({
   const defaultDestination = defaults?.destination ?? "";
   const defaultConnections = defaults?.connections ?? 8;
 
-  const [url, setUrl] = useState("");
-  const [filenameOverride, setFilenameOverride] = useState<string | null>(null);
+  const [url, setUrl] = useState(prefill?.url ?? "");
+  const [filenameOverride, setFilenameOverride] = useState<string | null>(
+    prefill?.filename ?? null,
+  );
   const [destinationOverride, setDestinationOverride] = useState<string | null>(
     null,
   );
@@ -126,7 +136,9 @@ export function NewDownloadDialog({
   const connections = connectionsOverride ?? String(defaultConnections);
   const [rateLimit, setRateLimit] = useState("");
   const [expectedSha256, setExpectedSha256] = useState("");
-  const [headers, setHeaders] = useState<HeaderPair[]>([]);
+  const [headers, setHeaders] = useState<HeaderPair[]>(
+    () => prefill?.headers ?? [],
+  );
   const [allowHtml, setAllowHtml] = useState(false);
   const [errors, setErrors] = useState<DownloadFormErrors>({});
   const [htmlRequired, setHtmlRequired] = useState(false);
@@ -243,6 +255,10 @@ export function NewDownloadDialog({
       closeLabel={t("common.close")}
     >
       <form className="og-dialog__form" noValidate onSubmit={handleSubmit}>
+        {prefill ? (
+          <p className="og-prefill-note">{t("download.browserPrefill")}</p>
+        ) : null}
+
         <Input
           label={t("download.url")}
           value={url}

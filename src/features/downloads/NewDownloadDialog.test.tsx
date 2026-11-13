@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { I18nProvider } from "../../i18n";
+import { dictionaries, I18nProvider } from "../../i18n";
 import type { AddDownloadRequest, ProbeResult } from "../../types/downloads";
 
 const { addDownload, probeDownload } = vi.hoisted(() => ({
@@ -14,7 +14,10 @@ const { addDownload, probeDownload } = vi.hoisted(() => ({
 vi.mock("../../lib/downloads", () => ({ addDownload, probeDownload }));
 
 import { NewDownloadDialog } from "./NewDownloadDialog";
+import type { BrowserPrefill } from "./NewDownloadDialog";
 
+const en = dictionaries["en-US"];
+const zh = dictionaries["zh-CN"];
 const HEX_64 = "b".repeat(64);
 
 function probe(overrides: Partial<ProbeResult> = {}): ProbeResult {
@@ -32,8 +35,10 @@ function probe(overrides: Partial<ProbeResult> = {}): ProbeResult {
 
 function DialogHarness({
   onAdded = () => undefined,
+  prefill = null,
 }: {
   onAdded?: () => void;
+  prefill?: BrowserPrefill | null;
 }) {
   const [open, setOpen] = useState(true);
 
@@ -44,6 +49,7 @@ function DialogHarness({
         onOpenChange={setOpen}
         defaults={{ destination: "/tmp/downloads", connections: 8 }}
         onAdded={onAdded}
+        prefill={prefill}
       />
     </I18nProvider>
   );
@@ -337,5 +343,59 @@ describe("NewDownloadDialog", () => {
     expect(container).not.toHaveTextContent(
       /url_required|filename_traversal|connections_range|destination_required/,
     );
+  });
+
+  it("prefills captured browser metadata, probes, and sends it only after submit", async () => {
+    const user = userEvent.setup();
+    const url = "https://files.example.test/media/stream";
+    const referer = "https://page.example.test/watch";
+    const prefill: BrowserPrefill = {
+      url,
+      filename: "captured-video.mp4",
+      headers: [["Referer", referer]],
+    };
+
+    expect(en["download.browserPrefill"]).toBeTypeOf("string");
+    expect(zh["download.browserPrefill"]).toBeTypeOf("string");
+
+    render(<DialogHarness prefill={prefill} />);
+    const container = dialog();
+
+    expect(within(container).getByLabelText(/^url$/i)).toHaveValue(url);
+    expect(within(container).getByLabelText(/filename/i)).toHaveValue(
+      "captured-video.mp4",
+    );
+    expect(
+      within(container).getByText(en["download.browserPrefill"]),
+    ).toBeInTheDocument();
+    expect(within(container).getByDisplayValue("Referer")).toBeInTheDocument();
+    expect(within(container).getByDisplayValue(referer)).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(probeDownload).toHaveBeenCalledWith({
+        url,
+        allowHtml: false,
+        extraHeaders: [["Referer", referer]],
+      });
+    });
+    await waitFor(() => {
+      expect(container).toHaveTextContent(/probed-file\.bin/);
+    });
+    expect(within(container).getByLabelText(/filename/i)).toHaveValue(
+      "captured-video.mp4",
+    );
+    expect(addDownload).not.toHaveBeenCalled();
+
+    await user.click(submitButton(container));
+
+    await waitFor(() => {
+      expect(addDownload).toHaveBeenCalledTimes(1);
+    });
+    const request = addDownload.mock.calls[0][0] as AddDownloadRequest;
+    expect(request).toMatchObject({
+      url,
+      filename: "captured-video.mp4",
+    });
+    expect(request.extraHeaders).toEqual([["Referer", referer]]);
   });
 });
