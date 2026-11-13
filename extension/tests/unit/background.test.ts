@@ -587,6 +587,44 @@ describe("runtime messages", () => {
     expect(pairedValue(record)).toBe(true);
   });
 
+  it("clears only the navigating frame's resources for a subframe SPA and still clears the tab for the top frame", async () => {
+    const { controller, session } = setUp({ token: TOKEN_A, settings: savedSettings() });
+    const topUrl = "https://cdn.test/files/top.mp4";
+    const subframeUrl = "https://cdn.test/files/embedded.mp4";
+    const laterSubframeUrl = "https://cdn.test/files/embedded-next.mp4";
+
+    await controller.observeResource(resourceInput(topUrl, { frameId: 0 }));
+    await controller.observeResource(
+      resourceInput(subframeUrl, { frameId: 1, pageUrl: "https://embed.test/player" }),
+    );
+
+    await controller.handleRuntimeMessage(
+      runtimeMessage({ type: "content/spa", pageUrl: "https://embed.test/next" }),
+      { tabId: 1, frameId: 1, pageUrl: "https://embed.test/next" },
+    );
+
+    expect(await controller.listResources(1)).toMatchObject([
+      { url: topUrl, frameId: 0 },
+    ]);
+    const afterSubframeSpa = JSON.stringify(session.store);
+    expect(afterSubframeSpa).toContain(topUrl);
+    expect(afterSubframeSpa).not.toContain(subframeUrl);
+
+    await controller.observeResource(
+      resourceInput(laterSubframeUrl, { frameId: 1, pageUrl: "https://embed.test/next" }),
+    );
+
+    await controller.handleRuntimeMessage(
+      runtimeMessage({ type: "content/spa", pageUrl: "https://page.test/next" }),
+      { tabId: 1, frameId: 0, pageUrl: "https://page.test/next" },
+    );
+
+    expect(await controller.listResources(1)).toEqual([]);
+    const afterTopFrameSpa = JSON.stringify(session.store);
+    expect(afterTopFrameSpa).not.toContain(topUrl);
+    expect(afterTopFrameSpa).not.toContain(laterSubframeUrl);
+  });
+
   it("sends one prefill capture for a listed resource", async () => {
     const events: string[] = [];
     const { controller, fetch } = setUp({

@@ -230,7 +230,7 @@ The popup and content scripts exchange typed messages with the background servic
 | `pairing:unpair` | Popup to worker | Request revocation, then clear the local token. |
 | `capture:prefill` | Popup to worker | Send one resource as a prefill capture. |
 | `content/resource` | Content to worker | Report an observed resource URL, MIME type, and size. |
-| `content/spa` | Content to worker | Reset the tab after an SPA route change. |
+| `content/spa` | Content to worker | Reset the tab after a top-frame SPA route change, or only the sending frame after a subframe one. |
 | `content/clear-frame` | Content to worker | Clear one frame's resources. |
 
 The service worker also listens to `webRequest.onResponseStarted`, `downloads.onDeterminingFilename`, `webNavigation.onCommitted`, and `tabs.onRemoved`. It never reads a response body. The MAIN-world script wraps `fetch`, `XMLHttpRequest`, `history.pushState`, `history.replaceState`, `popstate`, and `hashchange`; it posts `{ source: "oneget-inject", kind, payload }` to the isolated content script, which forwards only HTTP(S) resource metadata.

@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 # ai-workflow notes pairing --project <project-root> --write .ai-workflow/notes/implemented/architecture/2026-11-13-local-api-browser-capture.md
-2026-11-13-local-api-browser-capture.md: 14dccfb5371191610cdf19c97e6fe3a125d6ab1a
-2026-11-13-local-api-browser-capture.zh.md: 9686cf157fcc543f9839fde29c925d17df09ee76
+2026-11-13-local-api-browser-capture.md: 59a0df295200ecb31bfd280db4184cf395d44a48
+2026-11-13-local-api-browser-capture.zh.md: b2585b232eb3b9b4c8a2b6e978269a27670625d9

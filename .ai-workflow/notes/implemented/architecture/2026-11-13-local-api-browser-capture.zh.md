@@ -16,7 +16,7 @@ OneGet 此前只能在用户把 URL 复制到桌面应用后下载文件。浏�
 
 捕获协议版本 1 有两种意图。接管请求恰好包含一个条目，恰好创建一个桌面任务，并按令牌绑定的浏览器来源标识去重，因此重复事件（包括 service worker 重启后）会返回已有任务。扩展先发送捕获，再取消并擦除浏览器下载，因此桌面端不可达或捕获失败时浏览器下载保持完整。预填充包含一个或多个条目，不创建任务，并在内存中保存一个有界的待处理列表。桌面端通过事件加打开时拉取命令交付它，在另一个对话框打开时延后，在关闭对话框或重启时丢弃。只接受 URL、文件名、referer、MIME 类型、大小、文件种类，以及安全的 `Referer`、`User-Agent`、`Accept` 和 `Accept-Language` 头；Cookie、authorization 值、任意头、带凭据的 URL 和不支持的 kind 都会被拒绝。
 
-扩展把纯逻辑与浏览器运行时分开。`extension/shared` 保存无框架依赖的协议、分类、清单识别、分段过滤、页面归属、有界存储、设置校验、消息和双语文案，因此这些规则无需浏览器即可单元测试。`extension/chromium` 保存 MV3 清单、service worker、隔离内容脚本与覆盖层，以及 MAIN-world 观察器；`extension/popup` 保存资源、配对和设置视图。MAIN-world 脚本必须包装页面的 `fetch`、XHR 和历史 API，才能看到不会到达 `webRequest` 的请求，但它没有扩展权限，只向隔离内容脚本发送 URL、MIME 类型和大小元数据。隔离脚本拥有所有特权行为和覆盖层。
+扩展把纯逻辑与浏览器运行时分开。`extension/shared` 保存无框架依赖的协议、分类、清单识别、分段过滤、页面归属、有界存储、设置校验和双语文案，因此这些规则无需浏览器即可单元测试。`extension/chromium` 保存 MV3 清单、service worker、隔离内容脚本与覆盖层，以及 MAIN-world 观察器；`extension/popup` 保存资源、配对和设置视图。MAIN-world 脚本必须包装页面的 `fetch`、XHR 和历史 API，才能看到不会到达 `webRequest` 的请求，但它没有扩展权限，只向隔离内容脚本发送 URL、MIME 类型和大小元数据。隔离脚本拥有所有特权行为和覆盖层。
 
 资源数据保持有界且仅限会话。每标签页存储按去掉 fragment 的 URL 去重，每标签页最多 500 个条目、最多 50 个标签页，并在 frame 导航时清除该 frame、在标签页或 SPA 导航时清除该标签页、在关闭时清除该标签页的全部内容。service worker 重启后，后台会从有界的 `chrome.storage.session` 快照恢复。配对令牌和设置是唯一持久的扩展数据，位于 `chrome.storage.local`。分类先按文件名扩展名、再按 MIME 类型推导类别。HLS 和 DASH 清单会列出但永不接管，也永不为了解析而抓取；`.ts`、`.m4s`、`.m4f`、`.cmfv`、`.cmfa`、`init.mp4` 和媒体 `videoplayback` 分段 URL 会被过滤。接管还会遵循启用状态、类别开关、精确或子域黑名单主机、隐身与扩展自身发起的下载、非 HTTP URL，以及不适用于未知大小的最小大小限制。
 
