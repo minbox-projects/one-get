@@ -3,7 +3,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A source of epoch-millisecond wall-clock time.
-pub trait Clock {
+pub trait Clock: Send + Sync {
     /// Current time in milliseconds since the Unix epoch.
     fn now_ms(&self) -> i64;
 }

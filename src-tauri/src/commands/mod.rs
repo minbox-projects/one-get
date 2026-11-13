@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod downloads;
+pub mod pairing;
 
 /// Tauri command wrappers registered with the runtime.
 pub mod ipc {
@@ -9,12 +10,13 @@ pub mod ipc {
 
     use tauri::State;
 
+    use crate::api::desktop::PendingPrefill;
     use crate::app_state::AppState;
     use crate::config::Settings;
     use crate::error::AppError;
     use crate::platform::deeplink::DeepLinkEvent;
 
-    use super::{app, downloads};
+    use super::{app, downloads, pairing};
 
     async fn run_blocking<T, F>(task: F) -> Result<T, AppError>
     where
@@ -214,5 +216,46 @@ pub mod ipc {
     ) -> Result<(), AppError> {
         let state = Arc::clone(state.inner());
         run_blocking(move || downloads::downloads_open_folder(&state, &id)).await
+    }
+
+    #[tauri::command]
+    pub async fn pairing_status(
+        state: State<'_, Arc<AppState>>,
+    ) -> Result<pairing::PairingStatus, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || pairing::pairing_status(&state)).await
+    }
+
+    #[tauri::command]
+    pub async fn pairing_generate_code(
+        state: State<'_, Arc<AppState>>,
+    ) -> Result<pairing::PairingCodeView, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || pairing::pairing_generate_code(&state)).await
+    }
+
+    #[tauri::command]
+    pub async fn pairing_list_clients(
+        state: State<'_, Arc<AppState>>,
+    ) -> Result<Vec<pairing::PairedClientView>, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || pairing::pairing_list_clients(&state)).await
+    }
+
+    #[tauri::command]
+    pub async fn pairing_revoke(
+        state: State<'_, Arc<AppState>>,
+        client_id: String,
+    ) -> Result<bool, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || pairing::pairing_revoke(&state, &client_id)).await
+    }
+
+    #[tauri::command]
+    pub async fn pairing_take_pending_prefill(
+        state: State<'_, Arc<AppState>>,
+    ) -> Result<Option<PendingPrefill>, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || pairing::pairing_take_pending_prefill(&state)).await
     }
 }
