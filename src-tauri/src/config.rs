@@ -20,7 +20,7 @@ use crate::error::AppError;
 use crate::logging::LogLevel;
 
 /// The settings schema understood by this build.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -37,6 +37,32 @@ pub enum Theme {
     Dark,
 }
 
+/// Interface language preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Language {
+    /// Follow the operating-system language; the default.
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    /// Simplified Chinese.
+    #[serde(rename = "zh-CN")]
+    ZhCn,
+    /// American English.
+    #[serde(rename = "en-US")]
+    EnUs,
+}
+
+/// What the main window's close button does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CloseBehavior {
+    /// Hide the window and keep running in the tray; the default.
+    #[default]
+    Tray,
+    /// Quit the application.
+    Quit,
+}
+
 /// Persisted settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +73,18 @@ pub struct Settings {
     pub theme: Theme,
     /// Minimum log severity.
     pub log_level: LogLevel,
+    /// Interface language preference.
+    pub language: Language,
+    /// Main-window close behavior.
+    pub close_behavior: CloseBehavior,
+    /// Default directory for new downloads.
+    pub default_directory: Option<PathBuf>,
+    /// Default parallel connection count for new downloads.
+    pub default_connections: u32,
+    /// Maximum number of concurrently running tasks.
+    pub max_concurrent_tasks: u32,
+    /// Optional global download rate limit in bytes per second.
+    pub global_rate_limit: Option<u64>,
 }
 
 impl Default for Settings {
@@ -55,6 +93,12 @@ impl Default for Settings {
             schema_version: CURRENT_SCHEMA_VERSION,
             theme: Theme::System,
             log_level: LogLevel::Info,
+            language: Language::System,
+            close_behavior: CloseBehavior::Tray,
+            default_directory: None,
+            default_connections: 8,
+            max_concurrent_tasks: 3,
+            global_rate_limit: None,
         }
     }
 }
@@ -65,6 +109,7 @@ pub struct SettingsStore {
     settings: Settings,
     extras: Map<String, Value>,
     read_only: bool,
+    recovered: bool,
 }
 
 impl SettingsStore {
@@ -98,14 +143,34 @@ impl SettingsStore {
                 settings: Settings::default(),
                 extras: Map::new(),
                 read_only: true,
+                recovered: false,
             });
         }
 
         let theme = parse_theme(object.get("theme"));
         let log_level = parse_log_level(object.get("logLevel"));
-        let schema_version = schema_version.max(1) as u32;
+        let language = parse_language(object.get("language"));
+        let close_behavior = parse_close_behavior(object.get("closeBehavior"));
+        let default_directory = parse_directory(object.get("defaultDirectory"));
+        let default_connections = parse_u32(object.get("defaultConnections"), 8);
+        let max_concurrent_tasks = parse_u32(object.get("maxConcurrentTasks"), 3);
+        let global_rate_limit = object.get("globalRateLimit").and_then(Value::as_u64);
 
-        for key in ["schemaVersion", "theme", "logLevel"] {
+        // Older documents migrate in memory to the current schema. The file is
+        // only rewritten when the caller saves, which preserves unknown extras.
+        let schema_version = CURRENT_SCHEMA_VERSION;
+
+        for key in [
+            "schemaVersion",
+            "theme",
+            "logLevel",
+            "language",
+            "closeBehavior",
+            "defaultDirectory",
+            "defaultConnections",
+            "maxConcurrentTasks",
+            "globalRateLimit",
+        ] {
             object.remove(key);
         }
 
@@ -115,9 +180,16 @@ impl SettingsStore {
                 schema_version,
                 theme,
                 log_level,
+                language,
+                close_behavior,
+                default_directory,
+                default_connections,
+                max_concurrent_tasks,
+                global_rate_limit,
             },
             extras: object,
             read_only: false,
+            recovered: false,
         })
     }
 
@@ -129,6 +201,11 @@ impl SettingsStore {
     /// Whether the file came from a newer schema and must not be overwritten.
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Whether corrupt input was backed up and defaults were loaded instead.
+    pub fn is_recovered(&self) -> bool {
+        self.recovered
     }
 
     /// Persist `settings`, preserving unknown top-level fields.
@@ -169,6 +246,7 @@ impl SettingsStore {
             settings,
             extras: Map::new(),
             read_only: false,
+            recovered: false,
         })
     }
 
@@ -176,7 +254,9 @@ impl SettingsStore {
         let backup = corrupt_backup_path(&path);
         fs::write(&backup, original)
             .map_err(|error| AppError::io_error("back up corrupt settings", error))?;
-        Self::create_defaults(path)
+        let mut store = Self::create_defaults(path)?;
+        store.recovered = true;
+        Ok(store)
     }
 }
 
@@ -196,6 +276,35 @@ fn parse_log_level(value: Option<&Value>) -> LogLevel {
         Some(text) if text.eq_ignore_ascii_case("trace") => LogLevel::Trace,
         _ => LogLevel::Info,
     }
+}
+
+fn parse_language(value: Option<&Value>) -> Language {
+    match value.and_then(Value::as_str) {
+        Some(text) if text.eq_ignore_ascii_case("zh-CN") => Language::ZhCn,
+        Some(text) if text.eq_ignore_ascii_case("en-US") => Language::EnUs,
+        _ => Language::System,
+    }
+}
+
+fn parse_close_behavior(value: Option<&Value>) -> CloseBehavior {
+    match value.and_then(Value::as_str) {
+        Some(text) if text.eq_ignore_ascii_case("quit") => CloseBehavior::Quit,
+        _ => CloseBehavior::Tray,
+    }
+}
+
+fn parse_directory(value: Option<&Value>) -> Option<PathBuf> {
+    value
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(PathBuf::from)
+}
+
+fn parse_u32(value: Option<&Value>, fallback: u32) -> u32 {
+    value
+        .and_then(Value::as_u64)
+        .and_then(|raw| u32::try_from(raw).ok())
+        .unwrap_or(fallback)
 }
 
 fn corrupt_backup_path(path: &Path) -> PathBuf {

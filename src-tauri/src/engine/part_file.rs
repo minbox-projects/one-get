@@ -112,7 +112,12 @@ impl PartFile {
     /// a sparse allocation and reports whether it succeeded. An unknown total
     /// leaves the file empty until bytes arrive.
     pub fn create(cap: &CapDir, filename: &str, total: Option<u64>) -> Result<Self, EngineError> {
-        let name = Self::part_name(filename);
+        Self::create_named(cap, &Self::part_name(filename), total)
+    }
+
+    /// Create or reopen a part file under an explicit persisted part name.
+    pub fn create_named(cap: &CapDir, name: &str, total: Option<u64>) -> Result<Self, EngineError> {
+        let name = name.to_string();
         let file = cap.open_rw_create(&name).map_err(platform_error)?;
         let preallocation = match total {
             Some(len) => cap
@@ -130,7 +135,12 @@ impl PartFile {
 
     /// Open an existing part file without creating it.
     pub fn open(cap: &CapDir, filename: &str) -> Result<Self, EngineError> {
-        let name = Self::part_name(filename);
+        Self::open_named(cap, &Self::part_name(filename))
+    }
+
+    /// Open an existing part file under an explicit persisted part name.
+    pub fn open_named(cap: &CapDir, name: &str) -> Result<Self, EngineError> {
+        let name = name.to_string();
         let file = cap.open_rw(&name).map_err(platform_error)?;
         Ok(Self {
             file,

@@ -2,29 +2,130 @@
 
 use std::borrow::Borrow;
 
-use rusqlite::{params, OptionalExtension, Row};
+use rusqlite::{params, OptionalExtension, Row, Transaction, TransactionBehavior};
 
 use super::db::now_ms;
 use super::types::{SegmentProgressInput, Task};
 use super::Database;
 use crate::engine::error::EngineError;
+use crate::engine::part_file::PartFile;
 use crate::engine::state::TaskState;
+use crate::platform::files::CapDir;
 
 const TASK_COLUMNS: &str = "id, url, filename, part_path, state, downloaded_bytes, \
      total_bytes, expected_sha256, actual_sha256, etag, last_modified, error_code, error_message, \
-     created_at_ms, updated_at_ms, connections";
+     created_at_ms, updated_at_ms, connections, destination, completed_at_ms, final_url";
 
 impl Database {
     /// Insert a new queued task and return its identifier.
     pub fn create_task(&self, url: &str, filename: &str) -> Result<String, EngineError> {
+        self.create_task_at(url, filename, None)
+    }
+
+    /// Insert a new queued task with an optional per-task destination.
+    pub fn create_task_at(
+        &self,
+        url: &str,
+        filename: &str,
+        destination: Option<&str>,
+    ) -> Result<String, EngineError> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_ms();
         self.conn.execute(
-            "INSERT INTO tasks (id, url, filename, state, downloaded_bytes, created_at_ms, updated_at_ms) \
-             VALUES (?1, ?2, ?3, 'queued', 0, ?4, ?4)",
-            params![id, url, filename, now],
+            "INSERT INTO tasks \
+                 (id, url, filename, destination, state, downloaded_bytes, created_at_ms, updated_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, 'queued', 0, ?5, ?5)",
+            params![id, url, filename, destination, now],
         )?;
         Ok(id)
+    }
+
+    /// Insert a new queued task with a collision-free part name.
+    ///
+    /// Conflict detection, part-name choice, and insertion share one immediate
+    /// SQLite transaction, so two engines adding the same filename and
+    /// destination cannot both claim the legacy `<filename>.oneget.part` name.
+    /// A stored row without a destination is compared through the engine's
+    /// default directory. Any same-filename task in the effective destination
+    /// that is not completed or cancelled conflicts, as does a completed or
+    /// cancelled task that still owns a part file.
+    pub fn create_task_with_part(
+        &self,
+        url: &str,
+        filename: &str,
+        destination: Option<&str>,
+        default_destination: &str,
+    ) -> Result<(String, String), EngineError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = now_ms();
+        let effective_destination = destination.unwrap_or(default_destination);
+        let transaction = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+
+        let collides = {
+            let mut statement = transaction.prepare(
+                "SELECT filename, state, part_path, destination \
+                 FROM tasks WHERE filename = ?1",
+            )?;
+            let rows = statement.query_map(params![filename], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?;
+            let mut collides = false;
+            for row in rows {
+                let (other_filename, other_state, other_part_path, other_destination) = row?;
+                let other_effective = other_destination.as_deref().unwrap_or(default_destination);
+                if other_effective != effective_destination {
+                    continue;
+                }
+                let Some(other_state) = TaskState::parse(&other_state) else {
+                    continue;
+                };
+                if !matches!(other_state, TaskState::Completed | TaskState::Cancelled)
+                    || part_exists(
+                        effective_destination,
+                        other_part_path.as_deref(),
+                        &other_filename,
+                    )
+                {
+                    collides = true;
+                    break;
+                }
+            }
+            collides
+        };
+
+        let part_name = if collides {
+            format!(
+                "{filename}.{}.oneget.part",
+                id.chars().take(8).collect::<String>()
+            )
+        } else {
+            PartFile::part_name(filename)
+        };
+
+        transaction.execute(
+            "INSERT INTO tasks \
+                 (id, url, filename, part_path, destination, state, downloaded_bytes, created_at_ms, updated_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'queued', 0, ?6, ?6)",
+            params![id, url, filename, part_name, destination, now],
+        )?;
+        transaction.commit()?;
+        Ok((id, part_name))
+    }
+
+    /// Remove one task; its segments cascade through the foreign key.
+    pub fn delete_task(&self, id: &str) -> Result<(), EngineError> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            return Err(task_not_found());
+        }
+        Ok(())
     }
 
     /// Look up one task by identifier.
@@ -369,7 +470,7 @@ impl Database {
 
         let changed = self.conn.execute(
             "UPDATE tasks SET state = 'completed', actual_sha256 = ?1, \
-             error_code = NULL, error_message = NULL, updated_at_ms = ?2 \
+             completed_at_ms = ?2, error_code = NULL, error_message = NULL, updated_at_ms = ?2 \
              WHERE id = ?3 AND state = 'finalizing'",
             params![hash, now_ms(), id],
         )?;
@@ -377,6 +478,18 @@ impl Database {
             return Err(EngineError::invalid_state(
                 "only a finalizing task can be completed",
             ));
+        }
+        Ok(())
+    }
+
+    /// Record the redacted final URL discovered after redirects.
+    pub fn record_final_url(&self, id: &str, url: &str) -> Result<(), EngineError> {
+        let changed = self.conn.execute(
+            "UPDATE tasks SET final_url = ?1, updated_at_ms = ?2 WHERE id = ?3",
+            params![url, now_ms(), id],
+        )?;
+        if changed == 0 {
+            return Err(task_not_found());
         }
         Ok(())
     }
@@ -392,6 +505,16 @@ impl Database {
         }
         Ok(())
     }
+}
+
+fn part_exists(destination: &str, part_path: Option<&str>, filename: &str) -> bool {
+    let name = part_path
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| PartFile::part_name(filename));
+    CapDir::open(std::path::Path::new(destination))
+        .map(|cap| cap.exists(&name))
+        .unwrap_or(false)
 }
 
 fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
@@ -417,6 +540,9 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         created_at_ms: row.get(13)?,
         updated_at_ms: row.get(14)?,
         connections: read_u32(row, 15, "connections")?,
+        destination: row.get(16)?,
+        completed_at_ms: row.get(17)?,
+        final_url: row.get(18)?,
     })
 }
 

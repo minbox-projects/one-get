@@ -20,8 +20,14 @@ import type {
 } from "../../types/app";
 
 const DEFAULT_SETTINGS: Settings = {
-  schemaVersion: 1,
+  schemaVersion: 2,
+  language: "system",
   theme: "system",
+  closeBehavior: "tray",
+  defaultDirectory: null,
+  defaultConnections: 8,
+  maxConcurrentTasks: 3,
+  globalRateLimit: null,
   logLevel: "info",
 };
 

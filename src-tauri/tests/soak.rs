@@ -121,6 +121,7 @@ fn make_spec(
         allow_html: false,
         expected_sha256: Some(expected_sha256),
         extra_headers: Vec::new(),
+        destination: None,
     }
 }
 

@@ -1113,3 +1113,84 @@ fn kill_and_restart_harness_recovers_with_bounded_redownload_and_no_orphans() {
         "no orphan requests should be observed after restart completes"
     );
 }
+
+#[tokio::test]
+async fn recovery_uses_the_persisted_per_task_destination_instead_of_the_engine_default() {
+    let body = pattern_bytes(83, 1024 * 1024);
+    let server = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        range_mode: RangeMode::HonorRange,
+        etag: Some("\"etag-custom-destination\"".to_string()),
+        last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_string()),
+        ..Default::default()
+    });
+    let url = server.url("/recover-custom-destination.bin");
+
+    let task_dest = tempdir().expect("task destination");
+    let default_dest = tempdir().expect("default destination");
+    let store_dir = tempdir().expect("store");
+    let filename = "recover-custom-destination.bin";
+
+    let store = open_store_dir(store_dir.path());
+    let destination = task_dest
+        .path()
+        .to_str()
+        .expect("task destination is valid UTF-8");
+    let task_id = store
+        .create_task_at(&url, filename, Some(destination))
+        .expect("create task with a custom destination");
+
+    prepare_downloading_task_with_partial_segments(
+        &store,
+        task_dest.path(),
+        &task_id,
+        filename,
+        &body,
+        Some("\"etag-custom-destination\""),
+        Some("Wed, 21 Oct 2015 07:28:00 GMT"),
+        2,
+        2,
+        128 * 1024,
+    )
+    .await;
+    drop(store);
+
+    let engine = make_engine(open_store_dir(store_dir.path()), default_dest.path());
+    engine.recover().expect("recover the interrupted task");
+    timeout(WAIT_TIMEOUT, engine.run())
+        .await
+        .expect("engine run timed out")
+        .expect("engine run failed");
+
+    let store_after = open_store_dir(store_dir.path());
+    let state = wait_for_terminal_async(&store_after, &task_id, WAIT_TIMEOUT).await;
+    assert_eq!(
+        state,
+        TaskState::Completed,
+        "the recovered task must complete"
+    );
+
+    let final_path = task_dest.path().join(filename);
+    assert!(
+        final_path.exists(),
+        "the recovered final file must stay in the persisted destination"
+    );
+    assert_eq!(
+        read_file(&final_path),
+        body,
+        "the recovered final file bytes must match the fixture"
+    );
+    assert!(
+        !default_dest.path().join(filename).exists(),
+        "recovery must not resume into the engine default destination"
+    );
+    let part_name = PartFile::part_name(filename);
+    assert!(
+        !default_dest.path().join(&part_name).exists(),
+        "recovery must not create a part in the engine default destination"
+    );
+    assert!(
+        !task_dest.path().join(&part_name).exists(),
+        "the part file must be removed after completion"
+    );
+}

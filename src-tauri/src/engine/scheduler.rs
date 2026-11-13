@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -20,7 +20,9 @@ use reqwest::Client;
 use tokio::sync::Notify;
 
 use crate::logging::{LogLevel, Logger};
-use crate::platform::{current_target, sanitize_filename};
+use crate::platform::opener::open_target;
+use crate::platform::PlatformError;
+use crate::platform::{current_target, sanitize_filename, CapDir};
 use crate::store::types::Task;
 use crate::store::Database;
 
@@ -30,9 +32,9 @@ use super::http::{self, ProxyConfig};
 use super::rate_limit::RateLimiter;
 use super::state::TaskState;
 use super::worker::{
-    cancel_task, download_task_with_network, finalize_task, load_task, mark_failed, part_exists,
-    part_missing, persist_pause, remote_metadata, DownloadSpec, NetworkContext, TaskControl,
-    TaskRunOutcome,
+    cancel_task, download_task_with_network, finalize_task, find_completed_final, load_task,
+    mark_failed, part_exists_for_task, part_missing, persist_pause, remote_metadata,
+    task_part_name, DownloadSpec, NetworkContext, TaskControl, TaskRunOutcome,
 };
 
 /// How long the scheduler waits for newly added work before it stops.
@@ -80,6 +82,7 @@ pub struct Engine {
     global_rate: Mutex<Option<Arc<RateLimiter>>>,
     task_rates: Mutex<HashMap<String, Arc<RateLimiter>>>,
     logger: Mutex<Option<Arc<Logger>>>,
+    startup_done: AtomicBool,
 }
 
 impl Engine {
@@ -98,6 +101,7 @@ impl Engine {
             global_rate: Mutex::new(None),
             task_rates: Mutex::new(HashMap::new()),
             logger: Mutex::new(None),
+            startup_done: AtomicBool::new(false),
         }
     }
 
@@ -192,9 +196,23 @@ impl Engine {
         http::validate_extra_headers(&spec.extra_headers)?;
         let mut spec = spec;
         spec.filename = sanitize_filename(&spec.filename, current_target());
+        let destination = self.resolve_destination(spec.destination.as_deref())?;
+        let stored_destination = destination
+            .to_str()
+            .ok_or_else(|| invalid_destination("the destination path is not valid UTF-8"))?;
 
         let stored_url = http::storage_url(&spec.url);
-        let id = self.store.create_task(&stored_url, &spec.filename)?;
+        let default_destination = std::fs::canonicalize(&self.dest_dir)
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_string))
+            .or_else(|| self.dest_dir.to_str().map(str::to_string))
+            .unwrap_or_default();
+        let (id, _part_name) = self.store.create_task_with_part(
+            &stored_url,
+            &spec.filename,
+            Some(stored_destination),
+            &default_destination,
+        )?;
         self.store.record_connections(&id, spec.connections)?;
         if let Some(expected) = spec.expected_sha256.as_deref() {
             self.store.record_expected_sha256(&id, expected)?;
@@ -206,12 +224,58 @@ impl Engine {
             .collect();
         self.store.record_header_names(&id, &header_names)?;
 
+        spec.destination = Some(destination);
         self.specs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(id.clone(), spec);
         self.notify.notify_one();
         Ok(id)
+    }
+
+    /// Resolve and validate the requested destination directory.
+    ///
+    /// The directory must already exist and be writable, so a task can never be
+    /// persisted with a destination that cannot receive its part file.
+    fn resolve_destination(
+        &self,
+        requested: Option<&std::path::Path>,
+    ) -> Result<PathBuf, EngineError> {
+        let requested = requested
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| self.dest_dir.clone());
+        let canonical = std::fs::canonicalize(&requested)
+            .map_err(|_| invalid_destination("the destination directory does not exist"))?;
+        let metadata = std::fs::metadata(&canonical)
+            .map_err(|_| invalid_destination("the destination directory cannot be read"))?;
+        if !metadata.is_dir() {
+            return Err(invalid_destination("the destination is not a directory"));
+        }
+
+        let probe = canonical.join(format!(".oneget-write-probe-{}", uuid::Uuid::new_v4()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(file) => {
+                drop(file);
+                let _ = std::fs::remove_file(&probe);
+            }
+            Err(_) => {
+                return Err(invalid_destination(
+                    "the destination directory is not writable",
+                ));
+            }
+        }
+        Ok(canonical)
+    }
+
+    fn destination_for(&self, task: &Task) -> PathBuf {
+        task.destination
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.dest_dir.clone())
     }
 
     /// Change the concurrency limit without restarting the engine.
@@ -232,9 +296,10 @@ impl Engine {
         let mut report = RecoveryReport::default();
 
         for task in self.store.list_tasks()? {
+            let destination = self.destination_for(&task);
             match task.state {
                 TaskState::Connecting | TaskState::Downloading => {
-                    if part_exists(&self.dest_dir, &task.filename) {
+                    if part_exists_for_task(&destination, &task) {
                         self.store
                             .transition_task(&task.id, task.state, TaskState::Queued)?;
                         report.requeued += 1;
@@ -244,14 +309,14 @@ impl Engine {
                     }
                 }
                 TaskState::Finalizing => {
-                    if finalize_task(&self.store, &task.id, &self.dest_dir, None).is_ok() {
+                    if finalize_task(&self.store, &task.id, &destination, None).is_ok() {
                         report.finalized += 1;
                     } else {
                         report.failed += 1;
                     }
                 }
                 TaskState::Cancelled => {
-                    let _ = cancel_task(&self.store, &task.id, &self.dest_dir);
+                    let _ = cancel_task(&self.store, &task.id, &destination);
                     report.cancelled += 1;
                 }
                 TaskState::Paused => report.paused += 1,
@@ -275,7 +340,8 @@ impl Engine {
             if task.state != TaskState::Paused {
                 continue;
             }
-            if !part_exists(&self.dest_dir, &task.filename) {
+            let destination = self.destination_for(&task);
+            if !part_exists_for_task(&destination, &task) {
                 mark_failed(&self.store, &task.id, part_missing());
                 continue;
             }
@@ -313,8 +379,11 @@ impl Engine {
     /// lets a caller add work immediately after the queue drains, so
     /// pause-then-add and retry flows do not need a new run call.
     pub async fn run(&self) -> Result<(), EngineError> {
-        self.recover()?;
-        self.revalidate_paused().await?;
+        if !self.startup_done.load(Ordering::SeqCst) {
+            self.recover()?;
+            self.revalidate_paused().await?;
+            self.startup_done.store(true, Ordering::SeqCst);
+        }
 
         let mut active: FuturesUnordered<TaskFuture<'_>> = FuturesUnordered::new();
 
@@ -398,9 +467,10 @@ impl Engine {
     /// Cancel a task and remove only its own part file.
     pub async fn cancel(&self, id: &str) -> Result<(), EngineError> {
         let task = load_task(&self.store, id)?;
+        let destination = self.destination_for(&task);
         match task.state {
             TaskState::Queued | TaskState::Paused | TaskState::Failed | TaskState::Finalizing => {
-                cancel_task(&self.store, id, &self.dest_dir)
+                cancel_task(&self.store, id, &destination)
             }
             TaskState::Connecting | TaskState::Downloading => match self.existing_control(id) {
                 Some(control) => {
@@ -408,13 +478,109 @@ impl Engine {
                     self.notify.notify_one();
                     self.wait_for(id, TaskState::Cancelled).await
                 }
-                None => cancel_task(&self.store, id, &self.dest_dir),
+                None => cancel_task(&self.store, id, &destination),
             },
             TaskState::Cancelled => Ok(()),
             TaskState::Completed => Err(EngineError::invalid_state(
                 "a completed task cannot be cancelled",
             )),
         }
+    }
+
+    /// Delete a terminal task record, removing only its own part file.
+    ///
+    /// Completed final files are never removed here. The record is kept when the
+    /// task is still active or when part cleanup fails.
+    pub fn delete_record(&self, id: &str) -> Result<(), EngineError> {
+        let task = load_task(&self.store, id)?;
+        if !matches!(
+            task.state,
+            TaskState::Completed | TaskState::Failed | TaskState::Cancelled
+        ) {
+            return Err(EngineError::invalid_state(
+                "only a completed, failed, or cancelled record can be deleted",
+            ));
+        }
+
+        let destination = self.destination_for(&task);
+        let cap = CapDir::open(&destination).map_err(platform_error)?;
+        let part_name = task_part_name(&task);
+        match cap.remove_file(&part_name) {
+            Ok(()) => {}
+            Err(error) if error.code == "not_found" => {}
+            Err(error) => return Err(platform_error(error)),
+        }
+        self.store.delete_task(id)
+    }
+
+    /// Delete a completed task's final file and then its record.
+    ///
+    /// A missing final file yields `FILE_MISSING` and keeps the record. Only the
+    /// validated final file and the selected record are removed.
+    pub fn delete_file(&self, id: &str) -> Result<(), EngineError> {
+        let task = load_task(&self.store, id)?;
+        if task.state != TaskState::Completed {
+            return Err(EngineError::invalid_state(
+                "only a completed task's file can be deleted",
+            ));
+        }
+
+        let destination = self.destination_for(&task);
+        let cap = CapDir::open(&destination).map_err(platform_error)?;
+        let final_name = match find_completed_final(&cap, &task) {
+            Ok(name) => name,
+            Err(error) if error.code() == "PART_MISSING" => {
+                return Err(EngineError::new(
+                    "FILE_MISSING",
+                    "the completed task's final file is missing",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        match cap.remove_file(&final_name) {
+            Ok(()) => {}
+            Err(error) if error.code == "not_found" => {
+                return Err(EngineError::new(
+                    "FILE_MISSING",
+                    "the completed task's final file is missing",
+                ));
+            }
+            Err(error) => return Err(platform_error(error)),
+        }
+        self.store.delete_task(id)
+    }
+
+    /// Open a completed task's final file with the platform handler.
+    ///
+    /// A missing final file reports `FILE_MISSING` before any process starts.
+    pub fn open_file(&self, id: &str) -> Result<(), EngineError> {
+        let task = load_task(&self.store, id)?;
+        if task.state != TaskState::Completed {
+            return Err(EngineError::invalid_state(
+                "only a completed task's file can be opened",
+            ));
+        }
+
+        let destination = self.destination_for(&task);
+        let cap = CapDir::open(&destination).map_err(platform_error)?;
+        let final_name = match find_completed_final(&cap, &task) {
+            Ok(name) => name,
+            Err(error) if error.code() == "PART_MISSING" => {
+                return Err(EngineError::new(
+                    "FILE_MISSING",
+                    "the completed task's final file is missing",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        open_target(&destination.join(final_name)).map_err(platform_error)
+    }
+
+    /// Open a task's destination folder with the platform handler.
+    pub fn open_folder(&self, id: &str) -> Result<(), EngineError> {
+        let task = load_task(&self.store, id)?;
+        let destination = self.destination_for(&task);
+        open_target(&destination).map_err(platform_error)
     }
 
     /// Requeue a failed task while preserving its part file.
@@ -525,6 +691,7 @@ impl Engine {
         spec.filename = task.filename.clone();
         spec.connections = task.connections.max(1);
         spec.expected_sha256 = task.expected_sha256.clone();
+        spec.destination = Some(self.destination_for(task));
         spec
     }
 
@@ -582,12 +749,13 @@ impl Engine {
                     serde_json::json!({ "task_id": task_id }),
                 );
                 let spec = self.spec_for(&task);
+                let destination = self.destination_for(&task);
                 match self.network_for(&task_id) {
                     Ok(network) => {
                         download_task_with_network(
                             &self.store,
                             &task_id,
-                            &self.dest_dir,
+                            &destination,
                             &spec,
                             &control,
                             &network,
@@ -697,5 +865,14 @@ fn spec_from_task(task: &Task) -> DownloadSpec {
         allow_html: false,
         expected_sha256: task.expected_sha256.clone(),
         extra_headers: Vec::new(),
+        destination: task.destination.as_ref().map(PathBuf::from),
     }
+}
+
+fn invalid_destination(message: &str) -> EngineError {
+    EngineError::new("INVALID_DESTINATION", message)
+}
+
+fn platform_error(error: PlatformError) -> EngineError {
+    EngineError::new(error.code, error.message)
 }

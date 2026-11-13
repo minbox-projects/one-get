@@ -25,7 +25,7 @@ use crate::store::Database;
 
 use super::cookies::CookieJar;
 use super::error::EngineError;
-use super::http::{build_client, get_following_redirects_with_cookies};
+use super::http::{build_client, get_following_redirects_with_cookies, storage_url};
 use super::part_file::PartFile;
 use super::planner::{plan_segments, SegmentPlan, MIN_SEGMENT_BYTES};
 use super::probe::{invalid_response, is_html, probe, ProbeOptions, ProbeOutcome};
@@ -77,6 +77,8 @@ pub struct DownloadSpec {
     pub expected_sha256: Option<String>,
     /// Additional request headers.
     pub extra_headers: Vec<(String, String)>,
+    /// Destination directory for this task, or `None` for the engine default.
+    pub destination: Option<PathBuf>,
 }
 
 /// HTTP and pacing configuration shared by one task execution.
@@ -217,6 +219,7 @@ struct DownloadMetadata {
     range_supported: bool,
     etag: Option<String>,
     last_modified: Option<String>,
+    final_url: Option<String>,
 }
 
 impl From<ProbeOutcome> for DownloadMetadata {
@@ -226,6 +229,7 @@ impl From<ProbeOutcome> for DownloadMetadata {
             range_supported: outcome.range_supported,
             etag: outcome.etag,
             last_modified: outcome.last_modified,
+            final_url: Some(outcome.final_url),
         }
     }
 }
@@ -691,6 +695,10 @@ pub async fn download_once(
         }
     };
 
+    if let Some(final_url) = metadata.final_url.as_deref() {
+        store.record_final_url(task_id, &storage_url(final_url))?;
+    }
+
     let mut plan = plan_segments(
         metadata.total_bytes,
         metadata.range_supported,
@@ -725,10 +733,13 @@ pub async fn download_once(
         ));
     }
 
+    let task = load_task(store, task_id)?;
     let cap = CapDir::open(dest_dir).map_err(platform_error)?;
-    let part_name = PartFile::part_name(&spec.filename);
-    let part = PartFile::create(&cap, &spec.filename, metadata.total_bytes)?;
-    store.record_part_path(task_id, &part_name)?;
+    let part_name = task_part_name(&task);
+    let part = PartFile::create_named(&cap, &part_name, metadata.total_bytes)?;
+    if task.part_path.is_none() {
+        store.record_part_path(task_id, &part_name)?;
+    }
 
     if range_supported {
         if let SegmentPlan::Ranged(segments) = &plan {
@@ -883,7 +894,7 @@ pub(crate) async fn download_task_with_network(
     let task = load_task(store, task_id)?;
 
     let mut persisted = store.segments_for_task(task_id)?;
-    if !persisted.is_empty() && !part_exists(dest_dir, &spec.filename) {
+    if !persisted.is_empty() && !part_exists_for_task(dest_dir, &task) {
         return Err(mark_failed(store, task_id, part_missing()));
     }
 
@@ -891,9 +902,11 @@ pub(crate) async fn download_task_with_network(
     // scheduled task has a durable destination as soon as it reports active
     // work. A resumed part is opened without truncating persisted bytes.
     let cap = CapDir::open(dest_dir).map_err(platform_error)?;
-    let part_name = PartFile::part_name(&spec.filename);
-    let part = PartFile::create(&cap, &spec.filename, None)?;
-    store.record_part_path(task_id, &part_name)?;
+    let part_name = task_part_name(&task);
+    let part = PartFile::create_named(&cap, &part_name, None)?;
+    if task.part_path.is_none() {
+        store.record_part_path(task_id, &part_name)?;
+    }
 
     let stored = load_task(store, task_id)?;
     if stored.state == TaskState::Queued {
@@ -972,6 +985,10 @@ pub(crate) async fn download_task_with_network(
             }
         }
     };
+
+    if let Some(final_url) = metadata.final_url.as_deref() {
+        store.record_final_url(task_id, &storage_url(final_url))?;
+    }
 
     let mut resuming = !persisted.is_empty();
     if resuming {
@@ -1221,11 +1238,26 @@ fn plain_segment_rows(total: Option<u64>) -> Vec<SegmentInput> {
     }
 }
 
-pub(crate) fn part_exists(dest_dir: &Path, filename: &str) -> bool {
+/// Resolve a task's persisted part name, falling back to the legacy name.
+pub(crate) fn task_part_name(task: &Task) -> String {
+    task.part_path
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| PartFile::part_name(&task.filename))
+}
+
+/// Whether a task's own resolved part file exists.
+pub(crate) fn part_exists_for_task(dest_dir: &Path, task: &Task) -> bool {
+    part_exists_named(dest_dir, &task_part_name(task))
+}
+
+/// Whether a named part file exists under a destination.
+pub(crate) fn part_exists_named(dest_dir: &Path, part_name: &str) -> bool {
     let Ok(cap) = CapDir::open(dest_dir) else {
         return false;
     };
-    cap.exists(&PartFile::part_name(filename))
+    cap.exists(part_name)
 }
 
 pub(crate) fn part_missing() -> EngineError {
@@ -1299,7 +1331,7 @@ pub(crate) fn cancel_task(
 ) -> Result<(), EngineError> {
     let task = load_task(store, task_id)?;
     let cap = CapDir::open(dest_dir).map_err(platform_error)?;
-    let part_name = PartFile::part_name(&task.filename);
+    let part_name = task_part_name(&task);
     match cap.remove_file(&part_name) {
         Ok(()) => {}
         Err(error) if error.code == "not_found" => {}
@@ -1345,7 +1377,7 @@ pub fn finalize_task(
         ));
     }
 
-    let part_name = PartFile::part_name(&task.filename);
+    let part_name = task_part_name(&task);
     let part_exists = exists(&cap, &part_name);
     let final_exists = exists(&cap, &task.filename);
 
@@ -1399,7 +1431,7 @@ pub fn finalize_task(
         ));
     }
 
-    let part = PartFile::open(&cap, &task.filename)?;
+    let part = PartFile::open_named(&cap, &part_name)?;
     part.sync_all()?;
     let actual = part.try_sha256()?;
     drop(part);
@@ -2272,8 +2304,9 @@ async fn probe_for_download(
     start: u64,
 ) -> Result<(DownloadMetadata, Option<Vec<u8>>), EngineError> {
     let headers = request_headers(spec, Some(format!("bytes={start}-{start}")))?;
-    let (response, _final_url) =
+    let (response, final_url) =
         get_following_redirects_with_cookies(client, &spec.url, headers, cookies).await?;
+    let final_url = final_url.as_str().to_string();
 
     let content_type = header_text(&response, CONTENT_TYPE);
     if !spec.allow_html && content_type.as_deref().is_some_and(is_html) {
@@ -2314,6 +2347,7 @@ async fn probe_for_download(
                     range_supported: true,
                     etag,
                     last_modified,
+                    final_url: Some(final_url),
                 },
                 first_byte,
             ))
@@ -2324,6 +2358,7 @@ async fn probe_for_download(
                 range_supported: false,
                 etag,
                 last_modified,
+                final_url: Some(final_url),
             },
             None,
         )),
@@ -2333,6 +2368,7 @@ async fn probe_for_download(
                 range_supported: false,
                 etag,
                 last_modified,
+                final_url: Some(final_url),
             },
             None,
         )),
@@ -2375,7 +2411,7 @@ async fn probe_zero_length(
     }
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
 
-    let (response, _final_url) =
+    let (response, final_url) =
         get_following_redirects_with_cookies(client, url, headers, cookies).await?;
     if response.status() != StatusCode::OK || response.content_length() != Some(0) {
         return Err(invalid_response());
@@ -2397,6 +2433,7 @@ async fn probe_zero_length(
         range_supported: false,
         etag: header_text(&response, ETAG),
         last_modified: header_text(&response, LAST_MODIFIED),
+        final_url: Some(final_url.as_str().to_string()),
     })
 }
 
@@ -2454,7 +2491,7 @@ pub(crate) fn load_task(store: &Database, task_id: &str) -> Result<Task, EngineE
         .ok_or_else(|| EngineError::new("TASK_NOT_FOUND", "the requested task does not exist"))
 }
 
-fn find_completed_final(cap: &CapDir, task: &Task) -> Result<String, EngineError> {
+pub(crate) fn find_completed_final(cap: &CapDir, task: &Task) -> Result<String, EngineError> {
     let expected = task.actual_sha256.as_deref();
     for name in candidate_names(&task.filename) {
         if !exists(cap, &name) {

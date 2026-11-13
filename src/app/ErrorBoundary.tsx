@@ -1,6 +1,8 @@
 import { Component } from "react";
 import type { ReactNode } from "react";
 
+import { resolveLanguage, translate } from "../i18n";
+
 interface ErrorBoundaryProps {
   children?: ReactNode;
 }
@@ -21,11 +23,12 @@ export class ErrorBoundary extends Component<
 
   render() {
     if (this.state.hasError) {
+      const language = resolveLanguage("system");
       return (
         <main className="app-shell">
           <div className="error-boundary" role="alert">
-            <h1>Something went wrong.</h1>
-            <p>Reload OneGet and try again.</p>
+            <h1>{translate(language, "error.somethingWentWrong")}</h1>
+            <p>{translate(language, "error.reload")}</p>
           </div>
         </main>
       );

@@ -5,6 +5,8 @@ import { cn } from "../../lib/cn";
 
 export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   label: string;
+  /** Secondary accessible label kept when the visible language differs. */
+  labelAlias?: string;
   error?: string;
 }
 
@@ -12,6 +14,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
   (
     {
       label,
+      labelAlias,
       error,
       id,
       className,
@@ -31,6 +34,9 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
       <div className="og-field">
         <label className="og-field__label" htmlFor={inputId}>
           {label}
+          {labelAlias ? (
+            <span className="og-visually-hidden"> {labelAlias}</span>
+          ) : null}
         </label>
         <input
           {...props}

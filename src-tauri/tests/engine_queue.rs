@@ -55,6 +55,7 @@ fn make_spec(
         allow_html: false,
         expected_sha256,
         extra_headers: Vec::new(),
+        destination: None,
     }
 }
 
@@ -1489,5 +1490,740 @@ async fn add_task_rejects_parent_component_filename_and_cancel_spares_outside_pa
     assert!(
         server.served_ranges().is_empty(),
         "a traversal filename must not cause any request to the fixture"
+    );
+}
+
+fn destination_string(destination: &Path) -> String {
+    destination
+        .to_str()
+        .expect("fixture destination must be valid UTF-8")
+        .to_string()
+}
+
+fn mark_completed(store: &Database, id: &str, hash: &str) {
+    store
+        .transition_task(id, TaskState::Queued, TaskState::Connecting)
+        .expect("setup completed connecting");
+    store
+        .transition_task(id, TaskState::Connecting, TaskState::Downloading)
+        .expect("setup completed downloading");
+    store
+        .transition_task(id, TaskState::Downloading, TaskState::Finalizing)
+        .expect("setup completed finalizing");
+    store
+        .complete_task(id, Some(hash))
+        .expect("setup completed task");
+}
+
+fn mark_failed(store: &Database, id: &str) {
+    store
+        .transition_task(id, TaskState::Queued, TaskState::Connecting)
+        .expect("setup failed connecting");
+    store
+        .transition_task(id, TaskState::Connecting, TaskState::Failed)
+        .expect("setup failed task");
+}
+
+#[tokio::test]
+async fn add_task_rejects_invalid_destinations_without_persisting_a_task() {
+    let default_dest = tempdir().expect("default destination");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        default_dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    let missing = default_dest.path().join("missing-directory");
+    let mut spec = make_spec(
+        "https://example.invalid/missing".into(),
+        "missing.bin",
+        1,
+        None,
+    );
+    spec.destination = Some(missing);
+    let err = engine
+        .add_task(spec)
+        .expect_err("a missing destination directory must be rejected");
+    assert_code(&err, "INVALID_DESTINATION");
+
+    let not_a_directory = default_dest.path().join("not-a-directory");
+    std::fs::write(&not_a_directory, b"file").expect("write non-directory target");
+    let mut spec = make_spec(
+        "https://example.invalid/not-a-directory".into(),
+        "file.bin",
+        1,
+        None,
+    );
+    spec.destination = Some(not_a_directory);
+    let err = engine
+        .add_task(spec)
+        .expect_err("a file used as a destination must be rejected");
+    assert_code(&err, "INVALID_DESTINATION");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unwritable = default_dest.path().join("unwritable");
+        std::fs::create_dir(&unwritable).expect("create unwritable directory");
+        std::fs::set_permissions(&unwritable, std::fs::Permissions::from_mode(0o555))
+            .expect("make directory read-only");
+        let mut spec = make_spec(
+            "https://example.invalid/unwritable".into(),
+            "unwritable.bin",
+            1,
+            None,
+        );
+        spec.destination = Some(unwritable.clone());
+        let err = engine
+            .add_task(spec)
+            .expect_err("an unwritable destination directory must be rejected");
+        assert_code(&err, "INVALID_DESTINATION");
+        std::fs::set_permissions(&unwritable, std::fs::Permissions::from_mode(0o755))
+            .expect("restore directory permissions");
+    }
+
+    assert!(
+        engine.store().list_tasks().expect("list tasks").is_empty(),
+        "a rejected destination must not leave a task row"
+    );
+}
+
+#[tokio::test]
+async fn delete_record_allows_terminal_states_removes_part_and_preserves_completed_final() {
+    let task_dest = tempdir().expect("task destination");
+    let default_dest = tempdir().expect("default destination");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        default_dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let store = engine.store();
+    let destination = destination_string(task_dest.path());
+
+    let completed_id = store
+        .create_task_at(
+            "https://example.invalid/completed.bin",
+            "completed.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create completed task");
+    let completed_final = task_dest.path().join("completed.bin");
+    let completed_body = b"completed-final-bytes";
+    std::fs::write(&completed_final, completed_body).expect("write completed final");
+    let completed_part = part_path(task_dest.path(), "completed.bin");
+    std::fs::write(&completed_part, b"leftover-part").expect("write completed part");
+    mark_completed(store, &completed_id, &sha256_hex(completed_body));
+
+    let survivor_id = store
+        .create_task_at(
+            "https://example.invalid/survivor.bin",
+            "survivor.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create survivor task");
+    let survivor_final = task_dest.path().join("survivor.bin");
+    std::fs::write(&survivor_final, b"survivor-final-bytes").expect("write survivor final");
+    let survivor_part = part_path(task_dest.path(), "survivor.bin");
+    std::fs::write(&survivor_part, b"survivor-part").expect("write survivor part");
+    mark_completed(store, &survivor_id, &sha256_hex(b"survivor-final-bytes"));
+
+    engine
+        .delete_record(&completed_id)
+        .expect("delete a completed record");
+    assert!(
+        store
+            .task(&completed_id)
+            .expect("lookup completed record")
+            .is_none(),
+        "delete_record must remove the record"
+    );
+    assert!(
+        completed_final.exists(),
+        "delete_record must never remove the completed final file"
+    );
+    assert!(
+        !completed_part.exists(),
+        "delete_record must remove a present part file"
+    );
+    assert!(
+        survivor_final.exists() && survivor_part.exists(),
+        "delete_record must not touch another task's files"
+    );
+    assert!(
+        store.task(&survivor_id).expect("lookup survivor").is_some(),
+        "delete_record must not touch another task's record"
+    );
+
+    let failed_id = store
+        .create_task_at(
+            "https://example.invalid/failed.bin",
+            "failed.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create failed task");
+    let failed_part = part_path(task_dest.path(), "failed.bin");
+    std::fs::write(&failed_part, b"failed-part").expect("write failed part");
+    mark_failed(store, &failed_id);
+    engine
+        .delete_record(&failed_id)
+        .expect("delete a failed record");
+    assert!(
+        store.task(&failed_id).expect("lookup failed").is_none(),
+        "a failed record must be deletable"
+    );
+    assert!(
+        !failed_part.exists(),
+        "a failed record's part must be removed"
+    );
+
+    let cancelled_id = store
+        .create_task_at(
+            "https://example.invalid/cancelled.bin",
+            "cancelled.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create cancelled task");
+    let cancelled_part = part_path(task_dest.path(), "cancelled.bin");
+    std::fs::write(&cancelled_part, b"cancelled-part").expect("write cancelled part");
+    store
+        .transition_task(&cancelled_id, TaskState::Queued, TaskState::Cancelled)
+        .expect("cancel task");
+    engine
+        .delete_record(&cancelled_id)
+        .expect("delete a cancelled record");
+    assert!(
+        store
+            .task(&cancelled_id)
+            .expect("lookup cancelled")
+            .is_none(),
+        "a cancelled record must be deletable"
+    );
+    assert!(
+        !cancelled_part.exists(),
+        "a cancelled record's part must be removed"
+    );
+
+    let active_id = store
+        .create_task_at(
+            "https://example.invalid/active.bin",
+            "active.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create active task");
+    let active_part = part_path(task_dest.path(), "active.bin");
+    std::fs::write(&active_part, b"active-part").expect("write active part");
+    let err = engine
+        .delete_record(&active_id)
+        .expect_err("an active record must not be deleted");
+    assert_code(&err, "INVALID_STATE");
+    assert!(
+        store.task(&active_id).expect("lookup active").is_some(),
+        "a rejected delete_record must keep the record"
+    );
+    assert!(
+        active_part.exists(),
+        "a rejected delete_record must keep the part file"
+    );
+}
+
+#[tokio::test]
+async fn delete_file_removes_completed_final_and_record_but_leaves_unrelated_files() {
+    let task_dest = tempdir().expect("task destination");
+    let default_dest = tempdir().expect("default destination");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        default_dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let store = engine.store();
+    let destination = destination_string(task_dest.path());
+
+    let deleted_id = store
+        .create_task_at(
+            "https://example.invalid/delete-me.bin",
+            "delete-me.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create deleted task");
+    let deleted_final = task_dest.path().join("delete-me.bin");
+    std::fs::write(&deleted_final, b"delete-me-bytes").expect("write deleted final");
+    mark_completed(store, &deleted_id, &sha256_hex(b"delete-me-bytes"));
+
+    let unrelated = task_dest.path().join("unrelated.txt");
+    std::fs::write(&unrelated, b"unrelated").expect("write unrelated file");
+
+    let survivor_id = store
+        .create_task_at(
+            "https://example.invalid/survivor.bin",
+            "survivor.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create survivor task");
+    let survivor_final = task_dest.path().join("survivor.bin");
+    std::fs::write(&survivor_final, b"survivor-bytes").expect("write survivor final");
+    mark_completed(store, &survivor_id, &sha256_hex(b"survivor-bytes"));
+
+    engine
+        .delete_file(&deleted_id)
+        .expect("delete a completed file");
+
+    assert!(
+        !deleted_final.exists(),
+        "delete_file must remove the completed final file"
+    );
+    assert!(
+        store
+            .task(&deleted_id)
+            .expect("lookup deleted record")
+            .is_none(),
+        "delete_file must remove the record on success"
+    );
+    assert!(unrelated.exists(), "unrelated files must remain untouched");
+    assert!(
+        survivor_final.exists(),
+        "another task's final file must remain untouched"
+    );
+    assert!(
+        store.task(&survivor_id).expect("lookup survivor").is_some(),
+        "another task's record must remain untouched"
+    );
+}
+
+#[tokio::test]
+async fn delete_file_reports_missing_final_and_rejects_non_completed_states() {
+    let task_dest = tempdir().expect("task destination");
+    let default_dest = tempdir().expect("default destination");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        default_dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let store = engine.store();
+    let destination = destination_string(task_dest.path());
+
+    let missing_id = store
+        .create_task_at(
+            "https://example.invalid/missing.bin",
+            "missing.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create completed task without a final file");
+    mark_completed(store, &missing_id, &sha256_hex(b"never-written"));
+    let err = engine
+        .delete_file(&missing_id)
+        .expect_err("a missing final file must fail");
+    assert_code(&err, "FILE_MISSING");
+    assert!(
+        store
+            .task(&missing_id)
+            .expect("lookup missing-final record")
+            .is_some(),
+        "a missing final file must keep the record"
+    );
+
+    let failed_id = store
+        .create_task_at(
+            "https://example.invalid/failed.bin",
+            "failed.bin",
+            Some(destination.as_str()),
+        )
+        .expect("create failed task");
+    let failed_final = task_dest.path().join("failed.bin");
+    std::fs::write(&failed_final, b"failed-bytes").expect("write failed final");
+    mark_failed(store, &failed_id);
+    let err = engine
+        .delete_file(&failed_id)
+        .expect_err("only a completed task can delete its file");
+    assert_code(&err, "INVALID_STATE");
+    assert!(
+        failed_final.exists(),
+        "a rejected delete_file must keep the existing file"
+    );
+    assert!(
+        store.task(&failed_id).expect("lookup failed").is_some(),
+        "a rejected delete_file must keep the record"
+    );
+}
+
+async fn wait_for_part_paths(store: &Database, ids: &[String], deadline: Duration) -> Vec<String> {
+    let start = Instant::now();
+    loop {
+        let paths: Option<Vec<String>> = ids
+            .iter()
+            .map(|id| {
+                store
+                    .task(id)
+                    .expect("load task")
+                    .expect("task exists")
+                    .part_path
+            })
+            .collect();
+        if let Some(paths) = paths {
+            return paths;
+        }
+        if start.elapsed() > deadline {
+            panic!("timed out waiting for persisted part paths for {ids:?}");
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
+fn destination_files(dest: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dest)
+        .expect("read destination")
+        .map(|entry| entry.expect("destination entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| !name.ends_with(".oneget.part"))
+        })
+        .collect()
+}
+
+fn leftover_parts(dest: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dest)
+        .expect("read destination")
+        .map(|entry| entry.expect("destination entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".oneget.part"))
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn same_name_concurrent_tasks_keep_independent_parts_and_final_files() {
+    let body_a = pattern_bytes(221, 256 * 1024);
+    let body_b = pattern_bytes(222, 256 * 1024);
+    let server_a = RangeServer::start(FixtureConfig {
+        body: body_a.clone(),
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let server_b = RangeServer::start(FixtureConfig {
+        body: body_b.clone(),
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 2 },
+    );
+
+    let hash_a = sha256_hex(&body_a);
+    let hash_b = sha256_hex(&body_b);
+    let id_a = engine
+        .add_task(make_spec(
+            server_a.url("/same-name/a"),
+            "same.bin",
+            1,
+            Some(hash_a.clone()),
+        ))
+        .expect("add first same-name task");
+    let id_b = engine
+        .add_task(make_spec(
+            server_b.url("/same-name/b"),
+            "same.bin",
+            1,
+            Some(hash_b.clone()),
+        ))
+        .expect("add second same-name task");
+
+    tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine.run())
+                .await
+                .expect("run timeout")
+                .expect("run");
+        },
+        async {
+            let part_paths =
+                wait_for_part_paths(engine.store(), &[id_a.clone(), id_b.clone()], WAIT_TIMEOUT)
+                    .await;
+            assert_ne!(
+                part_paths[0], part_paths[1],
+                "same-name tasks must persist distinct part paths, got {part_paths:?}"
+            );
+            wait_for_all_completed(engine.store(), &[id_a.clone(), id_b.clone()], WAIT_TIMEOUT)
+                .await;
+        }
+    );
+
+    for (id, expected_hash) in [(&id_a, &hash_a), (&id_b, &hash_b)] {
+        let task = engine.store().task(id).unwrap().unwrap();
+        assert_eq!(task.state, TaskState::Completed);
+        assert_eq!(task.actual_sha256.as_deref(), Some(expected_hash.as_str()));
+    }
+
+    let finals = destination_files(dest.path());
+    assert_eq!(
+        finals.len(),
+        2,
+        "two same-name tasks must leave two distinct final files, got {finals:?}"
+    );
+    let mut actual_bodies: Vec<Vec<u8>> = finals.iter().map(|path| read_file(path)).collect();
+    actual_bodies.sort();
+    let mut expected_bodies = vec![body_a, body_b];
+    expected_bodies.sort();
+    assert_eq!(
+        actual_bodies, expected_bodies,
+        "each same-name task must finalize its own bytes"
+    );
+    assert!(
+        leftover_parts(dest.path()).is_empty(),
+        "completed same-name tasks must not leave a part file behind"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_one_same_name_task_leaves_the_other_part_and_final_intact() {
+    let body_stop = pattern_bytes(223, 2 * 1024 * 1024);
+    let body_keep = pattern_bytes(224, 2 * 1024 * 1024);
+    let server_stop = RangeServer::start(FixtureConfig {
+        body: body_stop,
+        range_mode: RangeMode::HonorRange,
+        stream_delay: Some(Duration::from_millis(20)),
+        stream_chunk_size: 16 * 1024,
+        ..Default::default()
+    });
+    let server_keep = RangeServer::start(FixtureConfig {
+        body: body_keep.clone(),
+        range_mode: RangeMode::HonorRange,
+        stream_delay: Some(Duration::from_millis(20)),
+        stream_chunk_size: 16 * 1024,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 2 },
+    );
+
+    let hash_keep = sha256_hex(&body_keep);
+    let id_stop = engine
+        .add_task(make_spec(
+            server_stop.url("/paired/stop"),
+            "paired.bin",
+            1,
+            None,
+        ))
+        .expect("add task to cancel");
+    let id_keep = engine
+        .add_task(make_spec(
+            server_keep.url("/paired/keep"),
+            "paired.bin",
+            1,
+            Some(hash_keep.clone()),
+        ))
+        .expect("add task to keep");
+
+    tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine.run())
+                .await
+                .expect("run timeout")
+                .expect("run");
+        },
+        async {
+            let part_paths = wait_for_part_paths(
+                engine.store(),
+                &[id_stop.clone(), id_keep.clone()],
+                WAIT_TIMEOUT,
+            )
+            .await;
+            assert_ne!(
+                part_paths[0], part_paths[1],
+                "same-name tasks must persist distinct part paths, got {part_paths:?}"
+            );
+            let keep_part = dest.path().join(&part_paths[1]);
+            assert!(
+                keep_part.exists(),
+                "the running same-name task must own a part file"
+            );
+
+            engine
+                .cancel(&id_stop)
+                .await
+                .expect("cancel one same-name task");
+            wait_for_state(engine.store(), &id_stop, TaskState::Cancelled, WAIT_TIMEOUT).await;
+            assert!(
+                keep_part.exists(),
+                "cancelling one same-name task must not remove the other task's part"
+            );
+
+            wait_for_state(engine.store(), &id_keep, TaskState::Completed, WAIT_TIMEOUT).await;
+            let kept = engine.store().task(&id_keep).unwrap().unwrap();
+            assert_eq!(kept.actual_sha256.as_deref(), Some(hash_keep.as_str()));
+            assert!(
+                !keep_part.exists(),
+                "the completed task's own part must be removed"
+            );
+        }
+    );
+
+    let finals = destination_files(dest.path());
+    assert_eq!(
+        finals.len(),
+        1,
+        "only the surviving same-name task may finalize a file, got {finals:?}"
+    );
+    assert_eq!(
+        read_file(&finals[0]),
+        body_keep,
+        "the surviving task must finalize its own bytes"
+    );
+    assert!(
+        leftover_parts(dest.path()).is_empty(),
+        "the surviving same-name task must not leave a part file behind"
+    );
+}
+
+#[tokio::test]
+async fn legacy_null_destination_part_owner_forces_distinct_part_and_keeps_bytes() {
+    let body = pattern_bytes(223, 128 * 1024);
+    let server = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let db_path = store_dir.path().join("tasks.db");
+    let legacy_part_name = "legacy.bin.oneget.part";
+    let legacy_part = part_path(dest.path(), "legacy.bin");
+    let legacy_bytes = vec![0xAB_u8; 4096];
+
+    {
+        let db = Database::open(&db_path).expect("open store");
+        let legacy_id = db
+            .create_task("https://example.invalid/legacy.bin", "legacy.bin")
+            .expect("create legacy task without a destination");
+        db.transition_task(&legacy_id, TaskState::Queued, TaskState::Paused)
+            .expect("pause legacy task");
+        std::fs::write(&legacy_part, &legacy_bytes).expect("write legacy part");
+    }
+
+    let engine = Engine::new(
+        Database::open(&db_path).expect("open engine store"),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let id = engine
+        .add_task(make_spec(server.url("/legacy.bin"), "legacy.bin", 1, None))
+        .expect("add same-name task with the default destination");
+
+    let new_part_name = engine
+        .store()
+        .task(&id)
+        .expect("load new task")
+        .expect("new task exists")
+        .part_path
+        .expect("the new task must persist a part path");
+    assert_ne!(
+        new_part_name, legacy_part_name,
+        "a legacy part owner stored with a NULL destination must still force a distinct part name"
+    );
+    assert_eq!(
+        read_file(&legacy_part),
+        legacy_bytes,
+        "adding a same-name task must not touch the legacy part"
+    );
+
+    tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine.run())
+                .await
+                .expect("run timeout")
+                .expect("run");
+        },
+        wait_for_state(engine.store(), &id, TaskState::Completed, WAIT_TIMEOUT)
+    );
+
+    assert_eq!(
+        read_file(&dest.path().join("legacy.bin")),
+        body,
+        "the new task must finalize its own bytes"
+    );
+    assert_eq!(
+        read_file(&legacy_part),
+        legacy_bytes,
+        "completing the new task must not remove or rewrite the legacy part"
+    );
+}
+
+#[test]
+fn concurrent_cross_engine_same_name_adds_persist_distinct_part_paths() {
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let db_path = store_dir.path().join("tasks.db");
+    let filename = "shared.bin";
+    let barrier = std::sync::Barrier::new(3);
+
+    let ids: Vec<String> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for index in 0..2 {
+            let db_path = db_path.clone();
+            let destination = dest.path().to_path_buf();
+            let barrier = &barrier;
+            handles.push(scope.spawn(move || {
+                let engine = Engine::new(
+                    Database::open(&db_path).expect("open engine store"),
+                    destination,
+                    EngineOptions { max_concurrent: 1 },
+                );
+                barrier.wait();
+                engine
+                    .add_task(make_spec(
+                        format!("https://example.invalid/{index}/{filename}"),
+                        filename,
+                        1,
+                        None,
+                    ))
+                    .expect("concurrent add task")
+            }));
+        }
+        barrier.wait();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("join add thread"))
+            .collect()
+    });
+
+    let store = Database::open(&db_path).expect("reopen store");
+    let tasks: Vec<_> = store
+        .list_tasks()
+        .expect("list tasks")
+        .into_iter()
+        .filter(|task| task.filename == filename)
+        .collect();
+    assert_eq!(tasks.len(), 2, "both concurrent adds must persist a task");
+
+    let part_paths: Vec<String> = tasks
+        .into_iter()
+        .map(|task| task.part_path.expect("every task must persist a part path"))
+        .collect();
+    let unique: HashSet<&String> = part_paths.iter().collect();
+    assert_eq!(
+        unique.len(),
+        2,
+        "concurrent same-name adds across engines must persist distinct part paths, got {part_paths:?} for {ids:?}"
+    );
+    assert!(
+        part_paths
+            .iter()
+            .filter(|path| path.as_str() == "shared.bin.oneget.part")
+            .count()
+            <= 1,
+        "at most one task may own the shared legacy part name, got {part_paths:?}"
     );
 }
