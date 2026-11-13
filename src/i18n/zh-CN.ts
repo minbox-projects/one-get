@@ -47,6 +47,7 @@ const zhCN = {
   "sort.desc": "降序",
   "details.label": "详情",
   "details.empty": "选择一个下载以查看详情。",
+  "status.label": "状态",
   "status.active": "活动任务",
   "status.speed": "总速度",
   "common.unknown": "未知",

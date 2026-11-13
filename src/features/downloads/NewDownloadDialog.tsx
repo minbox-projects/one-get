@@ -115,8 +115,14 @@ export function NewDownloadDialog({
 
   const [url, setUrl] = useState("");
   const [filenameOverride, setFilenameOverride] = useState<string | null>(null);
-  const [destination, setDestination] = useState(defaultDestination);
-  const [connections, setConnections] = useState(String(defaultConnections));
+  const [destinationOverride, setDestinationOverride] = useState<string | null>(
+    null,
+  );
+  const [connectionsOverride, setConnectionsOverride] = useState<string | null>(
+    null,
+  );
+  const destination = destinationOverride ?? defaultDestination;
+  const connections = connectionsOverride ?? String(defaultConnections);
   const [rateLimit, setRateLimit] = useState("");
   const [expectedSha256, setExpectedSha256] = useState("");
   const [headers, setHeaders] = useState<HeaderPair[]>([]);
@@ -277,7 +283,7 @@ export function NewDownloadDialog({
           error={
             errors.destination ? t(`validation.${errors.destination}`) : undefined
           }
-          onChange={(event) => setDestination(event.target.value)}
+          onChange={(event) => setDestinationOverride(event.target.value)}
         />
 
         <Input
@@ -290,7 +296,7 @@ export function NewDownloadDialog({
           error={
             errors.connections ? t(`validation.${errors.connections}`) : undefined
           }
-          onChange={(event) => setConnections(event.target.value)}
+          onChange={(event) => setConnectionsOverride(event.target.value)}
         />
 
         <Input

@@ -1,5 +1,5 @@
 import { Input } from "../../components/ui/Input";
-import { useI18n } from "../../i18n";
+import { translate, useI18n } from "../../i18n";
 
 export interface DownloadSettingsValue {
   defaultConnections: string;
@@ -29,13 +29,16 @@ export function DownloadSettings({
   errors,
   onChange,
 }: DownloadSettingsProps) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
+  const alias = (key: string) =>
+    language === "en-US" ? undefined : translate("en-US", key);
 
   return (
     <section className="og-settings__section">
       <h3 className="og-settings__heading">{t("settings.download")}</h3>
       <Input
         label={t("settings.defaultConnections")}
+        labelAlias={alias("settings.defaultConnections")}
         name="defaultConnections"
         type="number"
         min={1}
@@ -48,6 +51,7 @@ export function DownloadSettings({
       />
       <Input
         label={t("settings.maxConcurrentTasks")}
+        labelAlias={alias("settings.maxConcurrentTasks")}
         name="maxConcurrentTasks"
         type="number"
         min={1}
@@ -59,6 +63,7 @@ export function DownloadSettings({
       />
       <Input
         label={t("settings.globalRateLimit")}
+        labelAlias={alias("settings.globalRateLimit")}
         name="globalRateLimit"
         type="number"
         min={1}

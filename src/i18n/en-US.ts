@@ -47,6 +47,7 @@ const enUS = {
   "sort.desc": "Descending",
   "details.label": "Details",
   "details.empty": "Select a download to see its details.",
+  "status.label": "Status",
   "status.active": "Active tasks",
   "status.speed": "Total speed",
   "common.unknown": "Unknown",

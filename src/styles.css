@@ -745,6 +745,7 @@ body {
 }
 
 .og-details__summary {
+  margin: 0;
   padding: var(--og-space-3) var(--og-space-4);
   font-size: 0.875rem;
   font-weight: 600;
@@ -1022,6 +1023,11 @@ body {
 .og-virtual-list:focus-visible {
   outline: 2px solid var(--og-primary);
   outline-offset: 2px;
+}
+
+.og-virtual-list__row:focus-visible {
+  outline: 2px solid var(--og-primary);
+  outline-offset: -2px;
 }
 
 .og-task-row {

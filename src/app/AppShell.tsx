@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
@@ -10,6 +17,7 @@ import { DownloadsView } from "../features/downloads/DownloadsView";
 import { NewDownloadDialog } from "../features/downloads/NewDownloadDialog";
 import { TaskDetails } from "../features/downloads/TaskDetails";
 import { SettingsDialog } from "../features/settings/SettingsDialog";
+import { taskActions } from "../features/downloads/controls";
 import type { SidebarView, SortDirection, SortKey } from "../features/downloads/filters";
 import { filterTasks, sidebarCounts } from "../features/downloads/filters";
 import { useDownloads } from "../features/downloads/useDownloads";
@@ -80,6 +88,8 @@ export function AppShell() {
   const [segmentsError, setSegmentsError] = useState<AppError | null>(null);
   const [actionError, setActionError] = useState<AppError | null>(null);
   const [deleteMode, setDeleteMode] = useState<DeleteMode | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const focusReturnRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -182,6 +192,142 @@ export function AppShell() {
     setSelectedId(task.id);
   }, []);
 
+  const rememberFocus = useCallback(() => {
+    if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
+      focusReturnRef.current = document.activeElement;
+    }
+  }, []);
+
+  const openNew = useCallback(() => {
+    rememberFocus();
+    setNewOpen(true);
+  }, [rememberFocus]);
+
+  const openBatch = useCallback(() => {
+    rememberFocus();
+    setBatchOpen(true);
+  }, [rememberFocus]);
+
+  const openSettings = useCallback(() => {
+    rememberFocus();
+    setSettingsOpen(true);
+  }, [rememberFocus]);
+
+  const requestDelete = useCallback(
+    (mode: DeleteMode) => {
+      rememberFocus();
+      setDeleteMode(mode);
+    },
+    [rememberFocus],
+  );
+
+  const anyDialogOpen =
+    newOpen || batchOpen || settingsOpen || deleteMode !== null;
+
+  useEffect(() => {
+    if (anyDialogOpen) {
+      return;
+    }
+    const target = focusReturnRef.current;
+    focusReturnRef.current = null;
+    if (target !== null && document.contains(target)) {
+      target.focus();
+    }
+  }, [anyDialogOpen]);
+
+  useLayoutEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target;
+      const element = target instanceof HTMLElement ? target : null;
+      const tag = element?.tagName;
+      const typing =
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        element?.isContentEditable === true;
+
+      if (typing) {
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && !event.altKey) {
+        const key = event.key.toLowerCase();
+        if (key === "n") {
+          event.preventDefault();
+          if (event.shiftKey) {
+            openBatch();
+          } else {
+            openNew();
+          }
+          return;
+        }
+        if (key === ",") {
+          event.preventDefault();
+          openSettings();
+          return;
+        }
+        if (key === "f") {
+          event.preventDefault();
+          searchRef.current?.focus();
+          return;
+        }
+      }
+
+      if (anyDialogOpen) {
+        return;
+      }
+
+      const row = element?.closest<HTMLElement>("[data-task-id]") ?? null;
+      const inRowActions = element?.closest(".og-task-row__actions") !== null;
+      const rowTask =
+        row?.dataset.taskId === undefined
+          ? null
+          : downloads.tasks.find((task) => task.id === row.dataset.taskId) ??
+            null;
+
+      if (event.key === " " && rowTask !== null && !inRowActions) {
+        const available = taskActions(rowTask);
+        if (available.pause || available.resume) {
+          event.preventDefault();
+          if (available.pause) {
+            void downloads.pauseTask(rowTask.id);
+          } else {
+            void downloads.resumeTask(rowTask.id);
+          }
+        }
+        return;
+      }
+
+      if (event.key === "Enter" && rowTask !== null && !inRowActions) {
+        event.preventDefault();
+        handleSelect(rowTask);
+        return;
+      }
+
+      if (event.key === "Delete" && rowTask !== null && !inRowActions) {
+        if (taskActions(rowTask).deleteRecord) {
+          event.preventDefault();
+          handleSelect(rowTask);
+          requestDelete("record");
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [
+    anyDialogOpen,
+    downloads,
+    downloads.tasks,
+    downloads.pauseTask,
+    downloads.resumeTask,
+    handleSelect,
+    openBatch,
+    openNew,
+    openSettings,
+    requestDelete,
+  ]);
+
   const handleOpenFile = useCallback(async (task: DownloadSummary) => {
     setActionError(null);
     const result = await openDownloadFile(task.id);
@@ -236,19 +382,18 @@ export function AppShell() {
   }, [clearSelection, deleteMode, downloads, selectedTask]);
 
   const renderSidebarItem = ({ view, key }: { view: SidebarView; key: string }) => (
-    <li key={view}>
-      <button
-        type="button"
-        className="og-sidebar__item"
-        aria-pressed={downloads.view === view}
-        onClick={() => downloads.setView(view)}
-      >
-        <span className="og-sidebar__label">{t(key)}</span>
-        <span className="og-sidebar__count">
-          {formatNumber(counts[view]) ?? "0"}
-        </span>
-      </button>
-    </li>
+    <button
+      key={view}
+      type="button"
+      className="og-sidebar__item"
+      aria-pressed={downloads.view === view}
+      onClick={() => downloads.setView(view)}
+    >
+      <span className="og-sidebar__label">{t(key)}</span>
+      <span className="og-sidebar__count">
+        {formatNumber(counts[view]) ?? "0"}
+      </span>
+    </button>
   );
 
   const sortOptions = SORT_KEYS.map((key) => ({
@@ -268,10 +413,12 @@ export function AppShell() {
 
       <div className="og-app__body">
         <nav className="og-sidebar" aria-label={t("nav.label")}>
-          <ul className="og-sidebar__list">{FILTER_VIEWS.map(renderSidebarItem)}</ul>
-          <ul className="og-sidebar__list">
+          <div className="og-sidebar__list">
+            {FILTER_VIEWS.map(renderSidebarItem)}
+          </div>
+          <div className="og-sidebar__list">
             {CATEGORY_VIEWS.map(renderSidebarItem)}
-          </ul>
+          </div>
         </nav>
 
         <div className="og-workspace">
@@ -280,8 +427,8 @@ export function AppShell() {
             role="toolbar"
             aria-label={t("toolbar.label")}
           >
-            <Button onClick={() => setNewOpen(true)}>{t("toolbar.new")}</Button>
-            <Button variant="secondary" onClick={() => setBatchOpen(true)}>
+            <Button onClick={openNew}>{t("toolbar.new")}</Button>
+            <Button variant="secondary" onClick={openBatch}>
               {t("toolbar.batch")}
             </Button>
             <Button
@@ -298,6 +445,7 @@ export function AppShell() {
             </Button>
             <div className="og-toolbar__search">
               <Input
+                ref={searchRef}
                 label={t("toolbar.search")}
                 type="search"
                 name="search"
@@ -323,10 +471,7 @@ export function AppShell() {
                 downloads.setSortDirection(event.target.value as SortDirection)
               }
             />
-            <Button
-              variant="secondary"
-              onClick={() => setSettingsOpen(true)}
-            >
+            <Button variant="secondary" onClick={openSettings}>
               {t("toolbar.settings")}
             </Button>
           </div>
@@ -368,10 +513,12 @@ export function AppShell() {
             />
           </section>
 
-          <details className="og-details" open>
-            <summary className="og-details__summary">
-              {t("details.label")}
-            </summary>
+          <section
+            className="og-details"
+            role="region"
+            aria-label={t("details.label")}
+          >
+            <h2 className="og-details__summary">{t("details.label")}</h2>
             {selectedTask ? (
               <TaskDetails
                 task={selectedTask}
@@ -386,18 +533,22 @@ export function AppShell() {
                 onResume={(task) => void downloads.resumeTask(task.id)}
                 onCancel={(task) => void downloads.cancelTask(task.id)}
                 onRetry={(task) => void downloads.retryTask(task.id)}
-                onDeleteRecord={() => setDeleteMode("record")}
-                onDeleteFile={() => setDeleteMode("file")}
+                onDeleteRecord={() => requestDelete("record")}
+                onDeleteFile={() => requestDelete("file")}
                 onClose={clearSelection}
               />
             ) : (
               <p className="og-details__empty">{t("details.empty")}</p>
             )}
-          </details>
+          </section>
         </div>
       </div>
 
-      <footer className="og-statusbar">
+      <footer
+        className="og-statusbar"
+        role="region"
+        aria-label={t("status.label")}
+      >
         <div className="og-statusbar__item">
           <span className="og-statusbar__label">{t("status.active")}</span>
           <span className="og-statusbar__value">

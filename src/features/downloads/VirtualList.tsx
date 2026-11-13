@@ -8,6 +8,9 @@ export interface VirtualListProps<T> {
   overscan?: number;
   renderItem: (item: T, index: number) => ReactNode;
   ariaLabel: string;
+  /** Identifies an item for selection state and row-level keyboard routing. */
+  getItemKey?: (item: T) => string;
+  isSelected?: (item: T) => boolean;
 }
 
 /**
@@ -21,6 +24,8 @@ export function VirtualList<T>({
   overscan = 5,
   renderItem,
   ariaLabel,
+  getItemKey,
+  isSelected,
 }: VirtualListProps<T>) {
   const [scrollTop, setScrollTop] = useState(0);
 
@@ -54,12 +59,16 @@ export function VirtualList<T>({
       >
         {items.slice(startIndex, endIndex).map((item, offset) => {
           const index = startIndex + offset;
+          const selected = isSelected?.(item) ?? false;
           return (
             <div
-              key={index}
+              key={getItemKey?.(item) ?? index}
               role="listitem"
+              aria-selected={selected ? "true" : "false"}
+              tabIndex={0}
               data-testid="task-row"
               data-index={index}
+              data-task-id={getItemKey?.(item)}
               className="og-virtual-list__row"
               style={{
                 position: "absolute",

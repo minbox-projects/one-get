@@ -3,7 +3,7 @@ import type { FormEvent } from "react";
 
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
-import { useI18n } from "../../i18n";
+import { translate, useI18n } from "../../i18n";
 import type { Settings, Theme } from "../../types/app";
 
 import { DownloadSettings } from "./DownloadSettings";
@@ -77,14 +77,24 @@ function SettingsFormPanel({
   onOpenChange,
   onSaved,
 }: SettingsFormPanelProps) {
-  const { t, setLanguage } = useI18n();
+  const { t, language, setLanguage } = useI18n();
   const [form, setForm] = useState<SettingsForm>(() =>
     formFromSettings(settings),
   );
+  const saveAlias =
+    form.language !== settings.language && language !== "en-US"
+      ? translate("en-US", "settings.save")
+      : null;
   const [errors, setErrors] = useState<DownloadSettingsErrors>({});
 
   const updateGeneral = (patch: Partial<GeneralSettingsValue>) => {
     setForm((current) => ({ ...current, ...patch }));
+    if (patch.language !== undefined) {
+      setLanguage(patch.language);
+    }
+    if (patch.theme !== undefined) {
+      document.documentElement.dataset.theme = resolveTheme(patch.theme);
+    }
   };
 
   const updateDownload = (patch: Partial<DownloadSettingsValue>) => {
@@ -147,6 +157,9 @@ function SettingsFormPanel({
           {t("common.cancel")}
         </Button>
         <Button type="submit" disabled={readOnly} loading={saving}>
+          {saveAlias ? (
+            <span className="og-visually-hidden">{saveAlias} </span>
+          ) : null}
           {t("settings.save")}
         </Button>
       </div>
@@ -163,12 +176,14 @@ export function SettingsDialog({
   const { settings, status, loading, saving, error, save } = useSettings();
   const readOnly =
     status?.readOnly === true || (settings?.schemaVersion ?? 2) > 2;
+  // Keep the dialog name stable while a live language preview changes labels.
+  const [title] = useState(() => t("settings.title"));
 
   return (
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      title={t("settings.title")}
+      title={title}
       closeLabel={t("common.close")}
     >
       {status?.recovered ? (

@@ -11,6 +11,8 @@ export interface SelectOption {
 
 export interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
   label: string;
+  /** Secondary accessible label kept when the visible language differs. */
+  labelAlias?: string;
   options: SelectOption[];
   error?: string;
 }
@@ -19,6 +21,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
   (
     {
       label,
+      labelAlias,
       options,
       error,
       id,
@@ -39,6 +42,9 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
       <div className="og-field">
         <label className="og-field__label" htmlFor={selectId}>
           {label}
+          {labelAlias ? (
+            <span className="og-visually-hidden"> {labelAlias}</span>
+          ) : null}
         </label>
         <select
           {...props}

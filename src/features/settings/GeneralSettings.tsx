@@ -1,6 +1,6 @@
 import { Input } from "../../components/ui/Input";
 import { Select } from "../../components/ui/Select";
-import { useI18n } from "../../i18n";
+import { translate, useI18n } from "../../i18n";
 import type { CloseBehavior, LogLevel, Theme } from "../../types/app";
 import type { LanguageSetting } from "../../i18n";
 
@@ -23,13 +23,16 @@ const CLOSE_VALUES: CloseBehavior[] = ["tray", "quit"];
 const LOG_LEVEL_VALUES: LogLevel[] = ["error", "warn", "info", "debug", "trace"];
 
 export function GeneralSettings({ value, onChange }: GeneralSettingsProps) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
+  const alias = (key: string) =>
+    language === "en-US" ? undefined : translate("en-US", key);
 
   return (
     <section className="og-settings__section">
       <h3 className="og-settings__heading">{t("settings.general")}</h3>
       <Select
         label={t("settings.language")}
+        labelAlias={alias("settings.language")}
         name="language"
         value={value.language}
         options={LANGUAGE_VALUES.map((entry) => ({
@@ -42,6 +45,7 @@ export function GeneralSettings({ value, onChange }: GeneralSettingsProps) {
       />
       <Select
         label={t("settings.theme")}
+        labelAlias={alias("settings.theme")}
         name="theme"
         value={value.theme}
         options={THEME_VALUES.map((entry) => ({
@@ -52,6 +56,7 @@ export function GeneralSettings({ value, onChange }: GeneralSettingsProps) {
       />
       <Select
         label={t("settings.closeBehavior")}
+        labelAlias={alias("settings.closeBehavior")}
         name="closeBehavior"
         value={value.closeBehavior}
         options={CLOSE_VALUES.map((entry) => ({
@@ -64,6 +69,7 @@ export function GeneralSettings({ value, onChange }: GeneralSettingsProps) {
       />
       <Input
         label={t("settings.defaultDirectory")}
+        labelAlias={alias("settings.defaultDirectory")}
         name="defaultDirectory"
         value={value.defaultDirectory}
         autoComplete="off"
@@ -71,6 +77,7 @@ export function GeneralSettings({ value, onChange }: GeneralSettingsProps) {
       />
       <Select
         label={t("settings.logLevel")}
+        labelAlias={alias("settings.logLevel")}
         name="logLevel"
         value={value.logLevel}
         options={LOG_LEVEL_VALUES.map((entry) => ({

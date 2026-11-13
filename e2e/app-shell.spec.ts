@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("app shell browser preview", () => {
-  test("shows OneGet heading, diagnostics surface, runtime-unavailable banner, and keeps dialog usable without console errors", async ({
+  test("renders the task-first shell with a runtime-unavailable fallback and no console errors", async ({
     page,
   }) => {
     const consoleErrors: string[] = [];
@@ -17,22 +17,45 @@ test.describe("app shell browser preview", () => {
       page.getByRole("heading", { level: 1, name: "OneGet" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("region", { name: /diagnostics/i }),
+      page.getByRole("navigation", { name: "Library" }),
     ).toBeVisible();
-    await expect(page.getByText(/runtime unavailable/i)).toBeVisible();
+    for (const name of [
+      "All downloads",
+      "Downloading",
+      "Completed",
+      "Failed",
+      "Video",
+      "Model",
+      "Document",
+      "Program",
+      "Other",
+    ]) {
+      await expect(
+        page.getByRole("button", { name: new RegExp(name) }),
+      ).toBeVisible();
+    }
+    for (const name of [
+      "New download",
+      "Batch add",
+      "Pause all",
+      "Resume all",
+      "Settings",
+    ]) {
+      await expect(page.getByRole("button", { name })).toBeVisible();
+    }
+    await expect(page.getByLabel("Search downloads")).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Download list" }),
+    ).toBeVisible();
+    await expect(page.getByText(/runtime.*unavailable/i)).toBeVisible();
 
-    const trigger = page.getByRole("button", { name: "Open dialog" });
+    const trigger = page.getByRole("button", { name: "New download" });
     await trigger.click();
 
-    await expect(
-      page.getByRole("dialog", { name: "Design system dialog" }),
-    ).toBeVisible();
-
+    const dialog = page.getByRole("dialog", { name: "New download" });
+    await expect(dialog).toBeVisible();
     await page.keyboard.press("Escape");
-
-    await expect(
-      page.getByRole("dialog", { name: "Design system dialog" }),
-    ).not.toBeVisible();
+    await expect(dialog).not.toBeVisible();
     await expect(trigger).toBeFocused();
     expect(consoleErrors).toEqual([]);
   });

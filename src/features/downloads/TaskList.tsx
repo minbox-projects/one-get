@@ -42,6 +42,8 @@ export function TaskList({
       itemHeight={ROW_HEIGHT}
       height={height}
       ariaLabel={ariaLabel}
+      getItemKey={(task) => task.id}
+      isSelected={(task) => selectedId === task.id}
       renderItem={(task) => (
         <TaskRow
           task={task}
