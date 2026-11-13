@@ -11,8 +11,10 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b",
+    "typecheck:extension": "tsc -p extension/tsconfig.json --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:extension": "vitest run extension/tests/unit",
     "test:e2e": "playwright test",
     "tauri": "tauri",
     "check:pins": "node scripts/check-direct-dependency-pins.mjs"
@@ -33,6 +35,7 @@
     "@testing-library/jest-dom": "7.0.1",
     "@testing-library/react": "16.3.3",
     "@testing-library/user-event": "14.6.9",
+    "@types/chrome": "0.3.7",
     "@types/node": "26.6.6",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
