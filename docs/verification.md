@@ -535,12 +535,19 @@ The `web-ext` warning is `KEY_FIREFOX_ANDROID_UNSUPPORTED_BY_MIN_VERSION`: the `
 
 ### Manual Firefox acceptance
 
-Record date: 2026-11-13. Operating system: macOS 27.3 arm64. No OneGet app build was launched and no Firefox browser session was opened for this record. The production Firefox package at `extension/dist/firefox` was produced by `npm run build:extension`, but it was not loaded into Firefox.
+Record date: 2026-11-13. No OneGet application build was launched and no Firefox session was opened, so neither the primary nor the user performed any item in this record. The production Firefox package at `extension/dist/firefox` was produced by `npm run build:extension`, but it was not loaded into Firefox.
+
+| Recorded item | Value |
+| --- | --- |
+| Operating system | macOS 27.3 (build 26C5035r), arm64 |
+| Desktop build | OneGet 0.1.0 built from the delivery worktree, not a packaged release; not launched. |
+| Extension build | `extension/dist/firefox`; manifest version 0.1.0, Gecko ID `oneget@oneget.app`, `strict_min_version` 140.0. |
+| Firefox version | Unobserved. Firefox is not installed on this host and `/Applications/Firefox.app` is absent, so no version was recorded and no browser interaction occurred. |
 
 | Manual acceptance item | Status | Detail |
 | --- | --- | --- |
 | Load the temporary add-on through `about:debugging#/runtime/this-firefox` | PENDING: not performed | No Firefox session was opened and no package was selected. |
-| Grant the requested site and download permissions | PENDING: not performed | No permission prompt was observed or granted. |
+| Silent host-permission grant on temporary install and its verification in `about:addons` | PENDING: not performed | No temporary install occurred, so no granted site and download permission was inspected. |
 | Pair from the Firefox popup with a desktop-generated code | PENDING: not performed | No code was generated and no real pairing occurred. |
 | Response sniffing with deduplication and tab and frame ownership | PENDING: not performed | No Firefox traffic was observed. |
 | HLS manifest listing with transport and media segment filtering | PENDING: not performed | No manifest was listed and no filtering was observed. |
@@ -550,7 +557,7 @@ Record date: 2026-11-13. Operating system: macOS 27.3 arm64. No OneGet app build
 | Event-page suspension after a failed takeover still shows the popup retry path | PENDING: not performed | No event page was suspended or rehydrated in a real browser. |
 | Windows status | PENDING: not performed | Windows install, launch, and Firefox capture checks were not performed. |
 
-The adapter unit tests and the `web-ext` lint result do not replace any item above.
+The adapter unit tests, the `web-ext` lint result, the mock-IPC Playwright suites, and every other mock, unit-test, lint, and end-to-end result are not substituted for any manual Firefox evidence above. Every item is unperformed and none is a pass claim.
 
 ### Pending gates
 
