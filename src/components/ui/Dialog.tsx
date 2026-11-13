@@ -9,6 +9,7 @@ export interface DialogProps {
   description?: string;
   children?: ReactNode;
   className?: string;
+  closeLabel?: string;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 }
@@ -19,6 +20,7 @@ export function Dialog({
   description,
   children,
   className,
+  closeLabel = "Close",
   open,
   onOpenChange,
 }: DialogProps) {
@@ -31,7 +33,7 @@ export function Dialog({
         <DialogPrimitive.Overlay className="og-dialog__overlay" />
         <DialogPrimitive.Content className={cn("og-dialog__content", className)}>
           <DialogPrimitive.Close asChild>
-            <button type="button" className="og-dialog__close" aria-label="Close">
+            <button type="button" className="og-dialog__close" aria-label={closeLabel}>
               <span aria-hidden="true">&times;</span>
             </button>
           </DialogPrimitive.Close>

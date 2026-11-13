@@ -3,7 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { dictionaries, I18nProvider } from "../i18n";
-import type { DownloadSummary } from "../types/downloads";
+import type {
+  AddDownloadRequest,
+  DownloadSummary,
+  ProbeResult,
+} from "../types/downloads";
 import { AppShell } from "./AppShell";
 
 const { invokeCommand } = vi.hoisted(() => ({ invokeCommand: vi.fn() }));
@@ -339,5 +343,212 @@ describe("AppShell", () => {
     expect(await screen.findByText(zh["list.emptyTitle"])).toBeInTheDocument();
     expect(screen.getByText(zh["nav.all"])).toBeInTheDocument();
     expect(screen.getByText(zh["details.empty"])).toBeInTheDocument();
+  });
+});
+
+function dialogSubmitButton(container: HTMLElement): HTMLButtonElement {
+  const buttons = within(container).getAllByRole("button");
+  const match = buttons.find((button) => {
+    const label = `${button.textContent ?? ""} ${button.getAttribute("aria-label") ?? ""}`;
+    return (
+      /^(start|add|create|begin|download)\b/i.test(label.trim()) &&
+      !/header|cancel|close|new download|batch|advanced/i.test(label)
+    );
+  });
+
+  if (!match) {
+    throw new Error("The dialog submit button was not found.");
+  }
+
+  return match as HTMLButtonElement;
+}
+
+async function setDialogField(
+  user: ReturnType<typeof userEvent.setup>,
+  field: HTMLElement,
+  value: string,
+) {
+  if (field.tagName === "SELECT") {
+    await user.selectOptions(field, value);
+    return;
+  }
+
+  await user.clear(field);
+  if (value !== "") {
+    await user.type(field, value);
+  }
+}
+
+describe("AppShell download dialogs", () => {
+  it("opens New download from the toolbar and refreshes the list after an add", async () => {
+    const user = userEvent.setup();
+    let downloads: DownloadSummary[] = [];
+    let addedRequest: AddDownloadRequest | null = null;
+
+    invokeCommand.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "settings_get") {
+        return {
+          ok: true as const,
+          data: settings({ defaultDirectory: "/tmp/downloads" }),
+        };
+      }
+      if (command === "downloads_list") {
+        return { ok: true as const, data: downloads };
+      }
+      if (command === "downloads_probe") {
+        return {
+          ok: true as const,
+          data: {
+            finalUrl: "https://example.com/added.bin",
+            totalBytes: 1024,
+            rangeSupported: true,
+            filename: "added.bin",
+            contentType: "application/octet-stream",
+            etag: null,
+            lastModified: null,
+          } satisfies ProbeResult,
+        };
+      }
+      if (command === "downloads_add") {
+        addedRequest = (args as { request: AddDownloadRequest }).request;
+        downloads = [
+          task({
+            id: "added",
+            url: addedRequest.url,
+            filename: addedRequest.filename,
+            state: "queued",
+            createdAtMs: 10,
+          }),
+        ];
+        return { ok: true as const, data: "added" };
+      }
+      return {
+        ok: false as const,
+        error: { code: "unexpected_command", message: command },
+      };
+    });
+
+    renderShell();
+    await screen.findByText(en["list.emptyTitle"]);
+    const listCallsBefore = invokeCommand.mock.calls.filter(
+      ([command]) => command === "downloads_list",
+    ).length;
+
+    await user.click(screen.getByRole("button", { name: en["toolbar.new"] }));
+    const dialog = await screen.findByRole("dialog", { name: /new download/i });
+    await user.type(
+      within(dialog).getByLabelText(/url/i),
+      "https://example.com/added.bin",
+    );
+
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith(
+        "downloads_probe",
+        expect.anything(),
+      );
+    });
+    const filename = within(dialog).getByLabelText(/filename/i);
+    await waitFor(() => {
+      expect(filename).toHaveValue("added.bin");
+    });
+
+    await user.click(dialogSubmitButton(dialog));
+
+    await waitFor(() => {
+      expect(addedRequest).not.toBeNull();
+    });
+    expect(addedRequest).toMatchObject({
+      url: "https://example.com/added.bin",
+      filename: "added.bin",
+    });
+
+    await waitFor(() => {
+      const listCalls = invokeCommand.mock.calls.filter(
+        ([command]) => command === "downloads_list",
+      ).length;
+      expect(listCalls).toBeGreaterThan(listCallsBefore);
+    });
+    await waitFor(() => {
+      const rows = screen.getAllByTestId("task-row");
+      expect(
+        rows.some((row) => (row.textContent ?? "").includes("added.bin")),
+      ).toBe(true);
+    });
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: /new download/i }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("opens Batch add from the toolbar and adds a URL already present in the store", async () => {
+    const user = userEvent.setup();
+    let downloads: DownloadSummary[] = [
+      task({
+        id: "existing",
+        url: "https://example.com/existing.bin",
+        filename: "existing.bin",
+      }),
+    ];
+    const added: AddDownloadRequest[] = [];
+
+    invokeCommand.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "settings_get") {
+        return {
+          ok: true as const,
+          data: settings({ defaultDirectory: "/tmp/downloads" }),
+        };
+      }
+      if (command === "downloads_list") {
+        return { ok: true as const, data: downloads };
+      }
+      if (command === "downloads_add") {
+        const request = (args as { request: AddDownloadRequest }).request;
+        added.push(request);
+        downloads = [
+          ...downloads,
+          task({
+            id: `added-${added.length}`,
+            url: request.url,
+            filename: request.filename,
+            state: "queued",
+            createdAtMs: 100 + added.length,
+          }),
+        ];
+        return { ok: true as const, data: `added-${added.length}` };
+      }
+      return {
+        ok: false as const,
+        error: { code: "unexpected_command", message: command },
+      };
+    });
+
+    renderShell();
+    await screen.findByText("existing.bin");
+
+    await user.click(screen.getByRole("button", { name: en["toolbar.batch"] }));
+    const dialog = await screen.findByRole("dialog", { name: /batch/i });
+    await user.type(
+      within(dialog).getByLabelText(/urls|one url per line/i),
+      "https://example.com/existing.bin",
+    );
+    const destination = within(dialog).queryByLabelText(/destination/i);
+    if (destination) {
+      await setDialogField(user, destination, "/tmp/downloads");
+    }
+
+    await user.click(dialogSubmitButton(dialog));
+
+    await waitFor(() => {
+      expect(added).toHaveLength(1);
+    });
+    expect(added[0].url).toBe("https://example.com/existing.bin");
+
+    await waitFor(() => {
+      const rows = screen
+        .getAllByTestId("task-row")
+        .filter((row) => (row.textContent ?? "").includes("existing.bin"));
+      expect(rows.length).toBeGreaterThanOrEqual(2);
+    });
   });
 });

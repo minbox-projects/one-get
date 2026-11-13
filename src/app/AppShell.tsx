@@ -3,7 +3,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
+import { BatchDownloadDialog } from "../features/downloads/BatchDownloadDialog";
 import { DownloadsView } from "../features/downloads/DownloadsView";
+import { NewDownloadDialog } from "../features/downloads/NewDownloadDialog";
 import type { SidebarView, SortDirection, SortKey } from "../features/downloads/filters";
 import { filterTasks, sidebarCounts } from "../features/downloads/filters";
 import { useDownloads } from "../features/downloads/useDownloads";
@@ -57,6 +59,9 @@ export function AppShell() {
   const { speedOf } = downloads;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<AppError | null>(null);
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [newOpen, setNewOpen] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -69,6 +74,7 @@ export function AppShell() {
       if (result.ok) {
         document.documentElement.dataset.theme = resolveTheme(result.data.theme);
         setLanguage(result.data.language);
+        setSettings(result.data);
       } else {
         setError(result.error);
       }
@@ -106,6 +112,11 @@ export function AppShell() {
         : t("error.settingsLoad");
 
   const busy = loading || downloads.loading;
+
+  const downloadDefaults = {
+    destination: settings?.defaultDirectory ?? "",
+    connections: settings?.defaultConnections ?? 8,
+  };
 
   const renderSidebarItem = ({ view, key }: { view: SidebarView; key: string }) => (
     <li key={view}>
@@ -152,8 +163,10 @@ export function AppShell() {
             role="toolbar"
             aria-label={t("toolbar.label")}
           >
-            <Button>{t("toolbar.new")}</Button>
-            <Button variant="secondary">{t("toolbar.batch")}</Button>
+            <Button onClick={() => setNewOpen(true)}>{t("toolbar.new")}</Button>
+            <Button variant="secondary" onClick={() => setBatchOpen(true)}>
+              {t("toolbar.batch")}
+            </Button>
             <Button variant="secondary">{t("toolbar.pauseAll")}</Button>
             <Button variant="secondary">{t("toolbar.resumeAll")}</Button>
             <div className="og-toolbar__search">
@@ -234,6 +247,27 @@ export function AppShell() {
           </span>
         </div>
       </footer>
+
+      {newOpen ? (
+        <NewDownloadDialog
+          open
+          onOpenChange={setNewOpen}
+          defaults={downloadDefaults}
+          onAdded={() => {
+            void downloads.refresh();
+          }}
+        />
+      ) : null}
+      {batchOpen ? (
+        <BatchDownloadDialog
+          open
+          onOpenChange={setBatchOpen}
+          defaults={downloadDefaults}
+          onAdded={() => {
+            void downloads.refresh();
+          }}
+        />
+      ) : null}
     </main>
   );
 }
