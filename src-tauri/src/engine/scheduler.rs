@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -34,8 +34,8 @@ use super::rate_limit::RateLimiter;
 use super::state::TaskState;
 use super::worker::{
     cancel_task, download_task_with_network, finalize_task, find_completed_final, load_task,
-    mark_failed, part_exists, part_missing, persist_pause, remote_metadata, DownloadSpec,
-    NetworkContext, TaskControl, TaskRunOutcome,
+    mark_failed, part_exists_for_task, part_exists_named, part_missing, persist_pause,
+    remote_metadata, task_part_name, DownloadSpec, NetworkContext, TaskControl, TaskRunOutcome,
 };
 
 /// How long the scheduler waits for newly added work before it stops.
@@ -83,6 +83,7 @@ pub struct Engine {
     global_rate: Mutex<Option<Arc<RateLimiter>>>,
     task_rates: Mutex<HashMap<String, Arc<RateLimiter>>>,
     logger: Mutex<Option<Arc<Logger>>>,
+    startup_done: AtomicBool,
 }
 
 impl Engine {
@@ -101,6 +102,7 @@ impl Engine {
             global_rate: Mutex::new(None),
             task_rates: Mutex::new(HashMap::new()),
             logger: Mutex::new(None),
+            startup_done: AtomicBool::new(false),
         }
     }
 
@@ -204,6 +206,9 @@ impl Engine {
         let id =
             self.store
                 .create_task_at(&stored_url, &spec.filename, Some(stored_destination))?;
+        let part_name =
+            self.choose_part_name(&id, &spec.filename, stored_destination, &destination)?;
+        self.store.record_part_path(&id, &part_name)?;
         self.store.record_connections(&id, spec.connections)?;
         if let Some(expected) = spec.expected_sha256.as_deref() {
             self.store.record_expected_sha256(&id, expected)?;
@@ -262,6 +267,47 @@ impl Engine {
         Ok(canonical)
     }
 
+    /// Pick a part name that cannot collide with another task's part file.
+    ///
+    /// A legacy `<filename>.oneget.part` is safe unless another task in the
+    /// same destination still owns or may create that part. In that case the
+    /// new task gets a task-id suffix.
+    fn choose_part_name(
+        &self,
+        id: &str,
+        filename: &str,
+        stored_destination: &str,
+        destination: &std::path::Path,
+    ) -> Result<String, EngineError> {
+        let collides = self.store.list_tasks()?.into_iter().any(|other| {
+            if other.id == id
+                || other.filename != filename
+                || other.destination.as_deref() != Some(stored_destination)
+            {
+                return false;
+            }
+            let active = matches!(
+                other.state,
+                TaskState::Queued
+                    | TaskState::Connecting
+                    | TaskState::Downloading
+                    | TaskState::Finalizing
+            );
+            let part_bearing = matches!(other.state, TaskState::Paused | TaskState::Failed)
+                && part_exists_named(destination, &task_part_name(&other));
+            active || part_bearing
+        });
+
+        if collides {
+            Ok(format!(
+                "{filename}.{}.oneget.part",
+                id.chars().take(8).collect::<String>()
+            ))
+        } else {
+            Ok(PartFile::part_name(filename))
+        }
+    }
+
     fn destination_for(&self, task: &Task) -> PathBuf {
         task.destination
             .as_ref()
@@ -290,7 +336,7 @@ impl Engine {
             let destination = self.destination_for(&task);
             match task.state {
                 TaskState::Connecting | TaskState::Downloading => {
-                    if part_exists(&destination, &task.filename) {
+                    if part_exists_for_task(&destination, &task) {
                         self.store
                             .transition_task(&task.id, task.state, TaskState::Queued)?;
                         report.requeued += 1;
@@ -332,7 +378,7 @@ impl Engine {
                 continue;
             }
             let destination = self.destination_for(&task);
-            if !part_exists(&destination, &task.filename) {
+            if !part_exists_for_task(&destination, &task) {
                 mark_failed(&self.store, &task.id, part_missing());
                 continue;
             }
@@ -370,8 +416,11 @@ impl Engine {
     /// lets a caller add work immediately after the queue drains, so
     /// pause-then-add and retry flows do not need a new run call.
     pub async fn run(&self) -> Result<(), EngineError> {
-        self.recover()?;
-        self.revalidate_paused().await?;
+        if !self.startup_done.load(Ordering::SeqCst) {
+            self.recover()?;
+            self.revalidate_paused().await?;
+            self.startup_done.store(true, Ordering::SeqCst);
+        }
 
         let mut active: FuturesUnordered<TaskFuture<'_>> = FuturesUnordered::new();
 
@@ -492,7 +541,7 @@ impl Engine {
 
         let destination = self.destination_for(&task);
         let cap = CapDir::open(&destination).map_err(platform_error)?;
-        let part_name = PartFile::part_name(&task.filename);
+        let part_name = task_part_name(&task);
         match cap.remove_file(&part_name) {
             Ok(()) => {}
             Err(error) if error.code == "not_found" => {}

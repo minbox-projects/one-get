@@ -45,7 +45,7 @@
       "id": "engine",
       "path": "src-tauri/src/engine",
       "owner_role": "shared",
-      "responsibility": "Headless download engine: probe, transport, planner, part file, workers, scheduler, service actor, retry, rate limiting, cookies, destinations, deletion, and state machines",
+      "responsibility": "Headless download engine: probe, transport, planner, conflict-aware part files, workers, scheduler, service actor, retry, rate limiting, cookies, destinations, final-URL recording, deletion, and state machines",
       "language": "rust",
       "entry_kinds": [
         "file"
@@ -55,7 +55,7 @@
       "id": "store",
       "path": "src-tauri/src/store",
       "owner_role": "shared",
-      "responsibility": "Durable SQLite task store: connection setup, schema 1 and 2 migrations, per-task destinations, task and segment records, and progress persistence",
+      "responsibility": "Durable SQLite task store: connection setup, schema 1 and 2 migrations, per-task destinations, part names, minimized final URLs, task and segment records, and progress persistence",
       "language": "rust",
       "entry_kinds": [
         "file"
@@ -205,6 +205,7 @@
         "src/features/downloads/categories.ts",
         "src/features/downloads/controls.ts",
         "src/features/downloads/downloadValidation.ts",
+        "src/features/downloads/errorMessages.ts",
         "src/features/downloads/filters.ts",
         "src/features/downloads/format.ts",
         "src/features/downloads/useDownloads.ts",
@@ -216,6 +217,7 @@
         "src/features/settings/useSettings.ts",
         "src/i18n/index.tsx",
         "src/lib/cn.ts",
+        "src/lib/dialog.ts",
         "src/lib/downloads.ts",
         "src/lib/events.ts",
         "src/lib/format.ts",
@@ -718,6 +720,12 @@
           "visibility": "public"
         },
         {
+          "file": "src/features/downloads/errorMessages.ts",
+          "name": "errorMessageKey",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
           "file": "src/features/downloads/filters.ts",
           "name": "STATE_SORT_ORDER",
           "kind": "variable",
@@ -954,6 +962,12 @@
         {
           "file": "src/lib/cn.ts",
           "name": "cn",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/dialog.ts",
+          "name": "pickDirectory",
           "kind": "function",
           "visibility": "public"
         },
@@ -1345,6 +1359,7 @@
       ],
       "tests": [
         "src/App.test.tsx",
+        "src/app/AppShell.feedback.test.tsx",
         "src/app/AppShell.keyboard.test.tsx",
         "src/app/AppShell.test.tsx",
         "src/components/ui/badge.test.tsx",
@@ -1358,6 +1373,7 @@
         "src/features/diagnostics/DiagnosticsPanel.test.tsx",
         "src/features/downloads/BatchDownloadDialog.test.tsx",
         "src/features/downloads/DeleteConfirmDialog.test.tsx",
+        "src/features/downloads/NewDownloadDialog.destination.test.tsx",
         "src/features/downloads/NewDownloadDialog.test.tsx",
         "src/features/downloads/TaskDetails.test.tsx",
         "src/features/downloads/TaskRow.test.tsx",
@@ -1365,6 +1381,7 @@
         "src/features/downloads/categories.test.ts",
         "src/features/downloads/controls.test.ts",
         "src/features/downloads/downloadValidation.test.ts",
+        "src/features/downloads/errorMessages.test.ts",
         "src/features/downloads/filters.test.ts",
         "src/features/downloads/format.test.ts",
         "src/features/downloads/useDownloads.actions.test.ts",
@@ -1372,7 +1389,8 @@
         "src/features/downloads/useProbe.test.ts",
         "src/features/settings/SettingsDialog.test.tsx",
         "src/features/settings/useSettings.test.ts",
-        "src/i18n/index.test.tsx"
+        "src/i18n/index.test.tsx",
+        "src/lib/dialog.test.ts"
       ],
       "depends_on": [],
       "relations": [
@@ -1409,6 +1427,16 @@
         {
           "kind": "imports",
           "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/components/ui/Toast.tsx#Toast"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/components/ui/Toast.tsx#ToastTone"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
           "to": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog"
         },
         {
@@ -1440,6 +1468,11 @@
           "kind": "imports",
           "from": "src/app/AppShell.tsx#AppShell",
           "to": "src/features/downloads/controls.ts#taskActions"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/errorMessages.ts#errorMessageKey"
         },
         {
           "kind": "imports",
@@ -1704,6 +1737,11 @@
         {
           "kind": "imports",
           "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/lib/dialog.ts#pickDirectory"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
           "to": "src/lib/downloads.ts#addDownload"
         },
         {
@@ -1874,6 +1912,11 @@
         {
           "kind": "imports",
           "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/lib/dialog.ts#pickDirectory"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
           "to": "src/lib/downloads.ts#addDownload"
         },
         {
@@ -1900,6 +1943,11 @@
           "kind": "imports",
           "from": "src/features/downloads/TaskDetails.tsx#TaskDetails",
           "to": "src/features/downloads/controls.ts#taskActions"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskDetails.tsx#TaskDetails",
+          "to": "src/features/downloads/errorMessages.ts#errorMessageKey"
         },
         {
           "kind": "imports",
@@ -1965,6 +2013,11 @@
           "kind": "imports",
           "from": "src/features/downloads/TaskRow.tsx#TaskRow",
           "to": "src/features/downloads/controls.ts#taskActions"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskRow.tsx#TaskRow",
+          "to": "src/features/downloads/errorMessages.ts#errorMessageKey"
         },
         {
           "kind": "imports",
@@ -2298,6 +2351,16 @@
         },
         {
           "kind": "imports",
+          "from": "src/lib/dialog.ts#pickDirectory",
+          "to": "src/lib/tauri.ts#isTauriRuntime"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/dialog.ts#pickDirectory",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
           "from": "src/lib/downloads.ts#addDownload",
           "to": "src/lib/tauri.ts#invokeCommand"
         },
@@ -2492,6 +2555,7 @@
       "read_scope": [
         "src/App.test.tsx",
         "src/App.tsx",
+        "src/app/AppShell.feedback.test.tsx",
         "src/app/AppShell.keyboard.test.tsx",
         "src/app/AppShell.test.tsx",
         "src/app/AppShell.tsx",
@@ -2520,6 +2584,7 @@
         "src/features/downloads/DeleteConfirmDialog.test.tsx",
         "src/features/downloads/DeleteConfirmDialog.tsx",
         "src/features/downloads/DownloadsView.tsx",
+        "src/features/downloads/NewDownloadDialog.destination.test.tsx",
         "src/features/downloads/NewDownloadDialog.test.tsx",
         "src/features/downloads/NewDownloadDialog.tsx",
         "src/features/downloads/TaskDetails.test.tsx",
@@ -2535,6 +2600,8 @@
         "src/features/downloads/controls.ts",
         "src/features/downloads/downloadValidation.test.ts",
         "src/features/downloads/downloadValidation.ts",
+        "src/features/downloads/errorMessages.test.ts",
+        "src/features/downloads/errorMessages.ts",
         "src/features/downloads/filters.test.ts",
         "src/features/downloads/filters.ts",
         "src/features/downloads/format.test.ts",
@@ -2556,6 +2623,8 @@
         "src/i18n/index.tsx",
         "src/i18n/zh-CN.ts",
         "src/lib/cn.ts",
+        "src/lib/dialog.test.ts",
+        "src/lib/dialog.ts",
         "src/lib/downloads.ts",
         "src/lib/events.ts",
         "src/lib/format.ts",
@@ -2674,7 +2743,7 @@
       ],
       "relations": [],
       "owner_role": "shared",
-      "responsibility": "Headless download engine: probe, transport, planner, part file, workers, scheduler, service actor, retry, rate limiting, cookies, destinations, deletion, and state machines",
+      "responsibility": "Headless download engine: probe, transport, planner, conflict-aware part files, workers, scheduler, service actor, retry, rate limiting, cookies, destinations, final-URL recording, deletion, and state machines",
       "read_scope": [
         "src-tauri/src/engine/scheduler.rs",
         "src-tauri/src/engine/service.rs",
@@ -2753,7 +2822,7 @@
       "depends_on": [],
       "relations": [],
       "owner_role": "shared",
-      "responsibility": "Durable SQLite task store: connection setup, schema 1 and 2 migrations, per-task destinations, task and segment records, and progress persistence",
+      "responsibility": "Durable SQLite task store: connection setup, schema 1 and 2 migrations, per-task destinations, part names, minimized final URLs, task and segment records, and progress persistence",
       "read_scope": [
         "src-tauri/src/store/db.rs",
         "src-tauri/src/store/migrations.rs",

@@ -6,6 +6,7 @@ import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { Input } from "../../components/ui/Input";
 import { useI18n } from "../../i18n";
+import { pickDirectory } from "../../lib/dialog";
 import { addDownload } from "../../lib/downloads";
 import type { HeaderPair } from "../../types/downloads";
 
@@ -126,7 +127,22 @@ export function BatchDownloadDialog({
     rejected: number;
   } | null>(null);
   const [batchError, setBatchError] = useState<string | null>(null);
+  const [pickingDirectory, setPickingDirectory] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  const handleBrowse = async () => {
+    setPickingDirectory(true);
+    const result = await pickDirectory();
+    setPickingDirectory(false);
+    if (result.ok) {
+      if (result.data !== null) {
+        setDestination(result.data);
+        setErrors((current) => ({ ...current, destination: undefined }));
+      }
+      return;
+    }
+    setBatchError(t("download.browseFailed"));
+  };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -218,15 +234,26 @@ export function BatchDownloadDialog({
           />
         </div>
 
-        <Input
-          label={t("download.destination")}
-          value={destination}
-          autoComplete="off"
-          error={
-            errors.destination ? t(`validation.${errors.destination}`) : undefined
-          }
-          onChange={(event) => setDestination(event.target.value)}
-        />
+        <div className="og-field-with-action">
+          <Input
+            label={t("download.destination")}
+            value={destination}
+            autoComplete="off"
+            error={
+              errors.destination
+                ? t(`validation.${errors.destination}`)
+                : undefined
+            }
+            onChange={(event) => setDestination(event.target.value)}
+          />
+          <Button
+            variant="secondary"
+            loading={pickingDirectory}
+            onClick={() => void handleBrowse()}
+          >
+            {t("download.browse")}
+          </Button>
+        </div>
 
         <Input
           label={t("download.connections")}

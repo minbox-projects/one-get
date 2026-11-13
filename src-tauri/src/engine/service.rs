@@ -387,8 +387,13 @@ async fn handle_command(engine: &Rc<Engine>, run: &mut Option<RunFuture>, comman
             let _ = reply.send(result);
         }
         Command::Probe(request, reply) => {
-            let result = probe_request(request).await;
-            let _ = reply.send(result.map(Reply::Probe));
+            // A probe can stall on the network. Run it alongside the request
+            // loop and the engine loop so list and control requests keep
+            // flowing while it is pending.
+            drop(tokio::spawn(async move {
+                let result = probe_request(request).await;
+                let _ = reply.send(result.map(Reply::Probe));
+            }));
         }
         Command::Add(request, reply) => {
             let result = add_request(engine, request);

@@ -9,6 +9,7 @@ import type { AppError } from "../../types/app";
 import type { DownloadSegment, DownloadSummary } from "../../types/downloads";
 
 import { taskActions } from "./controls";
+import { errorMessageKey } from "./errorMessages";
 
 export interface TaskDetailsProps {
   task: DownloadSummary;
@@ -129,9 +130,9 @@ export function TaskDetails({
           {task.errorCode ? (
             <p className="og-details__error-code">{task.errorCode}</p>
           ) : null}
-          {task.errorMessage ? (
-            <p className="og-details__error-message">{task.errorMessage}</p>
-          ) : null}
+          <p className="og-details__error-message">
+            {t(errorMessageKey(task.errorCode ?? ""))}
+          </p>
         </section>
       ) : null}
 
@@ -152,7 +153,7 @@ export function TaskDetails({
         ) : (
           <ul className="og-details__segment-list">
             {segments.map((segment) => {
-              const length = segment.end - segment.start + 1;
+              const length = segment.end - segment.start;
               const percent =
                 length > 0 ? (segment.downloadedBytes / length) * 100 : null;
               return (

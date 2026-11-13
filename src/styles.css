@@ -405,6 +405,13 @@ body {
   gap: var(--og-space-2);
 }
 
+.og-field-with-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--og-space-2);
+}
+
 .og-field__label {
   font-size: 0.8125rem;
   font-weight: 600;
@@ -925,6 +932,15 @@ body {
   min-width: 0;
 }
 
+.og-toast-region {
+  position: fixed;
+  right: var(--og-space-4);
+  bottom: var(--og-space-4);
+  z-index: 60;
+  width: min(24rem, calc(100vw - 2 * var(--og-space-4)));
+  box-shadow: var(--og-shadow-dialog);
+}
+
 .og-toast__dismiss {
   display: inline-flex;
   align-items: center;
@@ -1059,12 +1075,17 @@ body {
 }
 
 .og-task-row__domain,
-.og-task-row__category {
+.og-task-row__category,
+.og-task-row__error {
   overflow: hidden;
   color: var(--og-text-muted);
   font-size: 0.8125rem;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.og-task-row__error {
+  color: var(--og-error);
 }
 
 .og-task-row__meta {

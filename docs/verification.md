@@ -232,7 +232,7 @@ The engine and store implementation, automated suites, harness, and soak harness
 
 Date: 2026-11-13
 
-This section records the delivered task-first desktop download interface, its Tauri command surface and engine service, per-task destinations, deletion and open actions, settings schema 2, bilingual interface, virtualization, and mock-IPC browser layer. The automated evidence below is accepted for the final delivery head. Implementation completion and automated green results are not Phase 2 exit.
+This section records the delivered task-first desktop download interface, its Tauri command surface and engine service, per-task destinations, deletion and open actions, settings schema 2, bilingual interface, virtualization, and mock-IPC browser layer. The automated evidence below was captured after the repair at the unchanged delivery head, before this documentation-only change, which adds no product behavior. Implementation completion and automated green results are not Phase 2 exit.
 
 ### Environment
 
@@ -250,25 +250,38 @@ Frontend commands ran from the repository root; Rust commands ran in `src-tauri/
 
 | Command | Result |
 | --- | --- |
-| `npm run check:pins` | Passed: 26 direct npm entries are exact versions. |
+| `npm run check:pins` | Passed: 27 direct npm entries are exact versions. |
 | `npm run typecheck` | Passed: strict TypeScript project build. |
 | `npm run lint` | Passed: ESLint with React hooks and refresh rules. |
-| `npm run test` | Passed: 29 Vitest files, 225 tests. |
+| `npm run test` | Passed: 33 Vitest files, 264 tests. |
 | `npm run build` | Passed: production Vite build. |
 | `npm run test:e2e` | Passed: 30 Playwright tests across the chromium-light and chromium-dark projects. |
 | `cargo fmt -- --check` | Passed: exit 0. |
 | `cargo check --locked` | Passed: exit 0. |
 | `cargo clippy --all-targets -- -D warnings` | Passed: exit 0. |
-| `cargo test --locked` | Passed: 167 tests, 1 ignored long soak. |
+| `cargo test --locked` | Passed: 174 tests, 1 ignored long soak. |
 
-The Rust suites report: config 10, downloads_commands 8, engine_download 10, engine_large 4, engine_network 23, engine_probe 12, engine_queue 17, engine_recovery 9, engine_redaction 2, engine_segments 6, logging_redaction 2, manifest 13, platform_filename 2, platform_files 7, platform_opener 2, platform_paths 3, platform_process 4, platform_secrets 6, shell_contract 13, the short soak smoke 1, and store 13.
+The Rust suites report: config 10, downloads_commands 11, engine_download 10, engine_large 4, engine_network 23, engine_probe 12, engine_queue 19, engine_recovery 9, engine_redaction 2, engine_segments 6, logging_redaction 2, manifest 13, platform_filename 2, platform_files 7, platform_opener 2, platform_paths 3, platform_process 4, platform_secrets 6, shell_contract 13, the short soak smoke 1, and store 15.
 
 Automated layers:
 
-- Vitest covers components, typed IPC wrappers, validation, i18n, polling, and 10,000-row virtualization.
-- Rust integration tests cover the download commands, settings schema 2, store migration and destinations, record and file deletion, the platform opener, the shell contract, and the retained engine suites.
+- Vitest covers components, typed IPC wrappers, validation, i18n, engine-error localization, polling, and 10,000-row virtualization.
+- Rust integration tests cover the download commands, settings schema 2, store migration, destinations and final URLs, conflict-safe part names, record and file deletion, the platform opener, the shell contract, and the retained engine suites.
 - Playwright runs against deterministic mock IPC in `e2e/support/mock-ipc.ts`; it covers new download, controls, deletion, settings, language switching, and 10,000-row scrolling without any public-network dependency.
 - The hosted CI workflow was not run again for this revision. The earlier shell-baseline run remains the only hosted evidence.
+
+### Repaired delivery facts
+
+The initial review found blockers, and the repair landed before this documentation change. The verified behavior now includes:
+
+- Task-store schema 2 also has nullable `final_url`. The worker persists the post-redirect URL through the same minimizer, so userinfo, query, and fragment are absent, and `downloads_list` exposes it as `finalUrl` for redacted details.
+- Same destination and filename tasks are safe. The normal part name is `<filename>.oneget.part`; only on a conflict does the engine use `<filename>.<first 8 of task id>.oneget.part`. The chosen name is persisted in `part_path` and drives download, resume, finalize, cancel, recovery, delete, and existence checks, with a legacy-name fallback. Final unique-rename behavior is unchanged.
+- The engine service runs slow probes concurrently with the request and run loops, so a pending probe does not stall downloads or listings. Startup recovery completes before the service starts, and paused-task revalidation is guarded to run once per engine instance rather than on every run-loop restart.
+- `@tauri-apps/plugin-dialog` 2.8.4 provides the localized directory picker in the new and batch dialogs, and `INVALID_DESTINATION` surfaces as a destination-specific actionable error.
+- Stable engine codes are localized through `src/features/downloads/errorMessages.ts`; `CHECKSUM_MISMATCH` tells the user to retry only with the correct expected SHA-256 or without it. Success actions show localized toasts. Segment ranges are half-open, and connection and rate inputs enforce the `u32` and `u64` bounds.
+- The diagnostics panel remains a retained, tested module that the task-first shell does not mount; the Toast primitive is mounted.
+
+One earlier full-suite run failed the short soak under transient infrastructure contention. The isolated `cargo test --test soak` run and the following full `cargo test --locked` run passed. This record reports that early failure truthfully as infrastructure contention, not as a product failure, and does not present the earlier run as green at the time it occurred.
 
 ### Acceptance criteria
 
@@ -282,15 +295,15 @@ Automated layers:
 | AC-006 | Passed (automated) | New-download component tests and the Playwright add flow create and list a task. |
 | AC-007 | Passed (automated) | Validation tests reject every listed URL, filename, connection, rate, checksum, and header boundary. |
 | AC-008 | Passed (automated) | Probe tests cover success, unknown length, ignored Range, HTML allowance, and failure. |
-| AC-009 | Passed (automated) | Destination validation accepts writable directories and rejects invalid ones. |
+| AC-009 | Passed (automated) | Destination tests exercise the `@tauri-apps/plugin-dialog` picker, accept writable directories, reject invalid ones, and show the localized `INVALID_DESTINATION` action error instead of a generic failure. |
 | AC-010 | Passed (automated) | Batch tests report line errors, skip in-batch duplicates, and add valid URLs. |
 | AC-011 | Passed (automated) | Batch tests apply shared destination, connections, rate, and headers to every accepted task. |
 | AC-012 | Passed (automated) | Control tests cover state-aware enablement and typed errors for every task state. |
 | AC-013 | Passed (automated) | Control and Rust deletion tests prove part-only cancel, retry preservation, and the active-task precondition. |
 | AC-014 | Passed (automated) | Bulk-action tests update eligible tasks and observe the polled state within one interval. |
 | AC-015 | Passed (automated) | Record-deletion tests keep the completed final file and remove only the record and part. |
-| AC-016 | Passed (automated) | File-deletion tests require confirmation and keep the record on a missing-file or permission failure. |
-| AC-017 | Passed (automated) | Details tests cover redacted URLs, directory, sizes, speed, ETA, connections, timestamps, errors, and segments. |
+| AC-016 | Passed (automated) | File-deletion tests require confirmation, remove only the completed final file and record, and keep the record on a missing-file or permission failure; same-name tasks keep independent recorded parts. |
+| AC-017 | Passed (automated) | Details tests cover redacted stored and post-redirect `finalUrl`, directory, sizes, speed, ETA, connections, timestamps, localized errors, and segments; a one-byte half-open segment renders as complete. |
 | AC-018 | Passed (automated) | Open and copy tests cover the platform opener, missing targets, and redacted stored URLs. |
 | AC-019 | Passed (automated) | Settings tests cover save, reopen persistence, the read-only network placeholder, and unknown-field preservation. |
 | AC-020 | Passed (automated) | Config tests cover version 1 migration, corrupt backup recovery, and future-schema read-only behavior. |
@@ -301,7 +314,7 @@ Automated layers:
 | AC-025 | Passed (automated) | Wrapper and fallback tests cover a missing runtime and rejected IPC without exposing internals. |
 | AC-026 | Passed (automated) | The i18n audit covers both dictionaries, system detection, immediate switching, and locale formatting. |
 | AC-027 | Passed (automated) | Component and Playwright keyboard tests cover shortcuts, focus trap and restore, and accessible names. |
-| AC-028 | Passed (automated) | State tests cover loading, empty, filtered-empty, retryable error, confirmations, and success feedback. |
+| AC-028 | Passed (automated) | State tests cover loading, empty, filtered-empty, retryable error, confirmations, and localized success toasts; stable engine codes, including `CHECKSUM_MISMATCH`, render through localized dictionary messages rather than raw prose. |
 | AC-029 | Passed | This section lists the automated layers, manual status, pending gates, and blocked exit. |
 | AC-030 | Partial | Vitest, Rust, and mock-IPC Playwright layers passed; the manual real-app local HTTP download is pending. |
 
@@ -317,14 +330,14 @@ Component and mock-IPC results prove the interface behavior under deterministic 
 | Manual real-app local HTTP download | Pending | Not performed at this revision. |
 | Manual macOS acceptance | Pending | Launch, add, controls, details, open, delete, settings, language, and visual checks remain pending. |
 | Manual Windows acceptance | Pending | Install, launch, download, opener, deletion, settings, and platform checks remain pending. |
-| Design review | Not performed | No design review has been recorded for this revision. |
+| Design review | Initial review completed with blockers; repairs applied; targeted recheck pending | The full review found defects, the aggregate repair landed and the automated gates above passed, but no targeted recheck verdict is recorded yet. |
 
-The Phase 0 matrix and the Phase 1 soak and Windows gates block Phase 2 exit unless the user records a dated explicit waiver. The manual real-application download and the design review are also outstanding. No pending item above is recorded as passed.
+The Phase 0 matrix and the Phase 1 soak and Windows gates block Phase 2 exit unless the user records a dated explicit waiver. The manual real-application download and the targeted design-review recheck are also outstanding. No pending item above is recorded as passed.
 
 ### Documentation and navigation evidence
 
-The implemented architecture note triplet is paired and validated, and the active shell-baseline and engine notes remain active and linked. The context index was rebuilt and validated. The context indexer discovers only TypeScript modules, so the Rust `engine`, `store`, `commands`, and `engine-harness` entries are maintained by hand; a rebuild without reapplication drops them, and `navigation.md` is regenerated from the JSON authority.
+The implemented architecture note triplet records the repaired delivery facts, is paired, and passes both filesystem and baseline validation. The active shell-baseline and engine notes remain active and linked; the UI record partially supersedes their earlier surface, part-name, and schema-version statements while retaining the process, platform, engine, and store invariants they still own. The navigation index was rebuilt for the new TypeScript modules and symbols, the hand-maintained Rust entries were reapplied, the Markdown view was regenerated from the JSON authority, and the full context validation passes. The context indexer discovers only TypeScript modules, so the Rust `engine`, `store`, `commands`, and `engine-harness` entries remain hand-maintained and a rebuild without reapplication drops them.
 
 ### Exit statement
 
-Phase 2 exit is blocked. It requires the Phase 0 manual matrix and the Phase 1 24-hour soak and Windows compatibility records, or a dated explicit user waiver, plus a recorded manual real-application local HTTP download and a design review. The automated evidence is green, but it is not a phase-exit approval.
+Phase 2 exit is blocked. It requires the Phase 0 manual matrix and the Phase 1 24-hour soak and Windows compatibility records, or a dated explicit user waiver, plus a recorded manual real-application local HTTP download and a completed design review with its targeted recheck. The post-repair automated evidence is green, but it is not a phase-exit approval.

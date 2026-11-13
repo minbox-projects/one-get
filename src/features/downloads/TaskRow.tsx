@@ -8,6 +8,7 @@ import type { DownloadSummary } from "../../types/downloads";
 
 import { categoryForFilename } from "./categories";
 import { taskActions } from "./controls";
+import { errorMessageKey } from "./errorMessages";
 import { domainFromUrl, progressPercent } from "./format";
 
 export interface TaskRowProps {
@@ -74,6 +75,11 @@ export function TaskRow({
         </button>
         <span className="og-task-row__domain">{domain ?? unknown}</span>
         <span className="og-task-row__category">{t(`nav.${category}`)}</span>
+        {task.errorCode ? (
+          <span className="og-task-row__error" title={task.errorCode}>
+            {task.errorCode}: {t(errorMessageKey(task.errorCode))}
+          </span>
+        ) : null}
       </div>
 
       <div className="og-task-row__meta">

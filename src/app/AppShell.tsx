@@ -10,10 +10,13 @@ import {
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
+import { Toast } from "../components/ui/Toast";
+import type { ToastTone } from "../components/ui/Toast";
 import { BatchDownloadDialog } from "../features/downloads/BatchDownloadDialog";
 import { DeleteConfirmDialog } from "../features/downloads/DeleteConfirmDialog";
 import type { DeleteMode } from "../features/downloads/DeleteConfirmDialog";
 import { DownloadsView } from "../features/downloads/DownloadsView";
+import { errorMessageKey } from "../features/downloads/errorMessages";
 import { NewDownloadDialog } from "../features/downloads/NewDownloadDialog";
 import { TaskDetails } from "../features/downloads/TaskDetails";
 import { SettingsDialog } from "../features/settings/SettingsDialog";
@@ -87,6 +90,9 @@ export function AppShell() {
   const [segmentsLoading, setSegmentsLoading] = useState(false);
   const [segmentsError, setSegmentsError] = useState<AppError | null>(null);
   const [actionError, setActionError] = useState<AppError | null>(null);
+  const [toast, setToast] = useState<{ key: string; tone: ToastTone } | null>(
+    null,
+  );
   const [deleteMode, setDeleteMode] = useState<DeleteMode | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const focusReturnRef = useRef<HTMLElement | null>(null);
@@ -169,6 +175,22 @@ export function AppShell() {
         : t("error.settingsLoad");
 
   const visibleActionError = actionError ?? downloads.actionError;
+  const actionErrorText =
+    visibleActionError === null
+      ? null
+      : (() => {
+          const key = errorMessageKey(visibleActionError.code);
+          return key === "error.generic"
+            ? visibleActionError.message
+            : t(key);
+        })();
+
+  const showToast = useCallback(
+    (key: string, tone: ToastTone = "success") => {
+      setToast({ key, tone });
+    },
+    [],
+  );
 
   const busy = loading || downloads.loading;
 
@@ -355,6 +377,7 @@ export function AppShell() {
           throw new Error("clipboard unavailable");
         }
         await navigator.clipboard.writeText(redactStoredUrl(task.url));
+        showToast("details.copied");
       } catch {
         setActionError({
           code: "clipboard_unavailable",
@@ -362,10 +385,50 @@ export function AppShell() {
         });
       }
     },
-    [t],
+    [showToast, t],
   );
 
-  const handleConfirmDelete = useCallback(() => {
+  const handlePause = useCallback(
+    async (task: DownloadSummary) => {
+      setActionError(null);
+      if (await downloads.pauseTask(task.id)) {
+        showToast("toast.paused");
+      }
+    },
+    [downloads, showToast],
+  );
+
+  const handleResume = useCallback(
+    async (task: DownloadSummary) => {
+      setActionError(null);
+      if (await downloads.resumeTask(task.id)) {
+        showToast("toast.resumed");
+      }
+    },
+    [downloads, showToast],
+  );
+
+  const handleCancel = useCallback(
+    async (task: DownloadSummary) => {
+      setActionError(null);
+      if (await downloads.cancelTask(task.id)) {
+        showToast("toast.cancelled");
+      }
+    },
+    [downloads, showToast],
+  );
+
+  const handleRetry = useCallback(
+    async (task: DownloadSummary) => {
+      setActionError(null);
+      if (await downloads.retryTask(task.id)) {
+        showToast("toast.retried");
+      }
+    },
+    [downloads, showToast],
+  );
+
+  const handleConfirmDelete = useCallback(async () => {
     if (deleteMode === null || selectedTask === null) {
       return;
     }
@@ -373,13 +436,15 @@ export function AppShell() {
     const mode = deleteMode;
     setDeleteMode(null);
     setActionError(null);
-    if (mode === "record") {
-      void downloads.deleteRecord(id);
-    } else {
-      void downloads.deleteFile(id);
+    const ok =
+      mode === "record"
+        ? await downloads.deleteRecord(id)
+        : await downloads.deleteFile(id);
+    if (ok) {
+      showToast("toast.deleted");
     }
     clearSelection();
-  }, [clearSelection, deleteMode, downloads, selectedTask]);
+  }, [clearSelection, deleteMode, downloads, selectedTask, showToast]);
 
   const renderSidebarItem = ({ view, key }: { view: SidebarView; key: string }) => (
     <button
@@ -482,9 +547,9 @@ export function AppShell() {
             </p>
           ) : null}
 
-          {visibleActionError ? (
+          {actionErrorText ? (
             <p className="og-banner" role="alert">
-              {visibleActionError.message}
+              {actionErrorText}
             </p>
           ) : null}
 
@@ -506,10 +571,10 @@ export function AppShell() {
               onRetry={() => void downloads.refresh()}
               selectedId={selectedId}
               onSelect={handleSelect}
-              onPause={(task) => void downloads.pauseTask(task.id)}
-              onResume={(task) => void downloads.resumeTask(task.id)}
-              onCancel={(task) => void downloads.cancelTask(task.id)}
-              onRetryTask={(task) => void downloads.retryTask(task.id)}
+              onPause={(task) => void handlePause(task)}
+              onResume={(task) => void handleResume(task)}
+              onCancel={(task) => void handleCancel(task)}
+              onRetryTask={(task) => void handleRetry(task)}
             />
           </section>
 
@@ -529,10 +594,10 @@ export function AppShell() {
                 onOpenFile={(task) => void handleOpenFile(task)}
                 onOpenFolder={(task) => void handleOpenFolder(task)}
                 onCopyUrl={(task) => void handleCopyUrl(task)}
-                onPause={(task) => void downloads.pauseTask(task.id)}
-                onResume={(task) => void downloads.resumeTask(task.id)}
-                onCancel={(task) => void downloads.cancelTask(task.id)}
-                onRetry={(task) => void downloads.retryTask(task.id)}
+                onPause={(task) => void handlePause(task)}
+                onResume={(task) => void handleResume(task)}
+                onCancel={(task) => void handleCancel(task)}
+                onRetry={(task) => void handleRetry(task)}
                 onDeleteRecord={() => requestDelete("record")}
                 onDeleteFile={() => requestDelete("file")}
                 onClose={clearSelection}
@@ -563,6 +628,17 @@ export function AppShell() {
         </div>
       </footer>
 
+      {toast ? (
+        <div className="og-toast-region">
+          <Toast
+            message={t(toast.key)}
+            tone={toast.tone}
+            dismissLabel={t("common.dismiss")}
+            onDismiss={() => setToast(null)}
+          />
+        </div>
+      ) : null}
+
       {newOpen ? (
         <NewDownloadDialog
           open
@@ -590,6 +666,7 @@ export function AppShell() {
           onSaved={(next) => {
             setSettings(next);
             setSettingsOpen(false);
+            showToast("toast.settingsSaved");
           }}
         />
       ) : null}

@@ -10,7 +10,9 @@ export interface DownloadSettingsValue {
 export type DownloadSettingsErrorKey =
   | "validation.connections_range"
   | "validation.concurrency_positive"
-  | "validation.rate_limit_positive";
+  | "validation.concurrency_range"
+  | "validation.rate_limit_positive"
+  | "validation.rate_limit_range";
 
 export interface DownloadSettingsErrors {
   defaultConnections?: DownloadSettingsErrorKey;

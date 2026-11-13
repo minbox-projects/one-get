@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { dictionaries } from "../../i18n";
 import type { HeaderPair } from "../../types/downloads";
 import type {
   NewDownloadFormValues,
@@ -131,6 +132,13 @@ describe("validateConnections", () => {
     expect(validateConnections("64")).toBeNull();
     expect(validateConnections("8")).toBeNull();
   });
+
+  it("rejects values above the u32 bounds", () => {
+    expect(validateConnections("4294967296")).toBe("connections_range");
+    expect(validateConnections("99999999999999999999999999")).toBe(
+      "connections_range",
+    );
+  });
 });
 
 describe("validateRateLimit", () => {
@@ -150,6 +158,16 @@ describe("validateRateLimit", () => {
     expect(validateRateLimit("")).toBeNull();
     expect(validateRateLimit("1")).toBeNull();
     expect(validateRateLimit("1048576")).toBeNull();
+  });
+
+  it("accepts u64::MAX and rejects values above the u64 bounds", () => {
+    expect(validateRateLimit("18446744073709551615")).toBeNull();
+    expect(validateRateLimit("18446744073709551616")).toBe(
+      "rate_limit_range",
+    );
+    expect(validateRateLimit("99999999999999999999999999")).toBe(
+      "rate_limit_range",
+    );
   });
 });
 
@@ -255,4 +273,26 @@ describe("validateDownloadForm", () => {
     expect(errors.expectedSha256).toBe("sha256_format");
     expect(Object.values(errors)).toContain("header_forbidden");
   });
+
+  it("reports range errors for values above the integer bounds", () => {
+    const errors = validateDownloadForm(
+      form({
+        connections: "4294967296",
+        rateLimit: "18446744073709551616",
+      }),
+    );
+
+    expect(errors.connections).toBe("connections_range");
+    expect(errors.rateLimit).toBe("rate_limit_range");
+  });
+});
+
+describe("localized range messages", () => {
+  it.each(["en-US", "zh-CN"] as const)(
+    "defines connection and rate range messages in %s",
+    (language) => {
+      expect(dictionaries[language]["validation.connections_range"]).toBeTruthy();
+      expect(dictionaries[language]["validation.rate_limit_range"]).toBeTruthy();
+    },
+  );
 });

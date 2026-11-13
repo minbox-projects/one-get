@@ -1849,3 +1849,242 @@ async fn delete_file_reports_missing_final_and_rejects_non_completed_states() {
         "a rejected delete_file must keep the record"
     );
 }
+
+async fn wait_for_part_paths(store: &Database, ids: &[String], deadline: Duration) -> Vec<String> {
+    let start = Instant::now();
+    loop {
+        let paths: Option<Vec<String>> = ids
+            .iter()
+            .map(|id| {
+                store
+                    .task(id)
+                    .expect("load task")
+                    .expect("task exists")
+                    .part_path
+            })
+            .collect();
+        if let Some(paths) = paths {
+            return paths;
+        }
+        if start.elapsed() > deadline {
+            panic!("timed out waiting for persisted part paths for {ids:?}");
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
+fn destination_files(dest: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dest)
+        .expect("read destination")
+        .map(|entry| entry.expect("destination entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| !name.ends_with(".oneget.part"))
+        })
+        .collect()
+}
+
+fn leftover_parts(dest: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dest)
+        .expect("read destination")
+        .map(|entry| entry.expect("destination entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".oneget.part"))
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn same_name_concurrent_tasks_keep_independent_parts_and_final_files() {
+    let body_a = pattern_bytes(221, 256 * 1024);
+    let body_b = pattern_bytes(222, 256 * 1024);
+    let server_a = RangeServer::start(FixtureConfig {
+        body: body_a.clone(),
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let server_b = RangeServer::start(FixtureConfig {
+        body: body_b.clone(),
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 2 },
+    );
+
+    let hash_a = sha256_hex(&body_a);
+    let hash_b = sha256_hex(&body_b);
+    let id_a = engine
+        .add_task(make_spec(
+            server_a.url("/same-name/a"),
+            "same.bin",
+            1,
+            Some(hash_a.clone()),
+        ))
+        .expect("add first same-name task");
+    let id_b = engine
+        .add_task(make_spec(
+            server_b.url("/same-name/b"),
+            "same.bin",
+            1,
+            Some(hash_b.clone()),
+        ))
+        .expect("add second same-name task");
+
+    tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine.run())
+                .await
+                .expect("run timeout")
+                .expect("run");
+        },
+        async {
+            let part_paths =
+                wait_for_part_paths(engine.store(), &[id_a.clone(), id_b.clone()], WAIT_TIMEOUT)
+                    .await;
+            assert_ne!(
+                part_paths[0], part_paths[1],
+                "same-name tasks must persist distinct part paths, got {part_paths:?}"
+            );
+            wait_for_all_completed(engine.store(), &[id_a.clone(), id_b.clone()], WAIT_TIMEOUT)
+                .await;
+        }
+    );
+
+    for (id, expected_hash) in [(&id_a, &hash_a), (&id_b, &hash_b)] {
+        let task = engine.store().task(id).unwrap().unwrap();
+        assert_eq!(task.state, TaskState::Completed);
+        assert_eq!(task.actual_sha256.as_deref(), Some(expected_hash.as_str()));
+    }
+
+    let finals = destination_files(dest.path());
+    assert_eq!(
+        finals.len(),
+        2,
+        "two same-name tasks must leave two distinct final files, got {finals:?}"
+    );
+    let mut actual_bodies: Vec<Vec<u8>> = finals.iter().map(|path| read_file(path)).collect();
+    actual_bodies.sort();
+    let mut expected_bodies = vec![body_a, body_b];
+    expected_bodies.sort();
+    assert_eq!(
+        actual_bodies, expected_bodies,
+        "each same-name task must finalize its own bytes"
+    );
+    assert!(
+        leftover_parts(dest.path()).is_empty(),
+        "completed same-name tasks must not leave a part file behind"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_one_same_name_task_leaves_the_other_part_and_final_intact() {
+    let body_stop = pattern_bytes(223, 2 * 1024 * 1024);
+    let body_keep = pattern_bytes(224, 2 * 1024 * 1024);
+    let server_stop = RangeServer::start(FixtureConfig {
+        body: body_stop,
+        range_mode: RangeMode::HonorRange,
+        stream_delay: Some(Duration::from_millis(20)),
+        stream_chunk_size: 16 * 1024,
+        ..Default::default()
+    });
+    let server_keep = RangeServer::start(FixtureConfig {
+        body: body_keep.clone(),
+        range_mode: RangeMode::HonorRange,
+        stream_delay: Some(Duration::from_millis(20)),
+        stream_chunk_size: 16 * 1024,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 2 },
+    );
+
+    let hash_keep = sha256_hex(&body_keep);
+    let id_stop = engine
+        .add_task(make_spec(
+            server_stop.url("/paired/stop"),
+            "paired.bin",
+            1,
+            None,
+        ))
+        .expect("add task to cancel");
+    let id_keep = engine
+        .add_task(make_spec(
+            server_keep.url("/paired/keep"),
+            "paired.bin",
+            1,
+            Some(hash_keep.clone()),
+        ))
+        .expect("add task to keep");
+
+    tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine.run())
+                .await
+                .expect("run timeout")
+                .expect("run");
+        },
+        async {
+            let part_paths = wait_for_part_paths(
+                engine.store(),
+                &[id_stop.clone(), id_keep.clone()],
+                WAIT_TIMEOUT,
+            )
+            .await;
+            assert_ne!(
+                part_paths[0], part_paths[1],
+                "same-name tasks must persist distinct part paths, got {part_paths:?}"
+            );
+            let keep_part = dest.path().join(&part_paths[1]);
+            assert!(
+                keep_part.exists(),
+                "the running same-name task must own a part file"
+            );
+
+            engine
+                .cancel(&id_stop)
+                .await
+                .expect("cancel one same-name task");
+            wait_for_state(engine.store(), &id_stop, TaskState::Cancelled, WAIT_TIMEOUT).await;
+            assert!(
+                keep_part.exists(),
+                "cancelling one same-name task must not remove the other task's part"
+            );
+
+            wait_for_state(engine.store(), &id_keep, TaskState::Completed, WAIT_TIMEOUT).await;
+            let kept = engine.store().task(&id_keep).unwrap().unwrap();
+            assert_eq!(kept.actual_sha256.as_deref(), Some(hash_keep.as_str()));
+            assert!(
+                !keep_part.exists(),
+                "the completed task's own part must be removed"
+            );
+        }
+    );
+
+    let finals = destination_files(dest.path());
+    assert_eq!(
+        finals.len(),
+        1,
+        "only the surviving same-name task may finalize a file, got {finals:?}"
+    );
+    assert_eq!(
+        read_file(&finals[0]),
+        body_keep,
+        "the surviving task must finalize its own bytes"
+    );
+    assert!(
+        leftover_parts(dest.path()).is_empty(),
+        "the surviving same-name task must not leave a part file behind"
+    );
+}

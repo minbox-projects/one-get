@@ -25,6 +25,7 @@ export type ValidationCode =
   | "destination_required"
   | "connections_range"
   | "rate_limit_positive"
+  | "rate_limit_range"
   | "sha256_format"
   | "header_forbidden"
   | "header_crlf"
@@ -41,6 +42,8 @@ export interface DownloadFormErrors {
 }
 
 const MAX_URL_LENGTH = 8 * 1024;
+const MAX_CONNECTIONS = 64n;
+const MAX_U64 = 18_446_744_073_709_551_615n;
 
 function hasControlCharacters(value: string): boolean {
   for (const character of value) {
@@ -135,8 +138,8 @@ export function validateConnections(value: string): ValidationCode | null {
   if (!/^\d+$/.test(connections)) {
     return "connections_range";
   }
-  const count = Number(connections);
-  if (count < 1 || count > 64) {
+  const count = BigInt(connections);
+  if (count < 1n || count > MAX_CONNECTIONS) {
     return "connections_range";
   }
   return null;
@@ -148,8 +151,15 @@ export function validateRateLimit(value: string): ValidationCode | null {
   if (rate.length === 0) {
     return null;
   }
-  if (!/^\d+$/.test(rate) || Number(rate) <= 0) {
+  if (!/^\d+$/.test(rate)) {
     return "rate_limit_positive";
+  }
+  const parsed = BigInt(rate);
+  if (parsed <= 0n) {
+    return "rate_limit_positive";
+  }
+  if (parsed > MAX_U64) {
+    return "rate_limit_range";
   }
   return null;
 }

@@ -55,6 +55,8 @@ pub struct DownloadSummary {
     pub id: String,
     /// Stored, redacted remote URL.
     pub url: String,
+    /// Final URL after redirects, redacted before storage.
+    pub final_url: Option<String>,
     /// Sanitized destination filename.
     pub filename: String,
     /// Persisted destination directory.
@@ -120,6 +122,7 @@ impl From<Task> for DownloadSummary {
         Self {
             id: task.id,
             url: task.url,
+            final_url: task.final_url,
             filename: task.filename,
             destination: task.destination,
             state: task.state.as_str().to_string(),

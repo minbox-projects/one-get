@@ -59,11 +59,37 @@ const enUS = {
   "error.downloadsLoad": "Downloads could not be loaded.",
   "error.somethingWentWrong": "Something went wrong.",
   "error.reload": "Reload OneGet and try again.",
+  "error.CHECKSUM_MISMATCH":
+    "The downloaded file's SHA-256 checksum did not match the expected value. Retry only after confirming the correct expected SHA-256 or removing the checksum.",
+  "error.INVALID_STATE": "This action is not allowed in the task's current state.",
+  "error.INVALID_DESTINATION":
+    "Choose a writable destination folder and try again.",
+  "error.FILE_MISSING": "The downloaded file is missing from disk.",
+  "error.DISK_FULL": "The disk is full. Free space and resume the download.",
+  "error.PART_MISSING":
+    "The partial download file is missing, so the task cannot resume.",
+  "error.RANGE_IGNORED":
+    "The server ignored range requests after data had been written.",
+  "error.AUTH_REQUIRED":
+    "The server requires authentication that this download cannot provide.",
+  "error.NOT_FOUND": "The file was not found on the server.",
+  "error.RATE_LIMITED": "The server rate-limited the download. Wait and retry.",
+  "error.SERVER_ERROR": "The server returned an error. Try again later.",
+  "error.HTML_RESPONSE":
+    "The server returned an HTML page instead of the file.",
+  "error.TIMEOUT": "The request timed out. Check the connection and retry.",
+  "error.FILE_CHANGED": "The remote file changed during the download.",
+  "error.CHECKSUM_MISSING":
+    "The download finished without a checksum to verify it.",
+  "error.generic": "The download failed. Try again.",
   "common.close": "Close",
+  "common.dismiss": "Dismiss",
   "download.newTitle": "New download",
   "download.url": "URL",
   "download.filename": "Filename",
   "download.destination": "Destination",
+  "download.browse": "Browse…",
+  "download.browseFailed": "The directory picker could not be opened.",
   "download.connections": "Connections",
   "download.rateLimit": "Rate limit (bytes per second)",
   "download.expectedSha256": "Expected SHA-256",
@@ -98,6 +124,8 @@ const enUS = {
   "validation.destination_required": "Choose a destination folder.",
   "validation.connections_range": "Connections must be a whole number from 1 to 64.",
   "validation.rate_limit_positive": "The rate limit must be a positive whole number or left empty.",
+  "validation.rate_limit_range":
+    "The rate limit must not exceed 18,446,744,073,709,551,615 bytes per second.",
   "validation.sha256_format": "The expected SHA-256 must be 64 hexadecimal characters.",
   "validation.header_forbidden": "That header is managed by the app and cannot be set.",
   "validation.header_crlf": "Header names and values cannot contain line breaks.",
@@ -140,6 +168,12 @@ const enUS = {
   "details.copied": "URL copied.",
   "details.copyFailed": "The URL could not be copied to the clipboard.",
   "details.close": "Close",
+  "toast.paused": "Download paused.",
+  "toast.resumed": "Download resumed.",
+  "toast.cancelled": "Download cancelled.",
+  "toast.retried": "Download retried.",
+  "toast.deleted": "Download deleted.",
+  "toast.settingsSaved": "Settings saved.",
   "common.cancel": "Cancel",
   "delete.recordTitle": "Delete record",
   "delete.recordBody": "The downloaded file stays on disk. Only the record and any partial file are removed.",
@@ -186,6 +220,8 @@ const enUS = {
   "settings.save": "Save",
   "validation.concurrency_positive":
     "Maximum concurrent tasks must be a positive whole number.",
+  "validation.concurrency_range":
+    "Maximum concurrent tasks must not exceed 4,294,967,295.",
 
 };
 

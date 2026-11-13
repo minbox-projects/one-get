@@ -55,10 +55,11 @@ CREATE INDEX IF NOT EXISTS idx_segments_task_id
 INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '1');
 ";
 
-/// Schema 2 adds the per-task destination and the completion timestamp.
+/// Schema 2 adds the per-task destination, completion timestamp, and final URL.
 const SCHEMA_V2: &str = "
 ALTER TABLE tasks ADD COLUMN destination TEXT;
 ALTER TABLE tasks ADD COLUMN completed_at_ms INTEGER;
+ALTER TABLE tasks ADD COLUMN final_url TEXT;
 UPDATE schema_meta SET value = '2' WHERE key = 'schema_version';
 ";
 

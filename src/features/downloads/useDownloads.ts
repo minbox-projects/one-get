@@ -83,13 +83,14 @@ export function useDownloads({
   }, []);
 
   const runAction = useCallback(
-    async (operation: () => Promise<IpcResult<void>>) => {
+    async (operation: () => Promise<IpcResult<void>>): Promise<boolean> => {
       const result = await operation();
       if (!mountedRef.current) {
-        return;
+        return false;
       }
       setActionError(result.ok ? null : result.error);
       await refresh();
+      return result.ok;
     },
     [refresh],
   );

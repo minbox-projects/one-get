@@ -41,6 +41,7 @@ pub fn run() {
             forward_deep_links(app, &argv);
         }))
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,

@@ -909,3 +909,167 @@ fn assert_typed_engine_error(err: &EngineError) {
 fn assert_typed_engine_error_code(err: &EngineError, expected: &str) {
     assert_eq!(err.code(), expected, "unexpected engine error code");
 }
+
+#[test]
+fn schema_2_tasks_carry_nullable_final_url_and_record_final_url_survives_reopen() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("store.sqlite");
+
+    let task_id = {
+        let db = Database::open(&db_path).expect("open schema-2 database");
+        assert_eq!(
+            db.schema_metadata().expect("metadata").version,
+            2,
+            "current schema stays at version 2"
+        );
+        let task_id = db
+            .create_task(
+                "https://example.invalid/start?token=secret#fragment",
+                "final-url.bin",
+            )
+            .expect("create task");
+        let fresh = db.task(&task_id).expect("lookup").expect("exists");
+        assert!(
+            fresh.final_url.is_none(),
+            "a new schema-2 task has no final URL yet"
+        );
+
+        db.record_final_url(&task_id, "https://example.invalid/redirected/final-url.bin")
+            .expect("record final URL");
+        assert_eq!(
+            db.task(&task_id)
+                .expect("lookup after record")
+                .expect("exists")
+                .final_url
+                .as_deref(),
+            Some("https://example.invalid/redirected/final-url.bin"),
+            "record_final_url must persist the value on the task row"
+        );
+        task_id
+    };
+
+    let reopened = Database::open(&db_path).expect("reopen database");
+    assert_eq!(
+        reopened
+            .task(&task_id)
+            .expect("lookup after reopen")
+            .expect("exists")
+            .final_url
+            .as_deref(),
+        Some("https://example.invalid/redirected/final-url.bin"),
+        "Task.final_url must return the recorded value after reopen"
+    );
+}
+
+#[test]
+fn migrating_schema_1_database_adds_nullable_final_url_and_preserves_rows() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("store.sqlite");
+
+    {
+        let conn = Connection::open(&db_path).expect("create raw schema-1 database");
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE schema_meta (
+                 key TEXT PRIMARY KEY NOT NULL,
+                 value TEXT NOT NULL
+             );
+             CREATE TABLE tasks (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 url TEXT NOT NULL,
+                 filename TEXT NOT NULL,
+                 part_path TEXT,
+                 state TEXT NOT NULL CHECK (state IN (
+                     'queued', 'connecting', 'downloading', 'paused',
+                     'finalizing', 'completed', 'failed', 'cancelled'
+                 )),
+                 downloaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK (downloaded_bytes >= 0),
+                 total_bytes INTEGER CHECK (total_bytes IS NULL OR total_bytes >= 0),
+                 expected_sha256 TEXT,
+                 actual_sha256 TEXT,
+                 etag TEXT,
+                 last_modified TEXT,
+                 error_code TEXT,
+                 error_message TEXT,
+                 created_at_ms INTEGER NOT NULL,
+                 updated_at_ms INTEGER NOT NULL,
+                 connections INTEGER NOT NULL DEFAULT 1 CHECK (connections > 0),
+                 headers_json TEXT NOT NULL DEFAULT '[]'
+             );
+             CREATE TABLE segments (
+                 task_id TEXT NOT NULL,
+                 segment_index INTEGER NOT NULL CHECK (segment_index >= 0),
+                 start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
+                 end_offset INTEGER NOT NULL CHECK (end_offset > start_offset),
+                 downloaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK (downloaded_bytes >= 0),
+                 state TEXT NOT NULL CHECK (state IN ('pending', 'active', 'done', 'failed')),
+                 PRIMARY KEY (task_id, segment_index),
+                 FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE,
+                 CHECK (downloaded_bytes <= end_offset - start_offset)
+             );
+             CREATE INDEX idx_tasks_state_created_at ON tasks (state, created_at_ms);
+             CREATE INDEX idx_segments_task_id ON segments (task_id);
+             INSERT INTO schema_meta (key, value) VALUES ('schema_version', '1');
+             INSERT INTO tasks (
+                 id, url, filename, state, downloaded_bytes, created_at_ms,
+                 updated_at_ms, connections
+             ) VALUES (
+                 'legacy-task', 'https://example.invalid/legacy.bin', 'legacy.bin',
+                 'queued', 0, 1000, 1000, 4
+             );
+             INSERT INTO segments (
+                 task_id, segment_index, start_offset, end_offset, downloaded_bytes, state
+             ) VALUES ('legacy-task', 0, 0, 1024, 0, 'pending');",
+        )
+        .expect("write schema-1 fixture");
+    }
+
+    let db = Database::open(&db_path).expect("schema-1 database must migrate");
+    assert_eq!(
+        db.schema_metadata().expect("metadata").version,
+        2,
+        "migration must reach schema version 2"
+    );
+    let legacy = db
+        .task("legacy-task")
+        .expect("lookup migrated task")
+        .expect("migrated row must be preserved");
+    assert_eq!(legacy.filename, "legacy.bin");
+    assert_eq!(legacy.connections, 4);
+    assert_eq!(legacy.state, TaskState::Queued);
+    assert!(
+        legacy.final_url.is_none(),
+        "a migrated schema-1 row starts with a null final URL"
+    );
+    assert_eq!(
+        db.segments_for_task("legacy-task")
+            .expect("migrated segments")
+            .len(),
+        1,
+        "existing segments must survive the migration"
+    );
+
+    db.record_final_url("legacy-task", "https://cdn.example.invalid/legacy.bin")
+        .expect("record final URL on a migrated row");
+    drop(db);
+
+    let reopened = Database::open(&db_path).expect("reopen migrated database");
+    assert_eq!(
+        reopened
+            .task("legacy-task")
+            .expect("lookup after reopen")
+            .expect("exists")
+            .final_url
+            .as_deref(),
+        Some("https://cdn.example.invalid/legacy.bin"),
+        "the migrated row must persist its recorded final URL"
+    );
+    assert_eq!(
+        reopened
+            .segments_for_task("legacy-task")
+            .expect("segments after reopen")
+            .len(),
+        1,
+        "reopening must not drop migrated segments"
+    );
+}

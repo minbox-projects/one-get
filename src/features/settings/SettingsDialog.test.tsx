@@ -85,6 +85,19 @@ async function fillNumber(
   await user.type(field, value);
 }
 
+function fieldErrorText(label: RegExp): string {
+  const field = screen.getByLabelText(label);
+  const describedBy = field.getAttribute("aria-describedby");
+  expect(describedBy).toBeTruthy();
+  return document.getElementById(describedBy as string)?.textContent?.trim() ?? "";
+}
+
+function expectNoSave(): void {
+  expect(
+    invokeCommand.mock.calls.some(([command]) => command === "settings_save"),
+  ).toBe(false);
+}
+
 beforeEach(() => {
   invokeCommand.mockReset();
   delete document.documentElement.dataset.theme;
@@ -144,6 +157,59 @@ describe("SettingsDialog", () => {
     for (const alert of alerts) {
       expect(localized.has(alert.textContent?.trim() ?? "")).toBe(true);
     }
+  });
+
+  it("rejects a default connection count above the u32 bounds without saving", async () => {
+    const user = userEvent.setup();
+    mockIpc();
+    renderDialog();
+    await screen.findByLabelText(/language/i);
+
+    await fillNumber(user, /default connections/i, "4294967296");
+    await user.click(screen.getByRole("button", { name: /^save/i }));
+
+    expectNoSave();
+    expect(en["validation.connections_range"]).toBeTruthy();
+    expect(fieldErrorText(/default connections/i)).toBe(
+      en["validation.connections_range"],
+    );
+  });
+
+  it("rejects a concurrent-task count above the u32 bounds without saving", async () => {
+    const user = userEvent.setup();
+    mockIpc();
+    renderDialog();
+    await screen.findByLabelText(/language/i);
+
+    await fillNumber(user, /max(imum)? concurrent tasks/i, "4294967296");
+    await user.click(screen.getByRole("button", { name: /^save/i }));
+
+    expectNoSave();
+    const concurrencyMessages = [
+      en["validation.concurrency_range"],
+      en["validation.connections_range"],
+    ].filter(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    expect(concurrencyMessages).toContain(
+      fieldErrorText(/max(imum)? concurrent tasks/i),
+    );
+  });
+
+  it("rejects a global rate limit above the u64 bounds without saving", async () => {
+    const user = userEvent.setup();
+    mockIpc();
+    renderDialog();
+    await screen.findByLabelText(/language/i);
+
+    await fillNumber(user, /global rate limit/i, "18446744073709551616");
+    await user.click(screen.getByRole("button", { name: /^save/i }));
+
+    expectNoSave();
+    expect(en["validation.rate_limit_range"]).toBeTruthy();
+    expect(fieldErrorText(/global rate limit/i)).toBe(
+      en["validation.rate_limit_range"],
+    );
   });
 
   it("saves schema-2 values, preserves unknown fields, and applies language and theme immediately", async () => {

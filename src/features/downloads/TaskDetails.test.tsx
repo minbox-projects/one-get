@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi, type Mock } from "vitest";
 
@@ -66,6 +66,7 @@ interface Handlers {
 function renderDetails(
   current: DownloadSummary = task(),
   handlers: Handlers = {},
+  segmentList: DownloadSegment[] = segments,
 ) {
   const onOpenFile =
     handlers.onOpenFile ?? vi.fn<(task: DownloadSummary | string) => void>();
@@ -78,7 +79,7 @@ function renderDetails(
     <I18nProvider language="en-US">
       <TaskDetails
         task={current}
-        segments={segments}
+        segments={segmentList}
         segmentsLoading={handlers.segmentsLoading ?? false}
         segmentsError={handlers.segmentsError ?? null}
         speed={handlers.speed === undefined ? 1024 : handlers.speed}
@@ -114,9 +115,8 @@ describe("TaskDetails", () => {
       formatDate(Date.UTC(2026, 10, 13, 2, 3), "en-US") ?? "",
     );
     expect(screen.getByText("CHECKSUM_MISMATCH")).toBeInTheDocument();
-    expect(
-      screen.getByText("The file hash did not match the expected value."),
-    ).toBeInTheDocument();
+    expect(en["error.CHECKSUM_MISMATCH"]).toBeTruthy();
+    expect(screen.getByText(en["error.CHECKSUM_MISMATCH"])).toBeInTheDocument();
 
     expect(screen.getAllByText(/^done$/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/^failed$/i).length).toBeGreaterThan(0);
@@ -220,4 +220,92 @@ describe("TaskDetails", () => {
       openFolder === null || (openFolder as HTMLButtonElement).disabled,
     ).toBe(true);
   });
+
+  it("treats segment end as exclusive and renders a one-byte segment as complete", () => {
+    renderDetails(
+      task("completed", {
+        downloadedBytes: 1,
+        totalBytes: 1,
+        completedAtMs: 1,
+        errorCode: null,
+        errorMessage: null,
+      }),
+      {},
+      [{ index: 0, start: 0, end: 1, downloadedBytes: 1, state: "done" }],
+    );
+
+    const row = screen.getByText("Segment 0").closest("li");
+    expect(row).not.toBeNull();
+    expect(row).toHaveTextContent("1 / 1");
+    const progress = within(row as HTMLElement).getByRole("progressbar");
+    expect(progress).toHaveAttribute("aria-valuenow", "100");
+    expect(progress).not.toHaveAttribute("aria-valuenow", "50");
+  });
+
+  it.each(["en-US", "zh-CN"] as const)(
+    "shows the localized actionable CHECKSUM_MISMATCH message and code in %s",
+    (language) => {
+      const dictionary = dictionaries[language];
+      expect(dictionary["error.CHECKSUM_MISMATCH"]).toBeTruthy();
+      expect(dictionary["error.CHECKSUM_MISMATCH"]).toMatch(/SHA-256/i);
+      expect(dictionary["error.CHECKSUM_MISMATCH"]).toMatch(/retry|重试/i);
+
+      const raw = "The file hash did not match the expected value.";
+      const { unmount } = render(
+        <I18nProvider language={language}>
+          <TaskDetails
+            task={task("failed", {
+              errorCode: "CHECKSUM_MISMATCH",
+              errorMessage: raw,
+            })}
+            segments={[]}
+            speed={null}
+            onOpenFile={vi.fn()}
+            onOpenFolder={vi.fn()}
+            onCopyUrl={vi.fn()}
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+
+      expect(screen.getByText("CHECKSUM_MISMATCH")).toBeInTheDocument();
+      expect(
+        screen.getByText(dictionary["error.CHECKSUM_MISMATCH"]),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(raw)).not.toBeInTheDocument();
+      unmount();
+    },
+  );
+
+  it.each(["en-US", "zh-CN"] as const)(
+    "maps INVALID_STATE to localized text instead of the raw engine message in %s",
+    (language) => {
+      const dictionary = dictionaries[language];
+      expect(dictionary["error.INVALID_STATE"]).toBeTruthy();
+      const raw = "The task is not in a state that allows this operation.";
+      const { unmount } = render(
+        <I18nProvider language={language}>
+          <TaskDetails
+            task={task("failed", {
+              errorCode: "INVALID_STATE",
+              errorMessage: raw,
+            })}
+            segments={[]}
+            speed={null}
+            onOpenFile={vi.fn()}
+            onOpenFolder={vi.fn()}
+            onCopyUrl={vi.fn()}
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+
+      expect(screen.getByText("INVALID_STATE")).toBeInTheDocument();
+      expect(
+        screen.getByText(dictionary["error.INVALID_STATE"]),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(raw)).not.toBeInTheDocument();
+      unmount();
+    },
+  );
 });

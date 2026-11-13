@@ -47,11 +47,15 @@ function resolveTheme(theme: Theme): "light" | "dark" {
   return "light";
 }
 
-function wholeNumberInRange(value: string, min: number, max?: number): boolean {
+const MAX_CONNECTIONS = 64n;
+const MAX_U32 = 4_294_967_295n;
+const MAX_U64 = 18_446_744_073_709_551_615n;
+
+function wholeNumberInRange(value: string, min: bigint, max?: bigint): boolean {
   if (!/^\d+$/.test(value)) {
     return false;
   }
-  const parsed = Number(value);
+  const parsed = BigInt(value);
   return parsed >= min && (max === undefined || parsed <= max);
 }
 
@@ -108,15 +112,24 @@ function SettingsFormPanel({
     }
 
     const nextErrors: DownloadSettingsErrors = {};
-    if (!wholeNumberInRange(form.defaultConnections, 1, 64)) {
+    if (!/^\d+$/.test(form.defaultConnections.trim())) {
+      nextErrors.defaultConnections = "validation.connections_range";
+    } else if (!wholeNumberInRange(form.defaultConnections, 1n, MAX_CONNECTIONS)) {
       nextErrors.defaultConnections = "validation.connections_range";
     }
-    if (!wholeNumberInRange(form.maxConcurrentTasks, 1)) {
+    const maxTasks = form.maxConcurrentTasks.trim();
+    if (!/^\d+$/.test(maxTasks) || BigInt(maxTasks) <= 0n) {
       nextErrors.maxConcurrentTasks = "validation.concurrency_positive";
+    } else if (!wholeNumberInRange(maxTasks, 1n, MAX_U32)) {
+      nextErrors.maxConcurrentTasks = "validation.concurrency_range";
     }
     const trimmedRate = form.globalRateLimit.trim();
-    if (trimmedRate.length > 0 && !wholeNumberInRange(trimmedRate, 1)) {
-      nextErrors.globalRateLimit = "validation.rate_limit_positive";
+    if (trimmedRate.length > 0) {
+      if (!/^\d+$/.test(trimmedRate) || BigInt(trimmedRate) <= 0n) {
+        nextErrors.globalRateLimit = "validation.rate_limit_positive";
+      } else if (!wholeNumberInRange(trimmedRate, 1n, MAX_U64)) {
+        nextErrors.globalRateLimit = "validation.rate_limit_range";
+      }
     }
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) {

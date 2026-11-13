@@ -26,6 +26,8 @@ pub struct Task {
     pub id: String,
     /// Original remote URL.
     pub url: String,
+    /// Final URL after redirects, stored without userinfo, query, or fragment.
+    pub final_url: Option<String>,
     /// Sanitized destination filename.
     pub filename: String,
     /// Persisted destination directory, or `None` for the engine default.

@@ -8,6 +8,7 @@ export interface ToastProps {
   message: ReactNode;
   tone?: ToastTone;
   onDismiss?: () => void;
+  dismissLabel?: string;
   className?: string;
 }
 
@@ -15,6 +16,7 @@ export function Toast({
   message,
   tone = "info",
   onDismiss,
+  dismissLabel = "Dismiss",
   className,
 }: ToastProps) {
   const role = tone === "error" ? "alert" : "status";
@@ -26,7 +28,7 @@ export function Toast({
         <button
           type="button"
           className="og-toast__dismiss"
-          aria-label="Dismiss"
+          aria-label={dismissLabel}
           onClick={onDismiss}
         >
           <span aria-hidden="true">&times;</span>

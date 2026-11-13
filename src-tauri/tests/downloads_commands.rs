@@ -14,6 +14,7 @@
 mod support;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,8 +24,8 @@ use oneget_lib::commands::app::{
     NotificationStatus, QuitService, SecretRoundTripResult, SecretService,
 };
 use oneget_lib::commands::downloads::{
-    downloads_add, downloads_list, downloads_open_file, downloads_probe, downloads_segments,
-    AddDownloadRequest, ProbeDownloadRequest,
+    downloads_add, downloads_delete_file, downloads_list, downloads_open_file, downloads_probe,
+    downloads_segments, AddDownloadRequest, ProbeDownloadRequest,
 };
 use oneget_lib::config::SettingsStore;
 use oneget_lib::engine::error::EngineError;
@@ -832,5 +833,234 @@ async fn downloads_open_file_reports_file_missing_for_a_removed_final_file() {
         .expect_err("opening a removed final file must fail before launching");
     assert_eq!(error.code, "FILE_MISSING");
 
+    service.shutdown();
+}
+
+// --- 9. A pending probe does not block list or controls ---
+
+#[test]
+fn stalled_probe_does_not_block_list_while_pending() {
+    let body = pattern_bytes(71, 32 * 1024);
+    let server = RangeServer::start(FixtureConfig {
+        body,
+        stall_before_response: Some(Duration::from_millis(1_000)),
+        ..Default::default()
+    });
+    let probe_url = server.url("/stalled-probe.bin");
+    let store_dir = tempdir().expect("store tempdir");
+    let dest = tempdir().expect("dest tempdir");
+    let store = Database::open(store_dir.path().join("tasks.db")).expect("open store");
+    let service = Arc::new(
+        EngineService::start(
+            store,
+            dest.path().to_path_buf(),
+            EngineOptions { max_concurrent: 1 },
+        )
+        .expect("start service"),
+    );
+
+    let probe_service = Arc::clone(&service);
+    let finished = Arc::new(AtomicBool::new(false));
+    let probe_finished = Arc::clone(&finished);
+    let probe_thread = std::thread::spawn(move || {
+        let result = probe_service.probe(ProbeRequest {
+            url: probe_url,
+            allow_html: false,
+            extra_headers: Vec::new(),
+        });
+        probe_finished.store(true, Ordering::SeqCst);
+        result
+    });
+
+    let start = Instant::now();
+    while server.requests().is_empty() {
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the stalled probe request never reached the fixture"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let list_start = Instant::now();
+    let tasks = service.list().expect("list while a probe is pending");
+    let list_elapsed = list_start.elapsed();
+    assert!(
+        list_elapsed < Duration::from_millis(300),
+        "list must return while the probe is still pending, took {list_elapsed:?}"
+    );
+    assert!(
+        !finished.load(Ordering::SeqCst),
+        "the list call must be measured while the probe is still pending"
+    );
+    assert!(tasks.is_empty(), "no download tasks were added");
+
+    let outcome = probe_thread
+        .join()
+        .expect("probe thread must not panic")
+        .expect("the stalled probe must eventually complete");
+    assert_eq!(outcome.total_bytes, Some(32 * 1024));
+    service.shutdown();
+}
+
+// --- 10. Final URL redaction and persistence ---
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn downloads_list_redacts_and_persists_final_url_after_redirect() {
+    let body = pattern_bytes(73, 128 * 1024);
+    let target = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let redirect = RangeServer::start(FixtureConfig {
+        redirect_location: Some(target.url("/final.bin?token=redirect-secret#fragment")),
+        ..Default::default()
+    });
+
+    let store_dir = tempdir().expect("store tempdir");
+    let dest = tempdir().expect("dest tempdir");
+    let db_path = store_dir.path().join("tasks.db");
+    let store = Database::open(&db_path).expect("open store");
+    let service = Arc::new(
+        EngineService::start(
+            store,
+            dest.path().to_path_buf(),
+            EngineOptions { max_concurrent: 1 },
+        )
+        .expect("start service"),
+    );
+    let harness = build_state(Some(Arc::clone(&service)));
+
+    let id = downloads_add(
+        &harness.state,
+        add_request(
+            redirect.url("/original.bin?token=original-secret"),
+            "redacted.bin",
+            1,
+        ),
+    )
+    .expect("add redirected download");
+    wait_for_state(&service, &id, TaskState::Completed).await;
+    assert_eq!(
+        std::fs::read(dest.path().join("redacted.bin")).expect("read final file"),
+        body,
+        "the redirected download must finalize the target bytes"
+    );
+
+    let summaries = downloads_list(&harness.state).expect("list download summaries");
+    let summary = summaries
+        .iter()
+        .find(|summary| summary.id == id)
+        .expect("completed task must be summarized");
+    let final_url = summary
+        .final_url
+        .as_deref()
+        .expect("a completed redirected download must expose its final URL");
+    assert!(
+        final_url.ends_with("/final.bin"),
+        "final URL must name the redirected target, got {final_url}"
+    );
+    assert!(
+        !final_url.contains('?')
+            && !final_url.contains('#')
+            && !final_url.contains('@')
+            && !final_url.contains("secret"),
+        "final URL must be redacted, got {final_url}"
+    );
+    let serialized = serde_json::to_value(summary).expect("summary json");
+    assert_eq!(
+        serialized.get("finalUrl").and_then(Value::as_str),
+        Some(final_url),
+        "DownloadSummary must serialize final_url as finalUrl"
+    );
+
+    service.shutdown();
+    drop(harness);
+
+    let reopened = Database::open(&db_path).expect("reopen store after service shutdown");
+    let task = reopened
+        .task(&id)
+        .expect("lookup task after reopen")
+        .expect("completed task must survive reopen");
+    assert_eq!(
+        task.final_url.as_deref(),
+        Some(final_url),
+        "the redacted final URL must persist across a reopened store"
+    );
+}
+
+// --- 11. AC-016: file deletion failure keeps the record and file ---
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_file_on_read_only_destination_keeps_record_and_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct RestorePermissions {
+        path: PathBuf,
+        mode: u32,
+    }
+
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            let _ =
+                std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode));
+        }
+    }
+
+    let body = pattern_bytes(79, 64 * 1024);
+    let server = fixture(body);
+    let store_dir = tempdir().expect("store tempdir");
+    let dest = tempdir().expect("dest tempdir");
+    let store = Database::open(store_dir.path().join("tasks.db")).expect("open store");
+    let service = Arc::new(
+        EngineService::start(
+            store,
+            dest.path().to_path_buf(),
+            EngineOptions { max_concurrent: 1 },
+        )
+        .expect("start service"),
+    );
+    let harness = build_state(Some(Arc::clone(&service)));
+
+    let id = service
+        .add(add_download(server.url("/locked.bin"), "locked.bin", 1))
+        .expect("add download");
+    wait_for_state(&service, &id, TaskState::Completed).await;
+    let final_path = dest.path().join("locked.bin");
+    assert!(final_path.exists(), "completed final file must exist");
+
+    let original_mode = std::fs::metadata(dest.path())
+        .expect("destination metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    let restore = RestorePermissions {
+        path: dest.path().to_path_buf(),
+        mode: original_mode,
+    };
+    std::fs::set_permissions(dest.path(), std::fs::Permissions::from_mode(0o555))
+        .expect("make destination read-only");
+
+    let error = downloads_delete_file(&harness.state, &id)
+        .expect_err("deleting from a read-only destination must fail");
+    assert!(
+        !error.code.is_empty(),
+        "the failure must carry a typed code"
+    );
+    assert!(
+        find_task(&service, &id).is_some(),
+        "a failed delete_file must keep the task record"
+    );
+    assert!(
+        final_path.exists(),
+        "a failed delete_file must keep the completed final file"
+    );
+
+    drop(restore);
+    assert!(
+        final_path.exists(),
+        "the final file must remain after cleanup"
+    );
     service.shutdown();
 }

@@ -12,7 +12,7 @@ use crate::engine::state::TaskState;
 
 const TASK_COLUMNS: &str = "id, url, filename, part_path, state, downloaded_bytes, \
      total_bytes, expected_sha256, actual_sha256, etag, last_modified, error_code, error_message, \
-     created_at_ms, updated_at_ms, connections, destination, completed_at_ms";
+     created_at_ms, updated_at_ms, connections, destination, completed_at_ms, final_url";
 
 impl Database {
     /// Insert a new queued task and return its identifier.
@@ -403,6 +403,18 @@ impl Database {
         Ok(())
     }
 
+    /// Record the redacted final URL discovered after redirects.
+    pub fn record_final_url(&self, id: &str, url: &str) -> Result<(), EngineError> {
+        let changed = self.conn.execute(
+            "UPDATE tasks SET final_url = ?1, updated_at_ms = ?2 WHERE id = ?3",
+            params![url, now_ms(), id],
+        )?;
+        if changed == 0 {
+            return Err(task_not_found());
+        }
+        Ok(())
+    }
+
     /// Record the part file that belongs to a task.
     pub fn record_part_path(&self, id: &str, path: &str) -> Result<(), EngineError> {
         let changed = self.conn.execute(
@@ -441,6 +453,7 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         connections: read_u32(row, 15, "connections")?,
         destination: row.get(16)?,
         completed_at_ms: row.get(17)?,
+        final_url: row.get(18)?,
     })
 }
 

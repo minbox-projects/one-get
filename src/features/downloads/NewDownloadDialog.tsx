@@ -6,6 +6,7 @@ import { Checkbox } from "../../components/ui/Checkbox";
 import { Dialog } from "../../components/ui/Dialog";
 import { Input } from "../../components/ui/Input";
 import { useI18n } from "../../i18n";
+import { pickDirectory } from "../../lib/dialog";
 import { addDownload } from "../../lib/downloads";
 import type { HeaderPair, ProbeResult } from "../../types/downloads";
 
@@ -130,6 +131,7 @@ export function NewDownloadDialog({
   const [errors, setErrors] = useState<DownloadFormErrors>({});
   const [htmlRequired, setHtmlRequired] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [pickingDirectory, setPickingDirectory] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -162,6 +164,20 @@ export function NewDownloadDialog({
     setAllowHtml(false);
     setHtmlRequired(false);
     setSubmitError(null);
+  };
+
+  const handleBrowse = async () => {
+    setPickingDirectory(true);
+    const result = await pickDirectory();
+    setPickingDirectory(false);
+    if (result.ok) {
+      if (result.data !== null) {
+        setDestinationOverride(result.data);
+        setErrors((current) => ({ ...current, destination: undefined }));
+      }
+      return;
+    }
+    setSubmitError(t("download.browseFailed"));
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -207,7 +223,11 @@ export function NewDownloadDialog({
     setSubmitting(false);
 
     if (!result.ok) {
-      setSubmitError(t("download.addFailed"));
+      setSubmitError(
+        result.error.code === "INVALID_DESTINATION"
+          ? t("error.INVALID_DESTINATION")
+          : t("download.addFailed"),
+      );
       return;
     }
 
@@ -276,15 +296,26 @@ export function NewDownloadDialog({
           onChange={(event) => setFilenameOverride(event.target.value)}
         />
 
-        <Input
-          label={t("download.destination")}
-          value={destination}
-          autoComplete="off"
-          error={
-            errors.destination ? t(`validation.${errors.destination}`) : undefined
-          }
-          onChange={(event) => setDestinationOverride(event.target.value)}
-        />
+        <div className="og-field-with-action">
+          <Input
+            label={t("download.destination")}
+            value={destination}
+            autoComplete="off"
+            error={
+              errors.destination
+                ? t(`validation.${errors.destination}`)
+                : undefined
+            }
+            onChange={(event) => setDestinationOverride(event.target.value)}
+          />
+          <Button
+            variant="secondary"
+            loading={pickingDirectory}
+            onClick={() => void handleBrowse()}
+          >
+            {t("download.browse")}
+          </Button>
+        </div>
 
         <Input
           label={t("download.connections")}
