@@ -18,6 +18,7 @@ import type { DeleteMode } from "../features/downloads/DeleteConfirmDialog";
 import { DownloadsView } from "../features/downloads/DownloadsView";
 import { errorMessageKey } from "../features/downloads/errorMessages";
 import { NewDownloadDialog } from "../features/downloads/NewDownloadDialog";
+import type { BrowserPrefill } from "../features/downloads/NewDownloadDialog";
 import { TaskDetails } from "../features/downloads/TaskDetails";
 import { SettingsDialog } from "../features/settings/SettingsDialog";
 import { taskActions } from "../features/downloads/controls";
@@ -31,9 +32,16 @@ import {
   openDownloadFolder,
   redactStoredUrl,
 } from "../lib/downloads";
+import { subscribeToCapturePrefill } from "../lib/events";
+import { takePendingPrefill } from "../lib/pairing";
 import { invokeCommand } from "../lib/tauri";
 import type { AppError, Settings, Theme } from "../types/app";
-import type { DownloadSegment, DownloadSummary } from "../types/downloads";
+import type {
+  DownloadSegment,
+  DownloadSummary,
+  HeaderPair,
+} from "../types/downloads";
+import type { PendingPrefill } from "../types/pairing";
 
 const FILTER_VIEWS: Array<{ view: SidebarView; key: string }> = [
   { view: "all", key: "nav.all" },
@@ -84,6 +92,18 @@ export function AppShell() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [newOpen, setNewOpen] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
+  const [newPrefill, setNewPrefill] = useState<BrowserPrefill | null>(null);
+  const [batchPrefillUrls, setBatchPrefillUrls] = useState<string[] | null>(
+    null,
+  );
+  const [newDialogKey, setNewDialogKey] = useState(0);
+  const [batchDialogKey, setBatchDialogKey] = useState(0);
+  const queuedPrefillRef = useRef<PendingPrefill | null>(null);
+  const anyDialogOpenRef = useRef(false);
+  // A prefill reaches the shell both as a live event and through the
+  // fetch-on-open snapshot. De-duplicate by the payload's receive timestamp
+  // so the same capture never opens a second dialog.
+  const seenPrefillAtRef = useRef<number | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [segments, setSegments] = useState<DownloadSegment[]>([]);
@@ -222,22 +242,28 @@ export function AppShell() {
 
   const openNew = useCallback(() => {
     rememberFocus();
+    anyDialogOpenRef.current = true;
+    setNewPrefill(null);
     setNewOpen(true);
   }, [rememberFocus]);
 
   const openBatch = useCallback(() => {
     rememberFocus();
+    anyDialogOpenRef.current = true;
+    setBatchPrefillUrls(null);
     setBatchOpen(true);
   }, [rememberFocus]);
 
   const openSettings = useCallback(() => {
     rememberFocus();
+    anyDialogOpenRef.current = true;
     setSettingsOpen(true);
   }, [rememberFocus]);
 
   const requestDelete = useCallback(
     (mode: DeleteMode) => {
       rememberFocus();
+      anyDialogOpenRef.current = true;
       setDeleteMode(mode);
     },
     [rememberFocus],
@@ -245,6 +271,137 @@ export function AppShell() {
 
   const anyDialogOpen =
     newOpen || batchOpen || settingsOpen || deleteMode !== null;
+
+  const deliverPrefill = useCallback((payload: PendingPrefill) => {
+    anyDialogOpenRef.current = true;
+    if (payload.items.length === 1) {
+      const item = payload.items[0];
+      const headers: HeaderPair[] = [];
+      if (item.referer) {
+        headers.push(["Referer", item.referer]);
+      }
+      for (const header of item.headers ?? []) {
+        if (header.name.trim().toLowerCase() !== "referer") {
+          headers.push([header.name, header.value]);
+        }
+      }
+      setNewDialogKey((key) => key + 1);
+      setNewPrefill({
+        url: item.url,
+        filename: item.filename || null,
+        headers,
+      });
+      setNewOpen(true);
+      return;
+    }
+    setBatchDialogKey((key) => key + 1);
+    setBatchPrefillUrls(payload.items.map((item) => item.url));
+    setBatchOpen(true);
+  }, []);
+
+  const acceptPrefill = useCallback(
+    (payload: PendingPrefill) => {
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      if (items.length === 0) {
+        return;
+      }
+      if (seenPrefillAtRef.current === payload.receivedAtMs) {
+        return;
+      }
+      seenPrefillAtRef.current = payload.receivedAtMs;
+      if (anyDialogOpenRef.current) {
+        queuedPrefillRef.current = payload;
+        return;
+      }
+      deliverPrefill(payload);
+    },
+    [deliverPrefill],
+  );
+
+  const flushQueuedPrefill = useCallback(() => {
+    if (anyDialogOpenRef.current) {
+      return;
+    }
+    const pending = queuedPrefillRef.current;
+    if (pending === null) {
+      return;
+    }
+    queuedPrefillRef.current = null;
+    deliverPrefill(pending);
+  }, [deliverPrefill]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToCapturePrefill((payload) => {
+      acceptPrefill(payload);
+    });
+    void takePendingPrefill().then((result) => {
+      if (result.ok && result.data !== null) {
+        acceptPrefill(result.data);
+      }
+    });
+    return unsubscribe;
+  }, [acceptPrefill]);
+
+  useEffect(() => {
+    anyDialogOpenRef.current = anyDialogOpen;
+  }, [anyDialogOpen]);
+
+  const handleNewOpenChange = useCallback(
+    (open: boolean) => {
+      setNewOpen(open);
+      if (open) {
+        anyDialogOpenRef.current = true;
+        return;
+      }
+      setNewPrefill(null);
+      anyDialogOpenRef.current =
+        batchOpen || settingsOpen || deleteMode !== null;
+      flushQueuedPrefill();
+    },
+    [batchOpen, deleteMode, flushQueuedPrefill, settingsOpen],
+  );
+
+  const handleBatchOpenChange = useCallback(
+    (open: boolean) => {
+      setBatchOpen(open);
+      if (open) {
+        anyDialogOpenRef.current = true;
+        return;
+      }
+      setBatchPrefillUrls(null);
+      anyDialogOpenRef.current =
+        newOpen || settingsOpen || deleteMode !== null;
+      flushQueuedPrefill();
+    },
+    [deleteMode, flushQueuedPrefill, newOpen, settingsOpen],
+  );
+
+  const handleSettingsOpenChange = useCallback(
+    (open: boolean) => {
+      setSettingsOpen(open);
+      if (open) {
+        anyDialogOpenRef.current = true;
+        return;
+      }
+      anyDialogOpenRef.current =
+        newOpen || batchOpen || deleteMode !== null;
+      flushQueuedPrefill();
+    },
+    [batchOpen, deleteMode, flushQueuedPrefill, newOpen],
+  );
+
+  const handleDeleteOpenChange = useCallback(
+    (open: boolean) => {
+      if (open) {
+        anyDialogOpenRef.current = true;
+        return;
+      }
+      setDeleteMode(null);
+      anyDialogOpenRef.current = newOpen || batchOpen || settingsOpen;
+      flushQueuedPrefill();
+    },
+    [batchOpen, flushQueuedPrefill, newOpen, settingsOpen],
+  );
 
   useEffect(() => {
     if (anyDialogOpen) {
@@ -435,6 +592,8 @@ export function AppShell() {
     const id = selectedTask.id;
     const mode = deleteMode;
     setDeleteMode(null);
+    anyDialogOpenRef.current = newOpen || batchOpen || settingsOpen;
+    flushQueuedPrefill();
     setActionError(null);
     const ok =
       mode === "record"
@@ -444,7 +603,17 @@ export function AppShell() {
       showToast("toast.deleted");
     }
     clearSelection();
-  }, [clearSelection, deleteMode, downloads, selectedTask, showToast]);
+  }, [
+    batchOpen,
+    clearSelection,
+    deleteMode,
+    downloads,
+    flushQueuedPrefill,
+    newOpen,
+    selectedTask,
+    settingsOpen,
+    showToast,
+  ]);
 
   const renderSidebarItem = ({ view, key }: { view: SidebarView; key: string }) => (
     <button
@@ -641,9 +810,11 @@ export function AppShell() {
 
       {newOpen ? (
         <NewDownloadDialog
+          key={newDialogKey}
           open
-          onOpenChange={setNewOpen}
+          onOpenChange={handleNewOpenChange}
           defaults={downloadDefaults}
+          prefill={newPrefill}
           onAdded={() => {
             void downloads.refresh();
           }}
@@ -651,9 +822,11 @@ export function AppShell() {
       ) : null}
       {batchOpen ? (
         <BatchDownloadDialog
+          key={batchDialogKey}
           open
-          onOpenChange={setBatchOpen}
+          onOpenChange={handleBatchOpenChange}
           defaults={downloadDefaults}
+          prefillUrls={batchPrefillUrls}
           onAdded={() => {
             void downloads.refresh();
           }}
@@ -662,10 +835,10 @@ export function AppShell() {
       {settingsOpen ? (
         <SettingsDialog
           open
-          onOpenChange={setSettingsOpen}
+          onOpenChange={handleSettingsOpenChange}
           onSaved={(next) => {
             setSettings(next);
-            setSettingsOpen(false);
+            handleSettingsOpenChange(false);
             showToast("toast.settingsSaved");
           }}
         />
@@ -676,11 +849,7 @@ export function AppShell() {
           open
           mode={deleteMode}
           task={selectedTask}
-          onOpenChange={(open) => {
-            if (!open) {
-              setDeleteMode(null);
-            }
-          }}
+          onOpenChange={handleDeleteOpenChange}
           onConfirm={handleConfirmDelete}
         />
       ) : null}

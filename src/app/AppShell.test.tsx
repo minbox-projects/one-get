@@ -9,14 +9,33 @@ import type {
   DownloadSummary,
   ProbeResult,
 } from "../types/downloads";
+import type {
+  PendingPrefill,
+  PendingPrefillItem,
+} from "../types/pairing";
 import { AppShell } from "./AppShell";
 
-const { invokeCommand } = vi.hoisted(() => ({ invokeCommand: vi.fn() }));
+const { invokeCommand, takePendingPrefill, subscribeToCapturePrefill } =
+  vi.hoisted(() => ({
+    invokeCommand: vi.fn(),
+    takePendingPrefill: vi.fn(),
+    subscribeToCapturePrefill: vi.fn(),
+  }));
 
 vi.mock("../lib/tauri", () => ({
   invokeCommand,
   isTauriRuntime: () => true,
 }));
+
+vi.mock("../lib/pairing", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/pairing")>();
+  return { ...actual, takePendingPrefill };
+});
+
+vi.mock("../lib/events", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/events")>();
+  return { ...actual, subscribeToCapturePrefill };
+});
 
 const en = dictionaries["en-US"];
 const zh = dictionaries["zh-CN"];
@@ -81,6 +100,74 @@ function renderShell() {
   );
 }
 
+let captureHandler: ((payload: PendingPrefill) => void) | null = null;
+let captureUnsubscribe: ReturnType<typeof vi.fn>;
+
+function prefillItem(
+  overrides: Partial<PendingPrefillItem> = {},
+): PendingPrefillItem {
+  return {
+    url: "https://files.example.test/captured-video.mp4",
+    filename: "captured-video.mp4",
+    referer: "https://page.example.test/watch",
+    mime: "video/mp4",
+    size: 2048,
+    headers: [],
+    ...overrides,
+  };
+}
+
+function pendingPrefill(
+  items: PendingPrefillItem[],
+  receivedAtMs = 1_700_000_000_000,
+): PendingPrefill {
+  return { items, receivedAtMs };
+}
+
+function prefillProbe(): ProbeResult {
+  return {
+    finalUrl: "https://files.example.test/media/stream",
+    totalBytes: 2048,
+    rangeSupported: true,
+    filename: "probed-other.bin",
+    contentType: "application/octet-stream",
+    etag: null,
+    lastModified: null,
+  };
+}
+
+function mockCaptureIpc(
+  downloads: DownloadSummary[],
+  added: AddDownloadRequest[] = [],
+) {
+  invokeCommand.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "settings_get") {
+      return { ok: true as const, data: settings() };
+    }
+    if (command === "settings_status") {
+      return {
+        ok: true as const,
+        data: { readOnly: false, recovered: false },
+      };
+    }
+    if (command === "downloads_list") {
+      return { ok: true as const, data: downloads };
+    }
+    if (command === "downloads_probe") {
+      return { ok: true as const, data: prefillProbe() };
+    }
+    if (command === "downloads_add") {
+      const request = (args as { request: AddDownloadRequest }).request;
+      added.push(request);
+      return { ok: true as const, data: `added-${added.length}` };
+    }
+    return {
+      ok: false as const,
+      error: { code: "unexpected_command", message: command },
+    };
+  });
+}
+
 function mockIpc(
   downloads: DownloadSummary[],
   overrides: SettingsOverrides = {},
@@ -118,11 +205,23 @@ async function renderWithSettledTimers(downloads: DownloadSummary[]) {
 
 beforeEach(() => {
   invokeCommand.mockReset();
+  takePendingPrefill.mockReset();
+  takePendingPrefill.mockResolvedValue({ ok: true, data: null });
+  captureHandler = null;
+  captureUnsubscribe = vi.fn();
+  subscribeToCapturePrefill.mockReset();
+  subscribeToCapturePrefill.mockImplementation(
+    (handler: (payload: PendingPrefill) => void) => {
+      captureHandler = handler;
+      return captureUnsubscribe;
+    },
+  );
 });
 
 afterEach(() => {
   vi.useRealTimers();
   delete document.documentElement.dataset.theme;
+  vi.restoreAllMocks();
 });
 
 describe("AppShell", () => {
@@ -927,5 +1026,230 @@ describe("AppShell settings", () => {
     expect(
       within(newDialog).getByLabelText(zh["download.connections"]),
     ).toHaveValue(2);
+  });
+});
+
+describe("AppShell capture prefill", () => {
+  it("subscribes before fetching a single pending prefill and opens New Download without submitting", async () => {
+    const pending = pendingPrefill([prefillItem()]);
+    const added: AddDownloadRequest[] = [];
+    takePendingPrefill.mockResolvedValue({ ok: true, data: pending });
+    mockCaptureIpc([], added);
+
+    renderShell();
+
+    const dialog = await screen.findByRole("dialog", {
+      name: /new download/i,
+    });
+    expect(subscribeToCapturePrefill).toHaveBeenCalledTimes(1);
+    expect(takePendingPrefill).toHaveBeenCalledTimes(1);
+    expect(
+      subscribeToCapturePrefill.mock.invocationCallOrder[0],
+    ).toBeLessThan(takePendingPrefill.mock.invocationCallOrder[0]);
+
+    const item = pending.items[0];
+    expect(within(dialog).getByLabelText(/^url$/i)).toHaveValue(item.url);
+    expect(within(dialog).getByLabelText(/filename/i)).toHaveValue(
+      item.filename,
+    );
+    expect(
+      within(dialog).getByText(en["download.browserPrefill"]),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue("Referer")).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue(item.referer)).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith("downloads_probe", {
+        request: {
+          url: item.url,
+          allowHtml: false,
+          extraHeaders: [["Referer", item.referer]],
+        },
+      });
+    });
+    await waitFor(() => {
+      expect(dialog).toHaveTextContent(/probed-other\.bin/);
+    });
+    expect(within(dialog).getByLabelText(/filename/i)).toHaveValue(
+      item.filename,
+    );
+    expect(added).toEqual([]);
+  });
+
+  it("opens Batch Download with every prefilled URL and adds nothing before submit", async () => {
+    const pending = pendingPrefill([
+      prefillItem({
+        url: "https://files.example.test/captured-a.bin",
+        filename: "captured-a.bin",
+      }),
+      prefillItem({
+        url: "https://files.example.test/captured-b.bin",
+        filename: "captured-b.bin",
+      }),
+    ]);
+    mockCaptureIpc([]);
+    takePendingPrefill.mockResolvedValue({ ok: true, data: pending });
+
+    renderShell();
+
+    const dialog = await screen.findByRole("dialog", {
+      name: en["batch.title"],
+    });
+    expect(
+      within(dialog).getByLabelText(/urls|one url per line/i),
+    ).toHaveValue(pending.items.map((item) => item.url).join("\n"));
+    expect(
+      within(dialog).getByText(en["batch.browserPrefill"]),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByDisplayValue("Referer")).not.toBeInTheDocument();
+    expect(
+      invokeCommand.mock.calls.filter(([command]) => command === "downloads_add"),
+    ).toHaveLength(0);
+  });
+
+  it("defers an event while a manual dialog is open and delivers it after it closes", async () => {
+    const user = userEvent.setup();
+    const pending = pendingPrefill([prefillItem()]);
+    mockCaptureIpc([]);
+    renderShell();
+
+    await screen.findByText(en["list.emptyTitle"]);
+    await waitFor(() => expect(captureHandler).not.toBeNull());
+
+    await user.click(screen.getByRole("button", { name: en["toolbar.new"] }));
+    const manual = await screen.findByRole("dialog", { name: /new download/i });
+    expect(within(manual).getByLabelText(/^url$/i)).toHaveValue("");
+
+    act(() => {
+      captureHandler?.(pending);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(within(manual).getByLabelText(/^url$/i)).toHaveValue("");
+    expect(
+      invokeCommand.mock.calls.filter(([command]) => command === "downloads_add"),
+    ).toHaveLength(0);
+
+    await user.keyboard("{Escape}");
+
+    await waitFor(() => {
+      const current = screen.queryByRole("dialog", { name: /new download/i });
+      if (current === null) {
+        throw new Error("The deferred prefill dialog did not open.");
+      }
+      expect(within(current).getByLabelText(/^url$/i)).toHaveValue(
+        pending.items[0].url,
+      );
+      expect(
+        within(current).getByText(en["download.browserPrefill"]),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("delivers the same receivedAtMs once across event and fetch and never persists it", async () => {
+    const user = userEvent.setup();
+    const pending = pendingPrefill([prefillItem()], 42);
+    let resolveFetch!: (value: unknown) => void;
+    takePendingPrefill.mockReturnValue(
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      }),
+    );
+    mockCaptureIpc([]);
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+
+    renderShell();
+
+    await waitFor(() => expect(captureHandler).not.toBeNull());
+    await waitFor(() => expect(takePendingPrefill).toHaveBeenCalled());
+
+    act(() => {
+      captureHandler?.(pending);
+    });
+    const dialog = await screen.findByRole("dialog", {
+      name: /new download/i,
+    });
+    await waitFor(() => {
+      expect(within(dialog).getByLabelText(/^url$/i)).toHaveValue(
+        pending.items[0].url,
+      );
+    });
+
+    await act(async () => {
+      resolveFetch({ ok: true, data: pending });
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.getAllByRole("dialog", { name: /new download/i }),
+    ).toHaveLength(1);
+    expect(within(dialog).getByLabelText(/^url$/i)).toHaveValue(
+      pending.items[0].url,
+    );
+    expect(setItem).not.toHaveBeenCalled();
+
+    await user.keyboard("{Escape}");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(
+      screen.queryByRole("dialog", { name: /new download/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      invokeCommand.mock.calls.filter(([command]) => command === "downloads_add"),
+    ).toHaveLength(0);
+  });
+
+  it("ignores a pending-prefill fetch failure without surfacing an error", async () => {
+    takePendingPrefill.mockResolvedValue({
+      ok: false,
+      error: { code: "pairing_unavailable", message: "Pairing is unavailable." },
+    });
+    mockCaptureIpc([]);
+
+    renderShell();
+
+    await screen.findByText(en["list.emptyTitle"]);
+    await waitFor(() => expect(takePendingPrefill).toHaveBeenCalled());
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("drops a closed prefill and opens a clean manual dialog afterwards", async () => {
+    const user = userEvent.setup();
+    const pending = pendingPrefill([prefillItem()]);
+    takePendingPrefill.mockResolvedValue({ ok: true, data: pending });
+    mockCaptureIpc([]);
+
+    renderShell();
+
+    const prefilled = await screen.findByRole("dialog", {
+      name: /new download/i,
+    });
+    await waitFor(() => {
+      expect(within(prefilled).getByLabelText(/^url$/i)).toHaveValue(
+        pending.items[0].url,
+      );
+    });
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: /new download/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: en["toolbar.new"] }));
+    const manual = await screen.findByRole("dialog", { name: /new download/i });
+    expect(within(manual).getByLabelText(/^url$/i)).toHaveValue("");
+    expect(
+      within(manual).queryByText(en["download.browserPrefill"]),
+    ).not.toBeInTheDocument();
   });
 });

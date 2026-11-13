@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title data-i18n="popup.title">OneGet downloads</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <header class="popup-header">
+        <h1 data-i18n="popup.title">OneGet downloads</h1>
+      </header>
+
+      <section
+        id="takeover-error"
+        class="panel takeover-error"
+        role="alert"
+        aria-labelledby="takeover-error-heading"
+        hidden
+      >
+        <h2 id="takeover-error-heading" data-i18n="popup.takeoverFailedHeading">
+          Browser download not taken over
+        </h2>
+        <p id="takeover-error-message" class="takeover-error__message"></p>
+        <p id="takeover-error-url" class="resource-url"></p>
+        <button id="takeover-error-retry" type="button" class="secondary"></button>
+      </section>
+
+      <section class="panel" aria-labelledby="resources-heading">
+        <div class="panel-heading">
+          <h2 id="resources-heading" data-i18n="popup.resources">Resources</h2>
+          <span id="resources-count" class="count"></span>
+        </div>
+        <p id="resources-empty" class="empty" data-i18n="popup.resourcesEmpty">
+          No downloadable resources on this page.
+        </p>
+        <ul id="resources-list" class="resources"></ul>
+      </section>
+
+      <section class="panel" aria-labelledby="pairing-heading">
+        <h2 id="pairing-heading" data-i18n="popup.pairing">Pairing</h2>
+        <p id="pairing-status" class="pairing-status"></p>
+        <form id="pair-form" class="inline-form">
+          <label for="pairing-code" data-i18n="popup.pairingCode">Pairing code</label>
+          <input
+            id="pairing-code"
+            name="code"
+            type="text"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            maxlength="8"
+            pattern="[0-9]*"
+            data-i18n-placeholder="popup.pairingCodePlaceholder"
+            placeholder="Eight-digit code"
+          />
+          <button type="submit" data-i18n="popup.pair">Pair</button>
+        </form>
+        <button id="unpair-button" type="button" class="secondary" hidden data-i18n="popup.unpair">
+          Unpair
+        </button>
+      </section>
+
+      <section class="panel" aria-labelledby="settings-heading">
+        <h2 id="settings-heading" data-i18n="popup.settings">Takeover settings</h2>
+        <form id="settings-form" class="settings">
+          <label class="toggle">
+            <input id="takeover-enabled" type="checkbox" />
+            <span data-i18n="popup.takeoverEnabled">Take over browser downloads</span>
+          </label>
+
+          <fieldset class="categories">
+            <legend data-i18n="popup.settings">Takeover settings</legend>
+            <div id="category-toggles" class="category-toggles"></div>
+          </fieldset>
+
+          <label class="field">
+            <span data-i18n="popup.minimumSize">Minimum size in bytes</span>
+            <input id="minimum-size" type="number" min="0" step="1" />
+          </label>
+
+          <label class="field">
+            <span data-i18n="popup.blacklist">Blocked hosts</span>
+            <textarea id="blacklist" rows="3" spellcheck="false"></textarea>
+          </label>
+          <p class="hint" data-i18n="popup.blacklistHint">One host per line.</p>
+
+          <button type="submit" data-i18n="popup.save">Save</button>
+        </form>
+      </section>
+
+      <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

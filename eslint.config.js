@@ -8,6 +8,7 @@ export default tseslint.config(
   {
     ignores: [
       "dist",
+      "extension/dist",
       "node_modules",
       "playwright-report",
       "test-results",
@@ -23,6 +24,7 @@ export default tseslint.config(
       globals: {
         ...globals.browser,
         ...globals.node,
+        chrome: "readonly",
       },
     },
     plugins: {
@@ -35,9 +37,10 @@ export default tseslint.config(
     },
   },
   {
-    files: ["scripts/**/*.mjs"],
+    files: ["scripts/**/*.mjs", "extension/build.mjs"],
     languageOptions: {
       ecmaVersion: 2022,
+      sourceType: "module",
       globals: {
         ...globals.node,
       },

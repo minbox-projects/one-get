@@ -2,6 +2,7 @@
 
 #![deny(dead_code, unused_imports)]
 
+pub mod api;
 pub mod app_state;
 pub mod commands;
 pub mod config;
@@ -12,13 +13,19 @@ pub mod logging;
 pub mod platform;
 pub mod store;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_deep_link::DeepLinkExt;
 
-use crate::app_state::AppState;
+use crate::api::clock::{Clock, SystemClock};
+use crate::api::desktop::TauriDesktopBridge;
+use crate::api::pairing_store::PairingStore;
+use crate::api::protocol::API_PORT;
+use crate::api::rate_limit::RateLimitPolicy;
+use crate::api::server::{ApiServerConfig, ApiServerHandle};
+use crate::app_state::{AppState, PairingRuntime};
 use crate::commands::app::{
     AutostartService, KeyringSecretService, NotificationService, PlatformQuitService, QuitService,
     SecretService,
@@ -32,6 +39,11 @@ use crate::platform::deeplink::register_schemes;
 use crate::platform::notifications::PluginNotificationService;
 use crate::platform::paths::AppPaths;
 use crate::store::Database;
+
+const PAIR_ORIGIN_REQUESTS: usize = 10;
+const PAIR_ORIGIN_WINDOW_MS: i64 = 60_000;
+const CAPTURE_TOKEN_REQUESTS: usize = 120;
+const CAPTURE_TOKEN_WINDOW_MS: i64 = 60_000;
 
 /// Build and run the desktop application.
 pub fn run() {
@@ -71,6 +83,11 @@ pub fn run() {
             commands::ipc::downloads_delete_file,
             commands::ipc::downloads_open_file,
             commands::ipc::downloads_open_folder,
+            commands::ipc::pairing_status,
+            commands::ipc::pairing_generate_code,
+            commands::ipc::pairing_list_clients,
+            commands::ipc::pairing_revoke,
+            commands::ipc::pairing_take_pending_prefill,
         ])
         .setup(|app| {
             initialize(app)?;
@@ -131,6 +148,16 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(PluginAutostartService::new(app.handle().clone()));
     let quit: Arc<dyn QuitService> = Arc::new(PlatformQuitService);
 
+    let (pairing_runtime, pairing_store) = match PairingStore::open(paths.data.join("pairing.db")) {
+        Ok(store) => {
+            let store = Arc::new(Mutex::new(store));
+            let clock: Arc<dyn Clock> = Arc::new(SystemClock::default());
+            let runtime = PairingRuntime::available(Arc::clone(&store), clock);
+            (runtime, Some(store))
+        }
+        Err(error) => (PairingRuntime::unavailable(error.code), None),
+    };
+
     let state = Arc::new(
         AppState::new(
             paths,
@@ -141,8 +168,30 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             autostart,
             quit,
         )
-        .with_engine(Arc::clone(&engine)),
+        .with_engine(Arc::clone(&engine))
+        .with_pairing(pairing_runtime),
     );
+
+    if let Some(store) = pairing_store {
+        let bridge = Arc::new(TauriDesktopBridge::new(
+            app.handle().clone(),
+            Arc::downgrade(&state),
+        ));
+        let config = ApiServerConfig {
+            port: API_PORT,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            pairing_store: store,
+            bridge,
+            clock: Arc::new(SystemClock::default()),
+            pair_origin_policy: RateLimitPolicy::new(PAIR_ORIGIN_REQUESTS, PAIR_ORIGIN_WINDOW_MS),
+            token_policy: RateLimitPolicy::new(CAPTURE_TOKEN_REQUESTS, CAPTURE_TOKEN_WINDOW_MS),
+        };
+        match ApiServerHandle::start(config) {
+            Ok(handle) => state.attach_api_server(handle),
+            Err(error) => state.set_pairing_unavailable(&error.code),
+        }
+    }
+
     app.manage(Arc::clone(&state));
 
     platform::tray::build_tray(app.handle())?;

@@ -1,0 +1,46 @@
+.oneget-overlay-button {
+  position: fixed;
+  z-index: 2147483000;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  border-radius: 8px;
+  background: rgba(17, 20, 27, 0.86);
+  color: #ffffff;
+  font: 600 9px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.oneget-overlay-button:hover,
+.oneget-overlay-button:focus-visible {
+  background: rgba(31, 111, 235, 0.95);
+}
+
+.oneget-overlay-button:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
+.oneget-overlay-notice {
+  position: fixed;
+  z-index: 2147483001;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  max-width: min(420px, calc(100vw - 32px));
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 8px;
+  background: rgba(17, 20, 27, 0.92);
+  color: #ffffff;
+  font: 500 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding: 10px 14px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}

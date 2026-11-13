@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OneGet capture fixture</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 24px;
+      }
+
+      #fixture-video {
+        display: block;
+        width: 320px;
+        height: 180px;
+        background: #000;
+      }
+
+      .actions {
+        display: flex;
+        gap: 8px;
+        margin: 16px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>OneGet capture fixture</h1>
+    <p id="route-label">route: /</p>
+    <div class="actions">
+      <button id="spa-route" type="button">Change SPA route</button>
+      <button id="fetch-second" type="button">Fetch second resource</button>
+    </div>
+    <video
+      id="fixture-video"
+      preload="none"
+      muted
+      aria-label="Fixture video"
+      src="/media/sample.mp4"
+    ></video>
+    <script>
+      const initialResources = [
+        "/hls/master.m3u8",
+        "/hls/segment1.ts",
+        "/hls/segment2.ts",
+        "/download.zip",
+      ];
+
+      Promise.all(
+        initialResources.map((resource) =>
+          fetch(resource).then((response) => response.arrayBuffer()),
+        ),
+      ).then(() => {
+        window.__oneGetFixtureInitialLoaded = true;
+      });
+
+      document.getElementById("spa-route").addEventListener("click", () => {
+        history.pushState({}, "", "/spa/route-2");
+        document.getElementById("route-label").textContent = "route: /spa/route-2";
+      });
+
+      document.getElementById("fetch-second").addEventListener("click", () => {
+        fetch("/spa/second-resource.zip");
+      });
+    </script>
+  </body>
+</html>

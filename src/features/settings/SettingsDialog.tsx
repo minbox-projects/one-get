@@ -5,6 +5,7 @@ import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { translate, useI18n } from "../../i18n";
 import type { Settings, Theme } from "../../types/app";
+import { PairingSettings } from "../pairing/PairingSettings";
 
 import { DownloadSettings } from "./DownloadSettings";
 import type {
@@ -221,14 +222,17 @@ export function SettingsDialog({
           {loading ? t("settings.loading") : t("settings.loadFailed")}
         </p>
       ) : (
-        <SettingsFormPanel
-          settings={settings}
-          readOnly={readOnly}
-          saving={saving}
-          save={save}
-          onOpenChange={onOpenChange}
-          onSaved={onSaved}
-        />
+        <>
+          <SettingsFormPanel
+            settings={settings}
+            readOnly={readOnly}
+            saving={saving}
+            save={save}
+            onOpenChange={onOpenChange}
+            onSaved={onSaved}
+          />
+          <PairingSettings />
+        </>
       )}
     </Dialog>
   );
