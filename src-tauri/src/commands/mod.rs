@@ -40,6 +40,13 @@ pub mod ipc {
     }
 
     #[tauri::command]
+    pub fn settings_status(
+        state: State<'_, Arc<AppState>>,
+    ) -> Result<app::SettingsStatus, AppError> {
+        app::settings_status(state.inner())
+    }
+
+    #[tauri::command]
     pub async fn settings_save(
         state: State<'_, Arc<AppState>>,
         settings: Settings,

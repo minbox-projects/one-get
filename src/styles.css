@@ -1331,3 +1331,32 @@ body {
   flex-wrap: wrap;
   gap: var(--og-space-2);
 }
+
+.og-settings {
+  display: grid;
+  gap: var(--og-space-4);
+}
+
+.og-settings__section {
+  display: grid;
+  gap: var(--og-space-3);
+  padding-top: var(--og-space-3);
+  border-top: 1px solid var(--og-border);
+}
+
+.og-settings__section:first-of-type {
+  padding-top: 0;
+  border-top: none;
+}
+
+.og-settings__heading {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.og-settings__note {
+  margin: 0;
+  color: var(--og-text-muted);
+  font-size: 0.8125rem;
+}

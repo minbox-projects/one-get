@@ -108,6 +108,16 @@ impl AppState {
         self.lock_settings().settings()
     }
 
+    /// Whether the loaded settings document is read-only.
+    pub fn settings_read_only(&self) -> bool {
+        self.lock_settings().is_read_only()
+    }
+
+    /// Whether corrupt settings input was recovered from a backup.
+    pub fn settings_recovered(&self) -> bool {
+        self.lock_settings().is_recovered()
+    }
+
     /// Persist settings and return the store's resulting snapshot.
     pub fn save_settings(&self, settings: Settings) -> Result<Settings, AppError> {
         let mut store = self.lock_settings();

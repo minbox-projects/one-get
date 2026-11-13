@@ -49,6 +49,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::ipc::app_info,
             commands::ipc::settings_get,
+            commands::ipc::settings_status,
             commands::ipc::settings_save,
             commands::ipc::deep_link_last,
             commands::ipc::diagnostics_secret_roundtrip,

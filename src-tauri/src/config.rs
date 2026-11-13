@@ -109,6 +109,7 @@ pub struct SettingsStore {
     settings: Settings,
     extras: Map<String, Value>,
     read_only: bool,
+    recovered: bool,
 }
 
 impl SettingsStore {
@@ -142,6 +143,7 @@ impl SettingsStore {
                 settings: Settings::default(),
                 extras: Map::new(),
                 read_only: true,
+                recovered: false,
             });
         }
 
@@ -187,6 +189,7 @@ impl SettingsStore {
             },
             extras: object,
             read_only: false,
+            recovered: false,
         })
     }
 
@@ -198,6 +201,11 @@ impl SettingsStore {
     /// Whether the file came from a newer schema and must not be overwritten.
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Whether corrupt input was backed up and defaults were loaded instead.
+    pub fn is_recovered(&self) -> bool {
+        self.recovered
     }
 
     /// Persist `settings`, preserving unknown top-level fields.
@@ -238,6 +246,7 @@ impl SettingsStore {
             settings,
             extras: Map::new(),
             read_only: false,
+            recovered: false,
         })
     }
 
@@ -245,7 +254,9 @@ impl SettingsStore {
         let backup = corrupt_backup_path(&path);
         fs::write(&backup, original)
             .map_err(|error| AppError::io_error("back up corrupt settings", error))?;
-        Self::create_defaults(path)
+        let mut store = Self::create_defaults(path)?;
+        store.recovered = true;
+        Ok(store)
     }
 }
 

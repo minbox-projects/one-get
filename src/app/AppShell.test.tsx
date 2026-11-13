@@ -89,6 +89,12 @@ function mockIpc(
     if (command === "settings_get") {
       return { ok: true as const, data: settings(overrides) };
     }
+    if (command === "settings_status") {
+      return {
+        ok: true as const,
+        data: { readOnly: false, recovered: false },
+      };
+    }
     if (command === "downloads_list") {
       return { ok: true as const, data: downloads };
     }
@@ -168,6 +174,12 @@ describe("AppShell", () => {
     invokeCommand.mockImplementation(async (command: string) => {
       if (command === "settings_get") {
         return { ok: true as const, data: settings() };
+      }
+      if (command === "settings_status") {
+        return {
+          ok: true as const,
+          data: { readOnly: false, recovered: false },
+        };
       }
       if (command === "downloads_list") {
         return new Promise((resolve) => {
@@ -393,6 +405,12 @@ describe("AppShell download dialogs", () => {
           data: settings({ defaultDirectory: "/tmp/downloads" }),
         };
       }
+      if (command === "settings_status") {
+        return {
+          ok: true as const,
+          data: { readOnly: false, recovered: false },
+        };
+      }
       if (command === "downloads_list") {
         return { ok: true as const, data: downloads };
       }
@@ -500,6 +518,12 @@ describe("AppShell download dialogs", () => {
           data: settings({ defaultDirectory: "/tmp/downloads" }),
         };
       }
+      if (command === "settings_status") {
+        return {
+          ok: true as const,
+          data: { readOnly: false, recovered: false },
+        };
+      }
       if (command === "downloads_list") {
         return { ok: true as const, data: downloads };
       }
@@ -594,6 +618,12 @@ describe("AppShell task controls, details, and deletion", () => {
     invokeCommand.mockImplementation(async (command: string) => {
       if (command === "settings_get") {
         return { ok: true as const, data: settings() };
+      }
+      if (command === "settings_status") {
+        return {
+          ok: true as const,
+          data: { readOnly: false, recovered: false },
+        };
       }
       if (command === "downloads_list") {
         return { ok: true as const, data: downloads };
@@ -808,5 +838,94 @@ describe("AppShell task controls, details, and deletion", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/missing|could not|open/i);
     expect(screen.getByText("report.pdf")).toBeInTheDocument();
+  });
+});
+
+describe("AppShell settings", () => {
+  it("opens settings from the toolbar, applies saved values live, and gives new downloads the saved defaults", async () => {
+    const user = userEvent.setup();
+    let current = settings({ defaultConnections: 4 });
+    let saved: Record<string, unknown> | null = null;
+
+    invokeCommand.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "settings_get") {
+        return { ok: true as const, data: current };
+      }
+      if (command === "settings_status") {
+        return {
+          ok: true as const,
+          data: { readOnly: false, recovered: false },
+        };
+      }
+      if (command === "settings_save") {
+        saved = (args as { settings: Record<string, unknown> }).settings;
+        current = saved as unknown as typeof current;
+        return { ok: true as const, data: current };
+      }
+      if (command === "downloads_list") {
+        return { ok: true as const, data: [] };
+      }
+      return {
+        ok: false as const,
+        error: { code: "unexpected_command", message: command },
+      };
+    });
+
+    renderShell();
+    await screen.findByText(en["list.emptyTitle"]);
+
+    await user.click(
+      screen.getByRole("button", { name: en["toolbar.settings"] }),
+    );
+    const dialog = await screen.findByRole("dialog", { name: /settings/i });
+    await within(dialog).findByLabelText(/language/i);
+
+    await user.selectOptions(
+      within(dialog).getByLabelText(/language/i),
+      "zh-CN",
+    );
+    await user.selectOptions(within(dialog).getByLabelText(/theme/i), "dark");
+    const destination = within(dialog).getByLabelText(
+      /default (download )?directory/i,
+    );
+    await user.clear(destination);
+    await user.type(destination, "/tmp/saved");
+    const connections = within(dialog).getByLabelText(/default connections/i);
+    await user.clear(connections);
+    await user.type(connections, "2");
+
+    await user.click(within(dialog).getByRole("button", { name: /^save/i }));
+
+    await waitFor(() => {
+      expect(saved).toMatchObject({
+        schemaVersion: 2,
+        language: "zh-CN",
+        theme: "dark",
+        defaultDirectory: "/tmp/saved",
+        defaultConnections: 2,
+      });
+    });
+    await waitFor(() => {
+      expect(document.documentElement.dataset.theme).toBe("dark");
+    });
+    expect(
+      await screen.findByRole("button", { name: zh["toolbar.new"] }),
+    ).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryAllByRole("dialog")).toHaveLength(0);
+    });
+
+    await user.click(screen.getByRole("button", { name: zh["toolbar.new"] }));
+    const newDialog = await screen.findByRole("dialog", {
+      name: zh["download.newTitle"],
+    });
+    expect(
+      within(newDialog).getByLabelText(zh["download.destination"]),
+    ).toHaveValue("/tmp/saved");
+    expect(
+      within(newDialog).getByLabelText(zh["download.connections"]),
+    ).toHaveValue(2);
   });
 });

@@ -147,6 +147,44 @@ const enUS = {
   "delete.fileBody": "This permanently deletes the file from this computer. This action cannot be undone.",
   "delete.fileAcknowledge": "I understand the file will be permanently deleted from disk.",
   "delete.fileConfirm": "Delete file",
+  "settings.title": "Settings",
+  "settings.general": "General",
+  "settings.download": "Downloads",
+  "settings.network": "Network",
+  "settings.networkReadOnly":
+    "Network settings are read-only in this version. Proxy and cookie options arrive in a later update.",
+  "settings.language": "Language",
+  "settings.language.system": "System language",
+  "settings.language.zh-CN": "Simplified Chinese",
+  "settings.language.en-US": "English",
+  "settings.theme": "Theme",
+  "settings.theme.system": "System",
+  "settings.theme.light": "Light",
+  "settings.theme.dark": "Dark",
+  "settings.closeBehavior": "Closing the window",
+  "settings.close.tray": "Keep running in the tray",
+  "settings.close.quit": "Quit OneGet",
+  "settings.defaultDirectory": "Default download directory",
+  "settings.logLevel": "Log level",
+  "settings.logLevel.error": "Error",
+  "settings.logLevel.warn": "Warning",
+  "settings.logLevel.info": "Info",
+  "settings.logLevel.debug": "Debug",
+  "settings.logLevel.trace": "Trace",
+  "settings.defaultConnections": "Default connections",
+  "settings.maxConcurrentTasks": "Maximum concurrent tasks",
+  "settings.globalRateLimit": "Global rate limit (bytes per second)",
+  "settings.capturedAtStart":
+    "Concurrency and global rate limits apply to new tasks after you save. Running downloads keep the limits captured when they started.",
+  "settings.readOnly":
+    "These settings were written by a newer version of OneGet. They are read-only and cannot be saved here.",
+  "settings.recovered":
+    "The settings file was corrupt, so a backup was created and default settings were loaded.",
+  "settings.loading": "Loading settings…",
+  "settings.loadFailed": "Settings could not be loaded.",
+  "settings.save": "Save",
+  "validation.concurrency_positive":
+    "Maximum concurrent tasks must be a positive whole number.",
 
 };
 

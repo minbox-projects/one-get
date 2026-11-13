@@ -1,6 +1,12 @@
 import type { AppError, IpcResult } from "../types/app";
 
-export type { AppError, AppInfo, IpcResult, Settings } from "../types/app";
+export type {
+  AppError,
+  AppInfo,
+  IpcResult,
+  Settings,
+  SettingsStatus,
+} from "../types/app";
 
 const RUNTIME_UNAVAILABLE_MESSAGE =
   "Tauri runtime is unavailable in this environment.";

@@ -146,6 +146,43 @@ const zhCN = {
   "delete.fileBody": "这会从这台电脑上永久删除该文件，且无法撤销。",
   "delete.fileAcknowledge": "我明白该文件将从磁盘上被永久删除。",
   "delete.fileConfirm": "删除文件",
+  "settings.title": "设置",
+  "settings.general": "常规",
+  "settings.download": "下载",
+  "settings.network": "网络",
+  "settings.networkReadOnly":
+    "此版本中网络设置为只读。代理和 Cookie 选项将在后续更新中提供。",
+  "settings.language": "语言",
+  "settings.language.system": "跟随系统语言",
+  "settings.language.zh-CN": "简体中文",
+  "settings.language.en-US": "英语",
+  "settings.theme": "主题",
+  "settings.theme.system": "跟随系统",
+  "settings.theme.light": "浅色",
+  "settings.theme.dark": "深色",
+  "settings.closeBehavior": "关闭窗口时",
+  "settings.close.tray": "保留在托盘运行",
+  "settings.close.quit": "退出 OneGet",
+  "settings.defaultDirectory": "默认下载目录",
+  "settings.logLevel": "日志级别",
+  "settings.logLevel.error": "错误",
+  "settings.logLevel.warn": "警告",
+  "settings.logLevel.info": "信息",
+  "settings.logLevel.debug": "调试",
+  "settings.logLevel.trace": "跟踪",
+  "settings.defaultConnections": "默认连接数",
+  "settings.maxConcurrentTasks": "最大并发任务数",
+  "settings.globalRateLimit": "全局限速（字节/秒）",
+  "settings.capturedAtStart":
+    "并发数和全局限速在保存后对新任务生效。正在运行的下载会保留任务开始时的限制。",
+  "settings.readOnly":
+    "这些设置由更新版本的 OneGet 写入，当前版本只能查看，无法保存。",
+  "settings.recovered":
+    "设置文件已损坏，已创建备份并加载默认设置。",
+  "settings.loading": "正在加载设置…",
+  "settings.loadFailed": "无法加载设置。",
+  "settings.save": "保存",
+  "validation.concurrency_positive": "最大并发任务数必须为正整数。",
 
 };
 

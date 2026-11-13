@@ -41,6 +41,11 @@ export interface Settings {
   [key: string]: unknown;
 }
 
+export interface SettingsStatus {
+  readOnly: boolean;
+  recovered: boolean;
+}
+
 export interface DeepLinkResult {
   accepted: boolean;
   url?: string;
@@ -71,6 +76,7 @@ export interface CommandArgs {
   app_info: undefined;
   settings_get: undefined;
   settings_save: { settings: Settings };
+  settings_status: undefined;
   deep_link_last: undefined;
   diagnostics_secret_roundtrip: { secret: string };
   diagnostics_notification_status: undefined;
@@ -96,6 +102,7 @@ export interface CommandResults {
   app_info: AppInfo;
   settings_get: Settings;
   settings_save: Settings;
+  settings_status: SettingsStatus;
   deep_link_last: DeepLinkResult;
   diagnostics_secret_roundtrip: SecretRoundtripResult;
   diagnostics_notification_status: NotificationStatus;

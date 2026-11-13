@@ -157,9 +157,27 @@ pub fn app_info(state: &AppState) -> AppInfo {
     }
 }
 
+/// Load-time status of the settings document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsStatus {
+    /// Whether a future schema makes the settings read-only.
+    pub read_only: bool,
+    /// Whether corrupt input was backed up and defaults were loaded.
+    pub recovered: bool,
+}
+
 /// Current settings.
 pub fn settings_get(state: &AppState) -> Settings {
     state.settings()
+}
+
+/// Load-time status of the settings document.
+pub fn settings_status(state: &AppState) -> Result<SettingsStatus, AppError> {
+    Ok(SettingsStatus {
+        read_only: state.settings_read_only(),
+        recovered: state.settings_recovered(),
+    })
 }
 
 /// Persist settings, apply live engine limits, and return the stored value.

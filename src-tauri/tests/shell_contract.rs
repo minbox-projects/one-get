@@ -7,8 +7,9 @@ use oneget_lib::app_state::AppState;
 use oneget_lib::commands::app::{
     app_graceful_quit, app_info, deep_link_last, diagnostics_autostart_get,
     diagnostics_autostart_set, diagnostics_notification_status, diagnostics_secret_roundtrip,
-    diagnostics_send_notification, handle_deep_link, settings_get, settings_save, AutostartService,
-    NotificationService, NotificationStatus, QuitService, SecretService,
+    diagnostics_send_notification, handle_deep_link, settings_get, settings_save, settings_status,
+    AutostartService, NotificationService, NotificationStatus, QuitService, SecretService,
+    SettingsStatus,
 };
 use oneget_lib::config::{SettingsStore, Theme};
 use oneget_lib::error::AppError;
@@ -149,10 +150,24 @@ fn build_harness(
     autostart: Arc<dyn AutostartService>,
     quit: FakeQuitService,
 ) -> TestHarness {
+    build_harness_with_settings_document(secret, notification, autostart, quit, None)
+}
+
+fn build_harness_with_settings_document(
+    secret: Arc<dyn SecretService>,
+    notification: Arc<dyn NotificationService>,
+    autostart: Arc<dyn AutostartService>,
+    quit: FakeQuitService,
+    settings_document: Option<&str>,
+) -> TestHarness {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().join("app");
     let paths = AppPaths::with_root(&root).expect("app paths");
     let settings_path = paths.data.join("settings.json");
+    if let Some(document) = settings_document {
+        fs::create_dir_all(&paths.data).expect("settings directory");
+        fs::write(&settings_path, document).expect("seed settings document");
+    }
     let settings = SettingsStore::load(&settings_path).expect("settings store");
     let log_dir = paths.logs.clone();
     let logger = Logger::new(LogConfig::with_defaults(log_dir.clone())).expect("logger");
@@ -446,6 +461,52 @@ fn app_info_and_settings_round_trip_via_temp_paths() {
     assert!(
         matches!(reloaded.theme, Theme::Dark),
         "theme change must be visible in a reloaded store"
+    );
+}
+
+#[test]
+fn settings_status_reports_normal_future_schema_and_corrupt_recovery() {
+    let normal = build_harness(
+        Arc::new(FakeSecretService::succeeding()),
+        Arc::new(FakeNotificationService::granted()),
+        Arc::new(FakeAutostartService::new(false)),
+        FakeQuitService::default(),
+    );
+    let normal_status: SettingsStatus =
+        settings_status(&normal.state).expect("normal settings status");
+    let normal_json = serde_json::to_value(normal_status).expect("normal status json");
+    assert_eq!(normal_json.get("readOnly"), Some(&Value::Bool(false)));
+    assert_eq!(normal_json.get("recovered"), Some(&Value::Bool(false)));
+
+    let future = build_harness_with_settings_document(
+        Arc::new(FakeSecretService::succeeding()),
+        Arc::new(FakeNotificationService::granted()),
+        Arc::new(FakeAutostartService::new(false)),
+        FakeQuitService::default(),
+        Some(r#"{"schemaVersion": 3, "theme": "dark"}"#),
+    );
+    let future_status = settings_status(&future.state).expect("future schema settings status");
+    let future_json = serde_json::to_value(future_status).expect("future status json");
+    assert_eq!(future_json.get("readOnly"), Some(&Value::Bool(true)));
+    assert_eq!(future_json.get("recovered"), Some(&Value::Bool(false)));
+
+    let corrupt = build_harness_with_settings_document(
+        Arc::new(FakeSecretService::succeeding()),
+        Arc::new(FakeNotificationService::granted()),
+        Arc::new(FakeAutostartService::new(false)),
+        FakeQuitService::default(),
+        Some("{ this is not valid settings json"),
+    );
+    let corrupt_status = settings_status(&corrupt.state).expect("corrupt settings status");
+    let corrupt_json = serde_json::to_value(corrupt_status).expect("corrupt status json");
+    assert_eq!(corrupt_json.get("readOnly"), Some(&Value::Bool(false)));
+    assert_eq!(corrupt_json.get("recovered"), Some(&Value::Bool(true)));
+    assert!(
+        corrupt
+            .settings_path
+            .with_file_name("settings.json.corrupt")
+            .exists(),
+        "corrupt settings must be backed up before replacement"
     );
 }
 

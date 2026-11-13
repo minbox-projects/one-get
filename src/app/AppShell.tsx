@@ -9,6 +9,7 @@ import type { DeleteMode } from "../features/downloads/DeleteConfirmDialog";
 import { DownloadsView } from "../features/downloads/DownloadsView";
 import { NewDownloadDialog } from "../features/downloads/NewDownloadDialog";
 import { TaskDetails } from "../features/downloads/TaskDetails";
+import { SettingsDialog } from "../features/settings/SettingsDialog";
 import type { SidebarView, SortDirection, SortKey } from "../features/downloads/filters";
 import { filterTasks, sidebarCounts } from "../features/downloads/filters";
 import { useDownloads } from "../features/downloads/useDownloads";
@@ -72,6 +73,7 @@ export function AppShell() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [newOpen, setNewOpen] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [segments, setSegments] = useState<DownloadSegment[]>([]);
   const [segmentsLoading, setSegmentsLoading] = useState(false);
@@ -321,7 +323,12 @@ export function AppShell() {
                 downloads.setSortDirection(event.target.value as SortDirection)
               }
             />
-            <Button variant="secondary">{t("toolbar.settings")}</Button>
+            <Button
+              variant="secondary"
+              onClick={() => setSettingsOpen(true)}
+            >
+              {t("toolbar.settings")}
+            </Button>
           </div>
 
           {errorMessage ? (
@@ -422,6 +429,16 @@ export function AppShell() {
           defaults={downloadDefaults}
           onAdded={() => {
             void downloads.refresh();
+          }}
+        />
+      ) : null}
+      {settingsOpen ? (
+        <SettingsDialog
+          open
+          onOpenChange={setSettingsOpen}
+          onSaved={(next) => {
+            setSettings(next);
+            setSettingsOpen(false);
           }}
         />
       ) : null}
