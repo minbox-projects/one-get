@@ -213,6 +213,33 @@ const zhCN = {
   "settings.save": "保存",
   "validation.concurrency_positive": "最大并发任务数必须为正整数。",
   "validation.concurrency_range": "最大并发任务数不能超过 4,294,967,295。",
+  "settings.pairing.title": "浏览器集成",
+  "settings.pairing.loading": "正在加载浏览器集成…",
+  "settings.pairing.available":
+    "配对功能可用。生成配对码后，在 OneGet 浏览器扩展中输入该配对码。",
+  "settings.pairing.generate": "生成配对码",
+  "settings.pairing.noCode": "尚未生成配对码。",
+  "settings.pairing.expiresIn": "剩余时间",
+  "settings.pairing.copy": "复制配对码",
+  "settings.pairing.copied": "已复制到剪贴板。",
+  "settings.pairing.expired": "配对码已过期，请生成新的配对码。",
+  "settings.pairing.locked": "配对尝试次数过多，配对功能已锁定五分钟。",
+  "settings.pairing.error": "浏览器集成无法完成该操作，请重试。",
+  "settings.pairing.unavailablePort":
+    "浏览器集成不可用：无法绑定本地端口，可能有其他程序正在占用该端口。",
+  "settings.pairing.unavailableSchema":
+    "配对数据库使用了当前版本无法读取的新架构。请更新 OneGet 后再进行配对。",
+  "settings.pairing.unavailableGeneric": "浏览器集成当前不可用。",
+  "settings.pairing.noClients": "尚未有已配对的客户端。",
+  "settings.pairing.createdAt": "配对时间",
+  "settings.pairing.lastUsedAt": "最近使用",
+  "settings.pairing.revoke": "撤销配对",
+  "settings.pairing.revokeClient": "撤销 {label} 的配对",
+  "settings.pairing.revokeTitle": "撤销浏览器客户端配对",
+  "settings.pairing.revokeBody":
+    "要撤销 {label} 的配对吗？该浏览器需要重新配对后才能继续发送捕获。",
+  "settings.pairing.revokeConfirm": "撤销配对",
+  "settings.pairing.revoked": "{label} 的配对已撤销。请重新配对浏览器扩展后继续。",
 
 };
 

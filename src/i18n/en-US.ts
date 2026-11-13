@@ -222,6 +222,38 @@ const enUS = {
     "Maximum concurrent tasks must be a positive whole number.",
   "validation.concurrency_range":
     "Maximum concurrent tasks must not exceed 4,294,967,295.",
+  "settings.pairing.title": "Browser integration",
+  "settings.pairing.loading": "Loading browser integration…",
+  "settings.pairing.available":
+    "Pairing is available. Generate a code, then enter it in the OneGet browser extension.",
+  "settings.pairing.generate": "Generate code",
+  "settings.pairing.noCode": "No pairing code yet.",
+  "settings.pairing.expiresIn": "Expires in",
+  "settings.pairing.copy": "Copy code",
+  "settings.pairing.copied": "Copied to clipboard.",
+  "settings.pairing.expired":
+    "The pairing code expired. Generate a new code.",
+  "settings.pairing.locked":
+    "Too many incorrect pairing attempts. Pairing is locked for five minutes.",
+  "settings.pairing.error":
+    "Browser integration could not complete that action. Try again.",
+  "settings.pairing.unavailablePort":
+    "Browser integration is unavailable because the local port could not be bound. Another program may already be using it.",
+  "settings.pairing.unavailableSchema":
+    "The pairing database uses a newer schema that this version cannot read. Pairing stays unavailable until you update OneGet.",
+  "settings.pairing.unavailableGeneric":
+    "Browser integration is unavailable right now.",
+  "settings.pairing.noClients": "No paired clients yet.",
+  "settings.pairing.createdAt": "Paired",
+  "settings.pairing.lastUsedAt": "Last used",
+  "settings.pairing.revoke": "Revoke",
+  "settings.pairing.revokeClient": "Revoke {label}",
+  "settings.pairing.revokeTitle": "Revoke browser client",
+  "settings.pairing.revokeBody":
+    "Revoke the pairing for {label}? Captures from that browser stop working until it pairs again.",
+  "settings.pairing.revokeConfirm": "Revoke",
+  "settings.pairing.revoked":
+    "{label} was revoked. Pair the browser extension again to continue.",
 
 };
 

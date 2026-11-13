@@ -53,6 +53,24 @@ function mockIpc(options: {
       const next = (args as { settings: Settings }).settings;
       return options.save ? options.save(next) : { ok: true as const, data: next };
     }
+    if (command === "pairing_status") {
+      return {
+        ok: true as const,
+        data: {
+          available: true,
+          reason: null,
+          protocolVersion: 1,
+          code: null,
+          clients: [],
+        },
+      };
+    }
+    if (command === "pairing_list_clients") {
+      return { ok: true as const, data: [] };
+    }
+    if (command === "pairing_take_pending_prefill") {
+      return { ok: true as const, data: null };
+    }
     return {
       ok: false as const,
       error: { code: "unexpected_command", message: command },
@@ -118,6 +136,9 @@ describe("SettingsDialog", () => {
     expect(screen.getByLabelText(/default connections/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/max(imum)? concurrent tasks/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/global rate limit/i)).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: /browser/i }),
+    ).toBeInTheDocument();
 
     const networkHeading = screen.getByRole("heading", { name: /network/i });
     const network =
