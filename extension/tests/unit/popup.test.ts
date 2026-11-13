@@ -6,7 +6,7 @@ import {
   resourceView,
   takeoverFailureView,
 } from "../../popup/popup";
-import type { TakeoverFailure } from "../../chromium/background";
+import type { TakeoverFailure } from "../../shared/background";
 import { translateExtension } from "../../shared/i18n";
 import type { ResourceEntry, ResourceKind } from "../../shared/types";
 

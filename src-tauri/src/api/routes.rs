@@ -1,7 +1,7 @@
 //! HTTP route handlers and the fixed admission order.
 //!
 //! Every route checks the header budget and exact loopback Host first. Write
-//! routes then require the Chromium extension Origin, JSON content type where a
+//! routes then require an exact browser-extension Origin, JSON content type where a
 //! body is expected, and a bearer token from the Authorization header only.
 
 use std::sync::MutexGuard;

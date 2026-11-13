@@ -1,13 +1,14 @@
 import { readFileSync } from "node:fs";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createBackgroundController } from "../../chromium/background";
+import { installChromeBackground } from "../../chromium/background";
+import { createBackgroundController } from "../../shared/background";
 import type {
   BackgroundController,
   BrowserDownload,
   TakeoverFailure,
-} from "../../chromium/background";
+} from "../../shared/background";
 import { DEFAULT_SETTINGS } from "../../shared/settings";
 import type { ExtensionSettings } from "../../shared/settings";
 import type { StorageArea } from "../../shared/storage";
@@ -22,10 +23,12 @@ const SAFE_HEADERS = new Set(["referer", "user-agent", "accept", "accept-languag
 interface Area {
   area: StorageArea;
   store: Record<string, unknown>;
+  sets: Array<Record<string, unknown>>;
 }
 
 function createArea(initial: Record<string, unknown> = {}): Area {
   const store: Record<string, unknown> = { ...initial };
+  const sets: Array<Record<string, unknown>> = [];
   const area: StorageArea = {
     async get(keys) {
       if (keys === null) {
@@ -37,6 +40,7 @@ function createArea(initial: Record<string, unknown> = {}): Area {
       );
     },
     async set(items) {
+      sets.push({ ...items });
       Object.assign(store, items);
     },
     async remove(keys) {
@@ -45,7 +49,7 @@ function createArea(initial: Record<string, unknown> = {}): Area {
       }
     },
   };
-  return { area, store };
+  return { area, store, sets };
 }
 
 function savedSettings(overrides: Partial<ExtensionSettings> = {}): ExtensionSettings {
@@ -152,6 +156,7 @@ interface SetupOptions {
   initialSession?: Record<string, unknown>;
   handler?: FetchHandler;
   events?: string[];
+  pairLabel?: string;
   log?: (event: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -172,6 +177,7 @@ function setUp(options: SetupOptions = {}) {
     apiOrigin: TEST_ORIGIN,
     now: () => 1_000,
     downloads,
+    ...(options.pairLabel === undefined ? {} : { pairLabel: options.pairLabel }),
     log: options.log ?? (() => {}),
   });
   return { controller, persistent, session, fetch, events };
@@ -687,6 +693,56 @@ describe("runtime messages", () => {
     expect(fetch.calls[0].body).toMatchObject({ protocolVersion: 1, code: PAIRING_CODE });
   });
 
+  it("sends the default Chromium pair label", async () => {
+    const { controller, fetch } = setUp({
+      handler: () =>
+        jsonResponse({
+          token: TOKEN_A,
+          client: { id: "client-1", label: "Chrome extension" },
+        }),
+    });
+
+    expect((await controller.pair(PAIRING_CODE)).ok).toBe(true);
+
+    expect(fetch.calls).toHaveLength(1);
+    expect(fetch.calls[0].body).toMatchObject({
+      protocolVersion: 1,
+      code: PAIRING_CODE,
+      label: "Chrome extension",
+    });
+  });
+
+  it("sends an overridden pair label when one is injected", async () => {
+    const { controller, fetch } = setUp({
+      pairLabel: "Firefox extension",
+      handler: () =>
+        jsonResponse({
+          token: TOKEN_A,
+          client: { id: "client-2", label: "Firefox extension" },
+        }),
+    });
+
+    expect((await controller.pair(PAIRING_CODE)).ok).toBe(true);
+
+    expect(fetch.calls).toHaveLength(1);
+    expect(fetch.calls[0].body).toMatchObject({
+      protocolVersion: 1,
+      code: PAIRING_CODE,
+      label: "Firefox extension",
+    });
+  });
+
+  it("returns a typed rejection for an unknown message type", async () => {
+    const { controller } = setUp();
+
+    await expect(
+      controller.handleRuntimeMessage(runtimeMessage({ type: "popup/unknown" })),
+    ).resolves.toEqual({
+      ok: false,
+      error: { code: "UNKNOWN_MESSAGE", message: "unknown message" },
+    });
+  });
+
   it("clears the stored token on popup unpair", async () => {
     const { controller, persistent } = setUp({
       token: TOKEN_A,
@@ -773,7 +829,12 @@ describe("takeover failure surface", () => {
     expect(Object.keys(persistent.store).sort()).toEqual(["oneget.settings", "oneget.token"]);
     expect(JSON.stringify(persistent.store)).not.toContain("takeoverError");
     expect(JSON.stringify(persistent.store)).not.toContain("https://cdn.test/files/movie.mp4");
-    expect(JSON.stringify(session.store)).not.toContain("takeoverError");
+    expect(
+      session.sets.some((items) =>
+        Object.values(items).some((value) => JSON.stringify(value).includes("downloadId")),
+      ),
+    ).toBe(false);
+    expect(JSON.stringify(session.store)).not.toContain("downloadId");
   });
 
   it("maps 401, 409, and 500 responses to the matching failure reason", async () => {
@@ -970,3 +1031,129 @@ describe("MV3 manifest", () => {
 
 
 
+function installableArea(initial: Record<string, unknown> = {}) {
+  const store = { ...initial };
+  return {
+    store,
+    get(keys: string | string[] | null, callback?: (values: Record<string, unknown>) => void) {
+      const requested = keys === null ? Object.keys(store) : Array.isArray(keys) ? keys : [keys];
+      const values = Object.fromEntries(
+        requested.filter((key) => key in store).map((key) => [key, store[key]]),
+      );
+      callback?.(values);
+      return Promise.resolve(values);
+    },
+    set(items: Record<string, unknown>, callback?: () => void) {
+      Object.assign(store, items);
+      callback?.();
+      return Promise.resolve();
+    },
+    remove(keys: string | string[], callback?: () => void) {
+      for (const key of Array.isArray(keys) ? keys : [keys]) {
+        delete store[key];
+      }
+      callback?.();
+      return Promise.resolve();
+    },
+  };
+}
+
+function installableChrome() {
+  const listeners = {
+    message: [] as unknown[],
+    responseStarted: [] as unknown[],
+    determiningFilename: [] as unknown[],
+    committed: [] as unknown[],
+    tabRemoved: [] as unknown[],
+  };
+  const events: string[] = [];
+  const local = installableArea({
+    "oneget.token": TOKEN_A,
+    "oneget.settings": savedSettings(),
+  });
+  const session = installableArea();
+  const chromeMock = {
+    runtime: {
+      lastError: undefined as { message?: string } | undefined,
+      sendMessage: async () => undefined,
+      onMessage: { addListener: (listener: unknown) => listeners.message.push(listener) },
+    },
+    storage: { local, session },
+    tabs: {
+      query: async () => [],
+      onRemoved: { addListener: (listener: unknown) => listeners.tabRemoved.push(listener) },
+    },
+    webRequest: {
+      onResponseStarted: {
+        addListener: (listener: unknown) => listeners.responseStarted.push(listener),
+      },
+    },
+    downloads: {
+      onDeterminingFilename: {
+        addListener: (listener: unknown) => listeners.determiningFilename.push(listener),
+      },
+      cancel: async (id: number) => {
+        events.push(`cancel:${id}`);
+      },
+      erase: async (query: { id: number }) => {
+        events.push(`erase:${query.id}`);
+      },
+    },
+    webNavigation: {
+      onCommitted: { addListener: (listener: unknown) => listeners.committed.push(listener) },
+    },
+  };
+  return { chromeMock, listeners, events };
+}
+
+describe("Chromium installer", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("registers the service-worker listeners and routes determining-filename downloads through the shared controller", async () => {
+    const { chromeMock, listeners, events } = installableChrome();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe(`${TEST_ORIGIN}/capture`);
+      return takeoverAccepted("task-7");
+    });
+    vi.stubGlobal("chrome", chromeMock);
+    vi.stubGlobal("fetch", fetchMock);
+
+    installChromeBackground();
+
+    expect(listeners.message).toHaveLength(1);
+    expect(listeners.responseStarted).toHaveLength(1);
+    expect(listeners.determiningFilename).toHaveLength(1);
+    expect(listeners.committed).toHaveLength(1);
+    expect(listeners.tabRemoved).toHaveLength(1);
+
+    const suggest = vi.fn();
+    const onDeterminingFilename = listeners.determiningFilename[0] as (
+      item: Record<string, unknown>,
+      suggest: () => void,
+    ) => boolean;
+
+    expect(
+      onDeterminingFilename(
+        {
+          id: 7,
+          url: "https://cdn.test/files/movie.mp4",
+          filename: "movie.mp4",
+          referrer: "https://page.test/watch",
+          mime: "video/mp4",
+          totalBytes: 2 * 1024 * 1024,
+          incognito: false,
+          byExtensionId: "",
+        },
+        suggest,
+      ),
+    ).toBe(true);
+
+    await vi.waitFor(() => {
+      expect(events).toEqual(["cancel:7", "erase:7"]);
+    });
+    expect(suggest).toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});

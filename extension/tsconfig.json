@@ -21,6 +21,7 @@
   "include": [
     "shared/**/*.ts",
     "chromium/**/*.ts",
+    "firefox/**/*.ts",
     "popup/**/*.ts",
     "tests/unit/**/*.ts"
   ]

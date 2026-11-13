@@ -1,6 +1,6 @@
 # OneGet Browser Capture Protocol
 
-This document specifies the loopback protocol between the OneGet desktop application and its Chromium extension. Protocol version 1 covers health discovery, pairing, capture, and revocation. The desktop service is optional: a bind or pairing-database failure leaves ordinary downloads and settings usable, and the pairing surface reports the service as unavailable.
+This document specifies the loopback protocol between the OneGet desktop application and its Chromium and Firefox extensions. Protocol version 1 covers health discovery, pairing, capture, and revocation. The desktop service is optional: a bind or pairing-database failure leaves ordinary downloads and settings usable, and the pairing surface reports the service as unavailable.
 
 ## Service and health
 
@@ -17,7 +17,7 @@ The service binds only to `127.0.0.1`. The production port is `37652`; a test bu
 }
 ```
 
-`GET /health` requires the exact `Host` header. It permits an absent `Origin` for a non-browser liveness check but rejects any present `Origin` that is not an exact Chromium extension origin. It returns no token, paired-client data, URL, filename, or filesystem path.
+`GET /health` requires the exact `Host` header. It permits an absent `Origin` for a non-browser liveness check but rejects any present `Origin` that is not an exact browser-extension origin in a supported scheme. It returns no token, paired-client data, URL, filename, or filesystem path.
 
 ## Admission order
 
@@ -25,12 +25,12 @@ Every route is rejected before any task or prefill is created. The checks run in
 
 1. The request-header budget: at most 64 headers and at most 16 KiB across all header names and values.
 2. The exact loopback `Host` authority.
-3. The route-specific origin rule. `GET /health` allows an absent `Origin` and rejects a present non-extension origin. `POST /pair`, `POST /capture`, and `POST /pair/revoke` require an exact `chrome-extension://` origin.
+3. The route-specific origin rule. `GET /health` allows an absent `Origin` and rejects a present non-extension origin. `POST /pair`, `POST /capture`, and `POST /pair/revoke` require an exact browser-extension origin.
 4. A declared `application/json` content type for `POST /pair` and `POST /capture`. A `charset` or other parameter after the media type is allowed. `POST /pair/revoke` needs no body and does not require this header.
 5. Bearer authentication for `POST /capture` and `POST /pair/revoke`. The token is read only from `Authorization: Bearer <token>`; a missing, malformed, query-string, or invalid token is rejected.
 6. The per-route rate limit, then body reading and parsing, protocol version, and per-item validation.
 
-A Chromium extension origin is exactly `chrome-extension://` followed by 32 lowercase `a`–`p` characters. Another extension origin, a web-page origin, `Origin: null`, a missing write origin, and a stolen token presented with a different origin are rejected. No wildcard CORS header is returned.
+A supported browser-extension origin is exactly one of two forms. A Chromium origin is `chrome-extension://` followed by 32 lowercase `a`–`p` characters. A Firefox origin is `moz-extension://` followed by a lowercase UUID in canonical 8-4-4-4-12 form, using only digits and `a`–`f` with hyphens at those fixed positions. An uppercase UUID, a UUID with a path, query, or fragment, another extension scheme, a web-page origin, `Origin: null`, a missing write origin, and a stolen token presented with a different origin are rejected. The accepted scheme changes no admission order, limit, token binding, or error code. No wildcard CORS header is returned.
 
 ## Limits
 
@@ -80,7 +80,7 @@ The desktop generates an eight-digit decimal code with a ten-minute lifetime. On
 }
 ```
 
-The token is 256 random bits rendered as 64 lowercase hexadecimal characters. It is returned exactly once. The desktop stores only its SHA-256 hash, bound to the exact origin that paired. The code is deleted in the same transaction that inserts the client, so a second use of the same code fails. A pending code is held in memory and is discarded when the app reopens, so a code shown before a restart cannot pair.
+The token is 256 random bits rendered as 64 lowercase hexadecimal characters. It is returned exactly once. The desktop stores only its SHA-256 hash, bound to the exact origin that paired. A Firefox client returns its `moz-extension://<lowercase 8-4-4-4-12 UUID>` origin in the same field, and the Firefox extension always sends the `Firefox extension` label. The desktop keeps its `Chrome extension` default for a label that is empty after cleaning, and that default is not derived from the origin scheme. The code is deleted in the same transaction that inserts the client, so a second use of the same code fails. A pending code is held in memory and is discarded when the app reopens, so a code shown before a restart cannot pair.
 
 A wrong or expired code returns 401 with `INVALID_CODE`. Five failed attempts lock pairing for five minutes; while locked, requests return 429 with `PAIRING_LOCKED` and a `Retry-After` value. A successful pairing resets the failure count. Authorization compares the token hash and requires the exact bound origin; the last-used timestamp is persisted at most once per minute.
 
@@ -158,7 +158,7 @@ Prefill replaces any earlier pending prefill with one bounded in-memory list, em
 
 ## Takeover sequence
 
-The extension evaluates a browser download when `chrome.downloads.onDeterminingFilename` fires:
+The extension evaluates a browser download when the browser reports it. Chromium uses `downloads.onDeterminingFilename`; Firefox uses `downloads.onCreated`, and its `DownloadItem` is reduced to a safe basename or a URL-derived filename, with `totalBytes: -1` treated as an unknown size:
 
 1. Read the stored token and the current settings. An unpaired extension allows the download.
 2. Classify the target by filename extension first and MIME type second.
@@ -166,13 +166,13 @@ The extension evaluates a browser download when `chrome.downloads.onDeterminingF
 4. Send one takeover capture with a token-bound source identifier.
 5. On success with a task identifier, cancel and then erase the browser download. On a duplicate, do not cancel again.
 6. On 401, clear the token and report that pairing is no longer valid. On 409, report that OneGet or the extension must be updated. On any other failure, leave the browser download intact and show a localized, actionable error with the popup prefill path.
-7. Call `suggest()` after the decision so a non-taken-over download proceeds normally.
+7. Chromium calls `suggest()` after the decision so a non-taken-over download proceeds normally. Firefox has no `onDeterminingFilename` and needs no equivalent call, so a fast download can start or finish before cancellation; the capture-first sequence limits the loss but does not remove that race.
 
-The service-worker duplicate set is in memory; a service-worker restart does not create a second desktop task because the desktop deduplicates by the token-bound `sourceId`.
+The background duplicate set is in memory; a background restart does not create a second desktop task because the desktop deduplicates by the token-bound `sourceId`.
 
 ## Takeover failure surface
 
-The background worker keeps the most recent failed takeover in memory and returns it as `takeoverError` from `popup/get-state`:
+The background runtime keeps the most recent failed takeover and returns it as `takeoverError` from `popup/get-state`:
 
 ```json
 {
@@ -183,7 +183,7 @@ The background worker keeps the most recent failed takeover in memory and return
 }
 ```
 
-`reason` is one of `capture_failed` (a request failure or a response without a task identifier), `token_revoked` (401, after which the stored token is cleared), or `update_required` (409). The popup renders a localized banner with the filename-specific explanation and a Send to OneGet retry action that resends the same URL as a prefill, so the user can complete the download through the desktop dialog. The browser download remains in place throughout. The failure record is never written to persistent or session storage, and it is cleared after a later successful takeover or a successful prefill retry of the same URL.
+`reason` is one of `capture_failed` (a request failure or a response without a task identifier), `token_revoked` (401, after which the stored token is cleared), or `update_required` (409). The popup renders a localized banner with the filename-specific explanation and a Send to OneGet retry action that resends the same URL as a prefill, so the user can complete the download through the desktop dialog. The browser download remains in place throughout. Chromium keeps the record in memory. Firefox stores the same bounded record in browser session storage so an event-page suspension does not lose the popup retry path; it is never written to persistent storage, and both packages clear it after a later successful takeover or a successful prefill retry of the same URL.
 
 ## Error codes
 
@@ -200,7 +200,7 @@ Errors use a JSON body `{ "code": "<stable code>", "message": "<safe prose>" }`.
 | 401 | `UNAUTHORIZED` | Missing, malformed, unknown, revoked, or origin-mismatched token. |
 | 401 | `INVALID_CODE` | Wrong, expired, reused, or superseded pairing code. |
 | 403 | `INVALID_HOST` | Missing or non-exact loopback `Host`. |
-| 403 | `INVALID_ORIGIN` | Missing or non-extension write origin, or a non-extension health origin. |
+| 403 | `INVALID_ORIGIN` | Missing or unsupported extension origin on a write route, or a non-extension health origin. |
 | 409 | `PROTOCOL_MISMATCH` | Unsupported protocol version. |
 | 413 | `PAYLOAD_TOO_LARGE` | Body above 64 KiB. |
 | 415 | `UNSUPPORTED_MEDIA_TYPE` | Write body without `application/json`. |
@@ -217,7 +217,7 @@ Per-item rejection codes are `INVALID_URL`, `CREDENTIALED_URL`, `UNSAFE_FILENAME
 
 ## Extension message flow
 
-The popup and content scripts exchange typed messages with the background service worker:
+The popup and content scripts exchange typed messages with the extension background:
 
 | Message | Direction | Purpose |
 | --- | --- | --- |
@@ -233,25 +233,26 @@ The popup and content scripts exchange typed messages with the background servic
 | `content/spa` | Content to worker | Reset the tab after a top-frame SPA route change, or only the sending frame after a subframe one. |
 | `content/clear-frame` | Content to worker | Clear one frame's resources. |
 
-The service worker also listens to `webRequest.onResponseStarted`, `downloads.onDeterminingFilename`, `webNavigation.onCommitted`, and `tabs.onRemoved`. It never reads a response body. The MAIN-world script wraps `fetch`, `XMLHttpRequest`, `history.pushState`, `history.replaceState`, `popstate`, and `hashchange`; it posts `{ source: "oneget-inject", kind, payload }` to the isolated content script, which forwards only HTTP(S) resource metadata.
+Both packages listen to `webRequest.onResponseStarted`, `webNavigation.onCommitted`, and `tabs.onRemoved`. Firefox also listens to `webNavigation.onHistoryStateUpdated` and applies the same navigation reset, so a same-document SPA route change that emits no `onCommitted` event still resets the navigated tab or frame. Chromium additionally listens to `downloads.onDeterminingFilename`; Firefox listens to `downloads.onCreated` and has no `onDeterminingFilename`. The background never reads a response body. The MAIN-world script wraps `fetch`, `XMLHttpRequest`, `history.pushState`, `history.replaceState`, `popstate`, and `hashchange`; it posts `{ source: "oneget-inject", kind, payload }` to the isolated content script, which forwards only HTTP(S) resource metadata.
 
 ## Permissions, CSP, and storage
 
-The MV3 manifest requires Chrome 114 or later and requests `webRequest`, `downloads`, `storage`, `tabs`, and `webNavigation`, plus host permissions for `http://*/*`, `https://*/*`, and the loopback API. It requests no cookies, no native messaging, no remote script source, and no telemetry. The extension-page CSP is `script-src 'self'; object-src 'self';`, so no remote code and no eval are permitted. The build copies the local OneGet icons into the package.
+The Chromium MV3 manifest requires Chrome 114 or later. The Firefox MV3 manifest uses `background.scripts` instead of a service worker, declares the Gecko ID `oneget@oneget.app`, requires Firefox 140 or later, and declares `data_collection_permissions.required: ["none"]`. Both request `webRequest`, `downloads`, `storage`, `tabs`, and `webNavigation`, plus host permissions for `http://*/*`, `https://*/*`, and the loopback API. Neither requests cookies, native messaging, a remote script source, or telemetry. The extension-page CSP is `script-src 'self'; object-src 'self';`, so no remote code and no eval are permitted. The build copies the local OneGet icons into each package.
 
-The pairing token and settings use `chrome.storage.local`. Resource metadata uses `chrome.storage.session` only and is bounded to 5,000 serialized entries. The background worker reloads the session snapshot after a service-worker restart and re-hydrates its per-tab store. Page content, response bodies, cookies, and authorization values are never stored. Displayed URLs remove username, password, query, and fragment; the popup never renders the token.
+The pairing token and settings use the browser's local storage area. Resource metadata uses the session storage area only and is bounded to 5,000 serialized entries. The background reloads the session snapshot after a service-worker or event-page restart and re-hydrates its per-tab store; Firefox also restores its bounded takeover-failure record from session storage. Page content, response bodies, cookies, and authorization values are never stored. Displayed URLs remove username, password, query, and fragment; the popup never renders the token.
 
 ## Manual verification expectations
 
-Automated checks use a local fixture page and a mock loopback API. A real acceptance record must still identify the operating system, app build, extension build, Chrome version, and Edge version, and must record:
+Automated checks use a local fixture page and a mock loopback API. A real acceptance record must still identify the operating system, app build, extension build, Chrome version, Edge version, and Firefox version, and must record:
 
-- loading the unpacked extension and opening the popup in both browsers;
+- loading the unpacked extension and opening the popup in Chrome, Edge, and Firefox;
 - pairing from the popup with a desktop-generated code and confirming one paired client;
 - sniffing responses, fetch, XHR, and media elements, with deduplication and correct tab and frame ownership;
 - listing an HLS manifest and a DASH manifest while filtering their transport and media segments;
 - sending one prefill and confirming the desktop dialog opens without creating a task until submit;
 - a takeover that creates exactly one desktop task and removes the browser download only after success;
 - an unpaired, revoked, or locked state that leaves the browser download untouched and reports actionable guidance;
+- a Firefox event-page suspension after a failed takeover that still shows the popup retry path;
 - Windows install and launch.
 
 Any item not performed must be marked pending. A mock-service or headless result must not be recorded as manual browser evidence, and a pending item must not be recorded as passed.
