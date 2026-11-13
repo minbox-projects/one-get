@@ -2,6 +2,7 @@
 
 #![deny(dead_code, unused_imports)]
 
+pub mod api;
 pub mod app_state;
 pub mod commands;
 pub mod config;
