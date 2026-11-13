@@ -1,12 +1,15 @@
 # OneGet Architecture
 
-This document describes the delivered OneGet desktop shell and its headless download engine and durable task store. It covers the current layers, module boundaries, trust boundaries, platform differences, data semantics, and verification baseline. The desktop download UI, extension, video, HuggingFace, updater, release, and telemetry capabilities are not part of this delivery.
+This document describes the delivered OneGet desktop downloader: its task-first React interface, Tauri command surface, long-lived engine service, headless download engine, durable task store, and platform layer. It covers the current layers, module boundaries, trust boundaries, platform differences, data semantics, and verification baseline. Browser extension, video, HuggingFace, updater, release, and telemetry capabilities are not part of this delivery.
 
 ## Goals and target platforms
 
-The delivered product provides a single-window desktop shell and a headless download engine that:
+The delivered product provides a single-window desktop downloader and a headless download engine that:
 
-- launches as one application instance and keeps a main window with a diagnostics surface;
+- launches as one application instance and opens task-first with stored downloads, filters, search, and a collapsible details panel;
+- adds one download or a batch, probes remote metadata, and accepts or rejects input before a task is created;
+- controls tasks individually or in bulk, shows per-segment progress, and opens or deletes results safely;
+- persists general and download settings, including language, and applies them without restart where documented;
 - accepts a narrow `oneget://` deep-link contract and reports accepted or rejected results to the UI;
 - integrates with a tray menu, login autostart, operating-system notifications, and the platform credential store;
 - confines file access to capability-scoped directories and sanitizes user-supplied filenames;
@@ -24,24 +27,28 @@ The delivered product provides a single-window desktop shell and a headless down
 | macOS | arm64 and x86_64 | macOS 13 or later |
 | Windows | x64 | Windows 10 22H2 or Windows 11 |
 
-The shell is the current desktop surface and the engine is a library and harness surface; no download UI is wired to it yet. `localdocs/` is local reference material excluded from the bundle; it is not shipped product documentation.
+The React UI is the desktop surface, and it reaches the engine only through the typed Tauri command surface and the long-lived engine service. `localdocs/` is local reference material excluded from the bundle; it is not shipped product documentation.
 
 ## Repository layout
 
 | Path | Responsibility |
 | --- | --- |
-| `src/` | React 19 and TypeScript 6 user interface, design-system primitives, diagnostics surface, typed command wrapper, and deep-link event subscription. |
-| `src-tauri/src/` | Rust crate: Tauri runtime wiring, command layer, platform layer, download engine, task store, manifest verifier, settings, logging, and typed errors. |
-| `src-tauri/src/engine/` | Probe, safe HTTP transport, planner, part file, worker pool, scheduler, retry, rate limiting, cookies, and state machines. |
-| `src-tauri/src/store/` | SQLite connection setup, schema migrations, task and segment records, and progress persistence. |
+| `src/` | React 19 and TypeScript 6 task-first user interface, downloads and settings features, i18n, design-system primitives, diagnostics, typed IPC wrappers, and deep-link event subscription. |
+| `src/features/downloads/` | Task list and virtualization, categories, sorting, filtering, search, polling, new and batch dialogs, probe handling, controls, details, deletion confirmations, and formatting. |
+| `src/features/settings/` | General and download settings, the read-only network placeholder, and live language, theme, close-behavior, and engine-limit application. |
+| `src/i18n/` | Simplified Chinese and English dictionaries, system-language resolution, and locale-aware formatting. |
+| `src-tauri/src/` | Rust crate: Tauri runtime wiring, command layer, long-lived engine service, platform layer, download engine, task store, manifest verifier, settings, logging, and typed errors. |
+| `src-tauri/src/commands/` | Thin Tauri command wrappers plus directly testable download, settings, diagnostics, and quit service functions. |
+| `src-tauri/src/engine/` | Probe, safe HTTP transport, planner, part file, worker pool, scheduler, engine service actor, retry, rate limiting, cookies, destinations, deletion, and state machines. |
+| `src-tauri/src/store/` | SQLite connection setup, schema version 1 and 2 migrations, per-task destinations, task and segment records, and progress persistence. |
 | `src-tauri/src/bin/engine_harness.rs` | Command-line harness to add, run, inspect, pause, resume, and cancel one task without printing secrets. |
-| `src-tauri/tests/` | Rust integration suites for paths, filenames, files, processes, secrets, logging, settings, manifests, the shell contract, the store, the engine, and the soak. |
+| `src-tauri/tests/` | Rust integration suites for download commands, paths, filenames, files, the opener, processes, secrets, logging, settings, manifests, the shell contract, the store, the engine, and the soak. |
 | `src-tauri/tests/support/` | Deterministic local range, proxy, cookie, fault, and fixture helpers on ephemeral ports. |
 | `scripts/soak-test.sh` | macOS wrapper for the ignored long-running HTTP-only soak with a caller-supplied duration. |
 | `src-tauri/capabilities/` | Minimal Tauri capability for the main window. |
 | `src-tauri/tauri.conf.json` | Product identity, window, CSP, deep-link scheme, and bundle configuration. |
 | `scripts/` | Dependency-pin check and macOS local signing helpers. |
-| `e2e/` | Playwright browser checks for the shell and design system. |
+| `e2e/` | Playwright browser checks for the shell, design system, downloads, settings, and keyboard flows, backed by deterministic mock IPC. |
 | `.github/workflows/ci.yml` | Frontend, Rust, build-matrix, and macOS signing dry-run jobs. |
 | `assets/` and `src-tauri/icons/` | Source and generated application icons. |
 | `extension/` | Extension placeholder; extension behavior is not implemented. |
@@ -51,15 +58,21 @@ The shell is the current desktop surface and the engine is a library and harness
 
 ### React UI
 
-`src/main.tsx` mounts `src/App.tsx`, which wraps `src/app/AppShell.tsx` in `src/app/ErrorBoundary.tsx`. The shell renders the product identity and diagnostics panel. `src/components/ui/` owns the Button, Input, and Radix Dialog primitives. `src/features/diagnostics/DiagnosticsPanel.tsx` exposes app information, settings, deep-link state, autostart, notifications, the diagnostic secret round-trip, and graceful quit.
+`src/main.tsx` mounts `src/App.tsx`, which wraps `src/app/AppShell.tsx` in `src/app/ErrorBoundary.tsx` and the i18n provider. The shell is task-first: a sidebar carries All, Downloading, Completed, Failed, and type categories with counts; a toolbar carries New, Batch, Pause All, Resume All, search, and Settings; the center is the task list; a collapsible details panel shows the selected task; and a status bar reports active tasks and total speed. The empty state explains how to add a download. `src/components/ui/` owns the Button, Input, Dialog, Select, ProgressBar, Badge, Checkbox, and Toast primitives. `src/features/diagnostics/DiagnosticsPanel.tsx` keeps the app-information, deep-link, autostart, notification, secret round-trip, and graceful-quit diagnostics.
 
-`src/lib/tauri.ts` is the only command entry point. It returns a typed result, detects an absent Tauri runtime, and reports `runtime_unavailable` instead of throwing. `src/lib/events.ts` subscribes to the `app://deep-link` event and becomes inert without a runtime. `src/types/app.ts` freezes the command arguments and result shapes.
+`src/features/downloads/` owns the download surface. `TaskList` renders a fixed-height `VirtualList` with overscan, so only a bounded window of rows is mounted even for 10,000 tasks. Categories derive from the sanitized final filename extension and are matched case-insensitively; sorting covers creation time, filename, size, progress, speed, and a fixed state order with creation time as the tiebreaker; filters and keyword search operate on the full data set. `useDownloads` polls `downloads_list` at most once per second while the document is visible, pauses polling while hidden, and refreshes after control actions. `NewDownloadDialog` and `BatchDownloadDialog` validate URLs, filenames, destinations, connections, rate limits, checksums, and safe headers, and render probe states including HTML allowance and ignored Range. `TaskRow`, `TaskDetails`, and the deletion confirmation components cover state-aware controls, redacted URLs, segments, open and copy actions, and both deletion paths.
+
+`src/features/settings/` owns the general and download settings plus a read-only network placeholder. Language and theme apply immediately, defaults apply to new downloads, and concurrency and the global rate limit apply to new tasks after saving while running downloads keep their captured limits. `src/i18n/` resolves the system language, switches between Simplified Chinese and English without restart, and formats numbers, sizes, speeds, ETA, and dates per locale.
+
+`src/lib/tauri.ts` is the only generic command entry point, and `src/lib/downloads.ts` wraps the download commands on top of it. A missing Tauri runtime returns `runtime_unavailable` instead of throwing. `src/lib/events.ts` subscribes to the `app://deep-link` event and becomes inert without a runtime. `src/types/app.ts` and `src/types/downloads.ts` freeze the command arguments and result shapes.
 
 ### Tauri runtime and command layer
 
-`src-tauri/src/main.rs` delegates to `oneget_lib::run`. `src-tauri/src/lib.rs` registers the single-instance, deep-link, autostart, and notification plugins in that order, builds the tray, registers schemes, wires the deep-link event, and initializes state. Closing the main window hides it rather than exiting.
+`src-tauri/src/main.rs` delegates to `oneget_lib::run`. `src-tauri/src/lib.rs` registers the single-instance, deep-link, autostart, and notification plugins in that order, builds the tray, registers schemes, wires the deep-link event, opens the task database, starts the engine service with recovery, and initializes state. Closing the main window follows the configured close behavior: hide to the tray or quit after a graceful engine shutdown.
 
-`src-tauri/src/app_state.rs` owns resolved paths, the settings store, the logger, service implementations, and the last deep-link result. `src-tauri/src/commands/mod.rs` contains the thin Tauri command wrappers and moves blocking work through `spawn_blocking`. `src-tauri/src/commands/app.rs` contains directly testable service functions and service traits.
+`src-tauri/src/app_state.rs` owns resolved paths, the settings store, the logger, service implementations, the engine service handle, and the last deep-link result. `src-tauri/src/commands/mod.rs` contains the thin Tauri command wrappers and moves blocking work through `spawn_blocking`. `src-tauri/src/commands/app.rs` and `downloads.rs` contain directly testable service functions, and `src-tauri/src/engine/service.rs` owns the long-lived engine actor.
+
+The service starts one dedicated thread with a current-thread Tokio runtime because the engine and SQLite connection are not shared across threads. Every caller request is a channel command, and the engine run loop is polled concurrently with those requests, so pause, resume, cancel, retry, probe, and deletion work while downloads progress. Startup recovery completes before the service is returned, and `shutdown` pauses active downloads, stops the request loop, and refuses later work.
 
 The command and event contract is:
 
@@ -67,7 +80,20 @@ The command and event contract is:
 | --- | --- | --- |
 | `app_info` | command | Product name, version, and current log path. |
 | `settings_get` | command | Current typed settings. |
-| `settings_save` | command | Persist and return the stored settings. |
+| `settings_status` | command | Read-only and corrupt-recovery state of the settings document. |
+| `settings_save` | command | Persist settings, apply live engine limits, and return the stored value. |
+| `downloads_list` | command | Lightweight summaries of every stored task. |
+| `downloads_segments` | command | Segment rows for one task's details panel. |
+| `downloads_probe` | command | Remote metadata for a URL before task creation. |
+| `downloads_add` | command | Create one queued task and return its identifier. |
+| `downloads_pause` | command | Pause an eligible task. |
+| `downloads_resume` | command | Re-probe and resume an eligible task. |
+| `downloads_cancel` | command | Cancel a task and remove only its own part. |
+| `downloads_retry` | command | Requeue a failed task while preserving its part. |
+| `downloads_delete_record` | command | Delete a terminal record, removing only its own part. |
+| `downloads_delete_file` | command | Delete a completed final file and its record. |
+| `downloads_open_file` | command | Open a completed file with the platform handler. |
+| `downloads_open_folder` | command | Open a task's recorded destination folder. |
 | `deep_link_last` | command | Most recently handled deep-link result. |
 | `diagnostics_secret_roundtrip` | command | Store, read, and delete a generated diagnostic value; returns a boolean. |
 | `diagnostics_notification_status` | command | Current notification permission. |
@@ -77,7 +103,7 @@ The command and event contract is:
 | `app_graceful_quit` | command | Write a shutdown record and exit with code 0. |
 | `app://deep-link` | event | `{ accepted, url?, error? }` for accepted or rejected links. |
 
-Rust payloads serialize camelCase. Errors use a typed `{ code, message }` shape.
+Rust payloads serialize camelCase. Errors use a typed `{ code, message }` shape. The UI uses bounded polling rather than a progress event stream: `downloads_list` runs at most once per second while the window is visible, stops while it is hidden, and refreshes immediately after a control action or a completed mutation. A missing engine reports `engine_unavailable`, and a missing Tauri runtime reports `runtime_unavailable`.
 
 ### Platform layer
 
@@ -88,6 +114,7 @@ Rust payloads serialize camelCase. Errors use a typed `{ code, message }` shape.
 - `CapDir`, the canonical capability root for asynchronous create, read-write open, absolute-offset write, sparse preallocation, read, metadata, file and parent-directory sync, and atomic replace;
 - `ChildGuard`, which owns a Unix process group or Windows Job Object and supports whole-tree termination and timeouts;
 - the keyring-backed secret store and the in-memory fake;
+- the shell-free opener that launches a file or folder through `open`, `explorer.exe`, or `xdg-open` without shell interpretation;
 - deep-link parsing and runtime scheme registration;
 - the tray, autostart, and notification plugin adapters.
 
@@ -99,11 +126,15 @@ Shared modules call these interfaces and do not branch on the target operating s
 
 `Engine::add_task` sanitizes the caller-supplied filename with the platform naming rules for the current target before it reaches the store or the in-memory spec, and part-file existence and removal go through the validated `CapDir::exists` and `CapDir::remove_file` operations.
 
-The engine exposes a library API rather than Tauri commands: `Engine::new`, `add_task`, `run`, `pause`, `resume`, `cancel`, `retry`, `recover`, `set_max_concurrent`, `set_proxy`, `set_cookie_file`, `set_task_rate_limit`, `set_global_rate_limit`, and `set_logger`. `src-tauri/src/bin/engine_harness.rs` is the command-line surface for manual checks; it supports `run`, `status`, `pause`, `resume`, and `cancel`, and prints no URL, cookie, proxy credential, or header value.
+The engine exposes a library API: `Engine::new`, `add_task`, `run`, `pause`, `resume`, `cancel`, `retry`, `recover`, `delete_record`, `delete_file`, `open_file`, `open_folder`, `set_max_concurrent`, `set_proxy`, `set_cookie_file`, `set_task_rate_limit`, `set_global_rate_limit`, and `set_logger`. The desktop application reaches it through `EngineService` in `src-tauri/src/engine/service.rs`, which exposes `start`, `list`, `segments`, `probe`, `add`, `pause`, `resume`, `cancel`, `retry`, `delete_record`, `delete_file`, `open_file`, `open_folder`, `apply_settings`, and `shutdown`. `src-tauri/src/bin/engine_harness.rs` remains the command-line surface for manual checks; it supports `run`, `status`, `pause`, `resume`, and `cancel`, and prints no URL, cookie, proxy credential, or header value.
+
+Each task's destination is resolved and validated when the task is created, persisted with the task, and reused for its part and final file after a restart. A stored task without a destination falls back to the engine's configured default directory, which is the settings default directory or the platform downloads directory. A missing, non-directory, unreadable, or unwritable destination produces a typed error instead of creating a task.
+
+Deletion has two distinct paths. Deleting a record is allowed only for completed, failed, or cancelled tasks; it removes the task's own part when present and keeps any completed final file. Deleting a file is allowed only for a completed task; a second confirmation in the UI precedes it, and the engine validates the final file through the capability root before removing that file and then the record. A missing final file returns `FILE_MISSING` and keeps the record. Opening a file also requires a completed task and an existing final file, and opening a folder uses the recorded destination; both go through the shell-free platform opener.
 
 ### Durable task store
 
-`src-tauri/src/store/` owns SQLite. `Database::open` configures WAL, `synchronous=NORMAL`, foreign keys, and a five-second busy timeout; on Unix it restricts the database and its `-wal` and `-shm` sidecars to mode `0600`. `migrations.rs` creates schema version 1, backs up an existing non-empty database before a migration, applies the migration in one transaction, verifies the required indexes and constraints, and refuses a newer schema with a typed error. `tasks.rs` and `segments.rs` own task and segment persistence; `types.rs` exposes the public records.
+`src-tauri/src/store/` owns SQLite. `Database::open` configures WAL, `synchronous=NORMAL`, foreign keys, and a five-second busy timeout; on Unix it restricts the database and its `-wal` and `-shm` sidecars to mode `0600`. `migrations.rs` creates schema version 1 and migrates it to version 2 by adding the per-task destination and completion timestamp, backs up an existing non-empty database before a migration, applies each migration in one transaction, verifies the required indexes and constraints, and refuses a newer schema with a typed error. Existing version-1 rows keep a null destination and fall back to the configured default on recovery. `tasks.rs` and `segments.rs` own task and segment persistence; `types.rs` exposes the public records.
 
 ### Kernel manifest verifier
 
@@ -111,24 +142,24 @@ The engine exposes a library API rather than Tauri commands: `Engine::new`, `add
 
 ### Configuration, logging, and errors
 
-`src-tauri/src/config.rs` owns schema version 1 settings: theme and log level with system defaults. Loading preserves unknown top-level fields, creates defaults when absent, backs up corrupt documents to a `.corrupt` sibling, and treats a document from a newer schema as read-only. Saves use a same-directory temporary file, sync, and rename.
+`src-tauri/src/config.rs` owns schema version 2 settings: theme, log level, language, close behavior, optional default directory, default connections, maximum concurrent tasks, and an optional global rate limit, with system-oriented defaults. Loading migrates a version-1 document in memory while preserving theme, log level, and unknown top-level fields, creates defaults when absent, backs up corrupt documents to a `.corrupt` sibling, and treats a document from a newer schema as read-only. Saves use a same-directory temporary file, sync, and rename.
 
 `src-tauri/src/logging/` owns JSON-line logging, redaction, and size rotation. `src-tauri/src/error.rs` owns the typed application error. Details are in the baseline section below.
 
 ### Tests and quality tooling
 
-Frontend behavior tests live beside components and in `src/features/`. Browser checks live in `e2e/`. Rust integration suites live in `src-tauri/tests/`. `scripts/check-direct-dependency-pins.mjs` rejects floating direct npm versions. `scripts/soak-test.sh` runs the ignored long soak for a caller-supplied duration. The macOS signing helpers are local verification tools, not release signing.
+Frontend behavior tests live beside components and in `src/features/`, including the i18n audit and virtualization tests. Browser checks live in `e2e/` and use deterministic mock IPC from `e2e/support/mock-ipc.ts`, which stubs the registered list, probe, control, deletion, open, and settings commands and their typed results. The mock layer exercises new download, pause and resume, cancel, record and file deletion, settings persistence, language switching, keyboard flows, and 10,000-row scrolling without a public network or real credential. Rust integration suites live in `src-tauri/tests/`, including `downloads_commands`, `config`, `store`, and `platform_opener` alongside the retained engine suites. `scripts/check-direct-dependency-pins.mjs` rejects floating direct npm versions. `scripts/soak-test.sh` runs the ignored long soak for a caller-supplied duration. The macOS signing helpers are local verification tools, not release signing.
 
 ## Download engine and task store
 
-### SQLite schema version 1
+### SQLite schema version 2
 
-The store opens with WAL journaling, `synchronous=NORMAL`, foreign-key enforcement, and a five-second busy timeout. A non-empty database is backed up beside itself before a migration. The migration runs in one transaction, records the version in `schema_meta`, verifies the required indexes and constraints, and refuses a schema newer than version 1 with a typed error. On Unix the database and its `-wal` and `-shm` sidecars are restricted to mode `0600`.
+The store opens with WAL journaling, `synchronous=NORMAL`, foreign-key enforcement, and a five-second busy timeout. A non-empty database is backed up beside itself before a migration. Version 1 creates `tasks`, `segments`, and `schema_meta`; version 2 adds `destination` and `completed_at_ms` to `tasks` and records the new version. Each migration runs in one transaction, verifies the required indexes and constraints, and refuses a schema newer than version 2 with a typed error. On Unix the database and its `-wal` and `-shm` sidecars are restricted to mode `0600`.
 
 | Table | Columns and constraints |
 | --- | --- |
 | `schema_meta` | `key` primary key and `value`; stores `schema_version`. |
-| `tasks` | `id` primary key, `url`, `filename`, nullable `part_path`, checked `state`, non-negative `downloaded_bytes`, nullable non-negative `total_bytes`, `expected_sha256`, `actual_sha256`, `etag`, `last_modified`, `error_code`, `error_message`, epoch-millisecond `created_at_ms` and `updated_at_ms`, positive `connections`, and `headers_json`. |
+| `tasks` | `id` primary key, `url`, `filename`, nullable `destination`, nullable `part_path`, checked `state`, non-negative `downloaded_bytes`, nullable non-negative `total_bytes`, `expected_sha256`, `actual_sha256`, `etag`, `last_modified`, `error_code`, `error_message`, epoch-millisecond `created_at_ms`, `updated_at_ms`, and nullable `completed_at_ms`, positive `connections`, and `headers_json`. |
 | `segments` | Composite primary key `(task_id, segment_index)`, `start_offset` and `end_offset` with `end_offset > start_offset`, non-negative `downloaded_bytes` bounded by the range length, checked `state`, and a cascading foreign key to `tasks`. |
 
 Indexes cover `(state, created_at_ms)` for queue claims and `task_id` for segment lookup. Offsets use signed 64-bit columns whose non-negative range preserves every `u64` file position. The stored URL is a minimized form: userinfo, query, and fragment are removed before persistence, and the full URL stays in memory only. `headers_json` stores safe header names with empty values, never header values.
@@ -171,7 +202,7 @@ When an idle worker exists, the scheduler may split the active segment with the 
 
 ### Finalization, hashing, and recovery
 
-Finalization stops workers, syncs the part file, streams SHA-256 over the bytes, and persists the computed hash before the rename. A supplied expected hash is compared case-insensitively. A unique final name is chosen when the destination exists; the capability-scoped replace refuses symbolic-link sources and destinations and never overwrites an existing file. The parent directory is synced after the rename, and only then does the task become `completed`. A checksum mismatch fails with `CHECKSUM_MISMATCH`, preserves the part, and creates no final file. A cancellation from another engine instance during finalization stays authoritative: the part is removed and no final file is left, and a completion that loses the state race removes the file it just renamed.
+Finalization stops workers, syncs the part file, streams SHA-256 over the bytes, and persists the computed hash before the rename. A supplied expected hash is compared case-insensitively. A unique final name is chosen when the destination exists; the capability-scoped replace refuses symbolic-link sources and destinations and never overwrites an existing file. The parent directory is synced after the rename, and only then does the task become `completed`. A checksum mismatch fails with `CHECKSUM_MISMATCH`, preserves the part, and creates no final file. A cancellation from another engine instance during finalization stays authoritative: the part is removed and no final file is left, and a completion that loses the state race removes the file it just renamed. A completed task records its completion time, which the details panel displays.
 
 Recovery is idempotent. Interrupted `connecting` or `downloading` tasks requeue when their part exists and fail with `PART_MISSING` otherwise. A `finalizing` task with only the final file is accepted when its stored hash matches, or, without a stored hash, when its size equals the recorded total and a configured expected hash matches; the recomputed hash is stored. A final-only mismatch fails with `CHECKSUM_MISMATCH` and preserves the final file. A part-only task re-finalizes. A cancelled task has only its own leftover part removed. Repeated finalization of a completed task returns the existing path without network access.
 
@@ -200,6 +231,10 @@ Every network test uses a local ephemeral-port fixture. The range server covers 
 ### WebView and content security policy
 
 The WebView loads bundled assets only. The production CSP allows scripts, styles, fonts, images, and media from the application origin and permits IPC connections only through `ipc:` and `http://ipc.localhost`. The development CSP additionally allows the local Vite server. There is no remote script source, no remote connect source, no analytics dependency, and no telemetry endpoint.
+
+### UI and IPC
+
+The React UI is untrusted presentation. It reaches the backend only through typed wrappers over the registered commands, sends no filesystem path it has not validated through the same rules, and displays only redacted stored URLs and user-safe error messages. The engine revalidates URLs, filenames, destinations, headers, and state transitions at the command or engine boundary, so a compromised or faulty renderer cannot bypass capability checks, deletion preconditions, or secret redaction. The UI polls a bounded summary instead of receiving an event stream, which keeps the renderer from accumulating unbounded state.
 
 ### Deep links
 
@@ -238,6 +273,7 @@ Settings are not a secret store. Logs pass every event and field string through 
 | Notifications | Operating-system notification center; prompt behavior can depend on signature stability | Windows notification path requires the installed NSIS build, not the raw release binary |
 | Sparse preallocation | `set_len` extends the part file and reports sparse | `FSCTL_SET_SPARSE` is attempted first; an unavailable sparse mode is reported as an explicit fallback |
 | Atomic replace | Capability-scoped rename refuses link sources and destinations | The same capability-scoped replace path is used; no direct overwrite |
+| Open file or folder | `open` without a shell | `explorer.exe` without a shell |
 | Bundle format | `.app` | NSIS installer |
 
 The non-macOS, non-Windows path code is a development fallback using XDG locations; it is not a shipped target.
@@ -248,16 +284,16 @@ The non-macOS, non-Windows path code is a development fallback using XDG locatio
 - The default rotation is 10 MiB per file and five files including the current one. Records are never split across files. Debug builds also mirror the redacted line to stderr.
 - The log level is part of settings and filters records above the configured verbosity.
 - `AppError` serializes as `{ code, message }`, with stable codes such as `settings_read_only` and `settings_serialize`.
-- Settings start at `schemaVersion: 1` with `theme` (`system`, `light`, `dark`) and `logLevel` (`error`, `warn`, `info`, `debug`, `trace`).
-- Unknown settings fields survive a save. A future schema is never overwritten. A corrupt document is backed up before defaults are restored.
-- The download engine adds one persistent product database at schema version 1. It is not a settings store and holds only task recovery fields: minimized URLs, filenames, task and segment state, byte progress, remote metadata, hashes, error codes, connection counts, and safe header names with empty values.
+- Settings use `schemaVersion: 2` with `theme` (`system`, `light`, `dark`), `logLevel` (`error`, `warn`, `info`, `debug`, `trace`), `language` (`system`, `zh-CN`, `en-US`), `closeBehavior` (`tray`, `quit`), optional `defaultDirectory`, `defaultConnections` (8), `maxConcurrentTasks` (3), and optional `globalRateLimit` in bytes per second.
+- A version-1 document migrates in memory without losing theme, log level, or unknown fields. Unknown settings fields survive a save. A future schema is never overwritten. A corrupt document is backed up before defaults are restored.
+- The download engine adds one persistent product database at schema version 2. It is not a settings store and holds only task recovery fields: minimized URLs, filenames, per-task destinations, task and segment state, byte progress, remote metadata, hashes, error codes, connection counts, timestamps, and safe header names with empty values.
 - Engine log events carry lifecycle names, task and segment identifiers, byte counts, and stable error codes. They never carry URLs with queries, cookie values, proxy credentials, authorization values, or custom header values.
 
 ## Test and CI baseline
 
-Local macOS arm64 evidence covers `npm ci`, the exact-pin check, typecheck, lint, 20 Vitest tests, the production build, and 8 Playwright checks across light and dark projects. Rust evidence covers `cargo check --locked`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and the locked test suites: store 10, probe 12, download 9, segments 6, queue 13, recovery 8, network 23, redaction 2, large-file 4, platform filenames 2, platform files 7, and the short soak smoke 1. The Tauri application bundle builds locally.
+Local macOS arm64 evidence covers the exact-pin check (26 entries), typecheck, lint, 29 Vitest files with 225 tests, the production build, and 30 Playwright tests across the chromium-light and chromium-dark projects against deterministic mock IPC. Rust evidence covers `cargo fmt -- --check`, `cargo check --locked`, `cargo clippy --all-targets -- -D warnings`, and 167 locked tests with 1 ignored long soak: config 10, downloads_commands 8, engine_download 10, engine_large 4, engine_network 23, engine_probe 12, engine_queue 17, engine_recovery 9, engine_redaction 2, engine_segments 6, logging_redaction 2, manifest 13, platform_filename 2, platform_files 7, platform_opener 2, platform_paths 3, platform_process 4, platform_secrets 6, shell_contract 13, short soak smoke 1, and store 13. The Tauri application bundle builds locally.
 
-The CI workflow defines a frontend job, Rust quality gates on `macos-15` and `windows-2025`, a build matrix for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`, and a macOS signing dry-run job that creates, imports, signs, verifies, and cleans up an ephemeral identity and fails closed on missing inputs. The hosted workflow has one successful run on the implementation branch: all seven jobs passed and it uploaded the three build artifacts. That run is the shell baseline; no Windows run of the engine suites is claimed. Manual platform acceptance, Windows install checks, and the macOS x86_64 Intel launch remain pending.
+The CI workflow defines a frontend job, Rust quality gates on `macos-15` and `windows-2025`, a build matrix for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`, and a macOS signing dry-run job that creates, imports, signs, verifies, and cleans up an ephemeral identity and fails closed on missing inputs. The hosted workflow's earlier shell-baseline run passed all seven jobs and uploaded the three build artifacts; this revision claims no new hosted run. Manual platform acceptance, the real-application local HTTP download, Windows install checks, and the macOS x86_64 Intel launch remain pending.
 
 ## Security invariants
 
@@ -275,6 +311,9 @@ The CI workflow defines a frontend job, Rust quality gates on `macos-15` and `wi
 12. The engine rejects non-HTTP schemes, credentialed targets, HTTPS-to-HTTP redirects, URLs over 8 KiB, forbidden headers, and CRLF-bearing header values before a request.
 13. A ranged request that receives a full `200` after data exists fails with `RANGE_IGNORED` and never writes the body at a nonzero offset.
 14. The engine makes no analytics, telemetry, remote reporting, system-proxy discovery, SOCKS5, browser-cookie-extraction, or HuggingFace request.
+15. Record deletion is limited to terminal tasks and never removes a completed final file; file deletion is limited to completed tasks and removes only the capability-validated final file plus its record.
+16. The platform opener launches a file or folder without a shell, and a file open verifies the recorded final file first.
+17. The UI renders redacted stored and final URLs, never displays credential or header values, and treats a missing runtime or rejected command as a localized non-crashing state.
 
 ## Open risks
 
@@ -287,8 +326,10 @@ The CI workflow defines a frontend job, Rust quality gates on `macos-15` and `wi
 - macOS deep links depend on LaunchServices registration from a built application.
 - Keychain and notification permission prompts can vary on unsigned local builds.
 - The 24-hour soak has not run; only the short smoke and a 2-second ignored-path check have been exercised.
-- Windows x64 sparse preallocation and offsets above 4 GiB remain a recorded pending compatibility result, as do the full Rust engine gates and the short soak smoke. The macOS large-file result does not prove the Windows behavior.
+- Windows x64 sparse preallocation and offsets above 4 GiB remain a recorded pending compatibility result; the macOS large-file result does not prove the Windows behavior.
 - The retained large-file evidence preserves the intermediate failing revision and the post-fix green transcript for the corrected suite; the accepted macOS arm64 transcript passes the large-file and platform-file suites, and the corrected suite remains the accepted large-file result.
 - The manual platform acceptance matrix remains pending. No P0 failure was observed in the local arm64 or hosted CI evidence, but exit is incomplete until the manual matrix and the 24-hour soak are recorded or explicitly waived.
+- The desktop download interface has automated component, Rust, and mock-IPC browser evidence only; a manual real-application local HTTP download, macOS and Windows visual acceptance, and a design review remain pending.
+- The context indexer discovers only TypeScript modules, so the Rust `engine`, `store`, `commands`, and `engine-harness` navigation entries are hand-maintained; a rebuild without reapplication drops them.
 - The engine keeps full URLs and header values in memory only, so a process restart cannot replay a query-bearing URL or a custom header value; callers must re-supply them for a new session.
 - Dynamic splitting, SQLite write contention, and crash recovery are exercised by short local tests and the soak harness, but long-run behavior under sustained load is not yet measured.

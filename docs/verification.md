@@ -227,3 +227,104 @@ Pending. Only the short smoke and the 2-second ignored-path check ran. The ignor
 ### Exit statement
 
 The engine and store implementation, automated suites, harness, and soak harness are complete. Phase 1 exit is blocked. It requires a completed Phase 0 manual acceptance matrix or a dated explicit user waiver, plus a recorded 24-hour soak, before any exit claim. No P0 failure was observed in the macOS arm64 automated evidence, but this is not a phase-exit approval.
+
+## Phase 2: desktop download UI
+
+Date: 2026-11-13
+
+This section records the delivered task-first desktop download interface, its Tauri command surface and engine service, per-task destinations, deletion and open actions, settings schema 2, bilingual interface, virtualization, and mock-IPC browser layer. The automated evidence below is accepted for the final delivery head. Implementation completion and automated green results are not Phase 2 exit.
+
+### Environment
+
+| Component | Value |
+| --- | --- |
+| Host | macOS 27.3, arm64 |
+| Node.js | 24.18.0 |
+| npm | 11.16.0 |
+| rustc | 1.99.1 |
+| cargo | 1.99.1 |
+
+### Automated commands and results
+
+Frontend commands ran from the repository root; Rust commands ran in `src-tauri/`.
+
+| Command | Result |
+| --- | --- |
+| `npm run check:pins` | Passed: 26 direct npm entries are exact versions. |
+| `npm run typecheck` | Passed: strict TypeScript project build. |
+| `npm run lint` | Passed: ESLint with React hooks and refresh rules. |
+| `npm run test` | Passed: 29 Vitest files, 225 tests. |
+| `npm run build` | Passed: production Vite build. |
+| `npm run test:e2e` | Passed: 30 Playwright tests across the chromium-light and chromium-dark projects. |
+| `cargo fmt -- --check` | Passed: exit 0. |
+| `cargo check --locked` | Passed: exit 0. |
+| `cargo clippy --all-targets -- -D warnings` | Passed: exit 0. |
+| `cargo test --locked` | Passed: 167 tests, 1 ignored long soak. |
+
+The Rust suites report: config 10, downloads_commands 8, engine_download 10, engine_large 4, engine_network 23, engine_probe 12, engine_queue 17, engine_recovery 9, engine_redaction 2, engine_segments 6, logging_redaction 2, manifest 13, platform_filename 2, platform_files 7, platform_opener 2, platform_paths 3, platform_process 4, platform_secrets 6, shell_contract 13, the short soak smoke 1, and store 13.
+
+Automated layers:
+
+- Vitest covers components, typed IPC wrappers, validation, i18n, polling, and 10,000-row virtualization.
+- Rust integration tests cover the download commands, settings schema 2, store migration and destinations, record and file deletion, the platform opener, the shell contract, and the retained engine suites.
+- Playwright runs against deterministic mock IPC in `e2e/support/mock-ipc.ts`; it covers new download, controls, deletion, settings, language switching, and 10,000-row scrolling without any public-network dependency.
+- The hosted CI workflow was not run again for this revision. The earlier shell-baseline run remains the only hosted evidence.
+
+### Acceptance criteria
+
+| Criterion | Status | Evidence |
+| --- | --- | --- |
+| AC-001 | Passed (automated) | Component tests render the sidebar, toolbar, list, details, status bar, and empty state. |
+| AC-002 | Passed (automated) | Component tests cover sidebar filtering and matching counts. |
+| AC-003 | Passed (automated) | Task-row component tests cover known and unknown metadata rendering. |
+| AC-004 | Passed (automated) | Virtualization component tests mount a bounded row set and reach row 10,000. |
+| AC-005 | Passed (automated) | Filter and sort tests cover creation-time default, fixed state order, and clearing filters. |
+| AC-006 | Passed (automated) | New-download component tests and the Playwright add flow create and list a task. |
+| AC-007 | Passed (automated) | Validation tests reject every listed URL, filename, connection, rate, checksum, and header boundary. |
+| AC-008 | Passed (automated) | Probe tests cover success, unknown length, ignored Range, HTML allowance, and failure. |
+| AC-009 | Passed (automated) | Destination validation accepts writable directories and rejects invalid ones. |
+| AC-010 | Passed (automated) | Batch tests report line errors, skip in-batch duplicates, and add valid URLs. |
+| AC-011 | Passed (automated) | Batch tests apply shared destination, connections, rate, and headers to every accepted task. |
+| AC-012 | Passed (automated) | Control tests cover state-aware enablement and typed errors for every task state. |
+| AC-013 | Passed (automated) | Control and Rust deletion tests prove part-only cancel, retry preservation, and the active-task precondition. |
+| AC-014 | Passed (automated) | Bulk-action tests update eligible tasks and observe the polled state within one interval. |
+| AC-015 | Passed (automated) | Record-deletion tests keep the completed final file and remove only the record and part. |
+| AC-016 | Passed (automated) | File-deletion tests require confirmation and keep the record on a missing-file or permission failure. |
+| AC-017 | Passed (automated) | Details tests cover redacted URLs, directory, sizes, speed, ETA, connections, timestamps, errors, and segments. |
+| AC-018 | Passed (automated) | Open and copy tests cover the platform opener, missing targets, and redacted stored URLs. |
+| AC-019 | Passed (automated) | Settings tests cover save, reopen persistence, the read-only network placeholder, and unknown-field preservation. |
+| AC-020 | Passed (automated) | Config tests cover version 1 migration, corrupt backup recovery, and future-schema read-only behavior. |
+| AC-021 | Passed (automated) | Settings tests cover immediate language and theme changes and documented captured-at-start limits. |
+| AC-022 | Passed (automated) | Service and command tests cover startup recovery, task listing, live engine limits, and graceful shutdown. |
+| AC-023 | Passed (automated) | Store and engine tests prove persisted destinations survive restart and invalid destinations fail with typed errors. |
+| AC-024 | Passed (automated) | Polling tests prove a one-second visible bound, hidden-window pause, and bounded list refresh. |
+| AC-025 | Passed (automated) | Wrapper and fallback tests cover a missing runtime and rejected IPC without exposing internals. |
+| AC-026 | Passed (automated) | The i18n audit covers both dictionaries, system detection, immediate switching, and locale formatting. |
+| AC-027 | Passed (automated) | Component and Playwright keyboard tests cover shortcuts, focus trap and restore, and accessible names. |
+| AC-028 | Passed (automated) | State tests cover loading, empty, filtered-empty, retryable error, confirmations, and success feedback. |
+| AC-029 | Passed | This section lists the automated layers, manual status, pending gates, and blocked exit. |
+| AC-030 | Partial | Vitest, Rust, and mock-IPC Playwright layers passed; the manual real-app local HTTP download is pending. |
+
+Component and mock-IPC results prove the interface behavior under deterministic mocks. They do not replace a manual real-application download against a local HTTP server.
+
+### Pending gates and manual acceptance
+
+| Gate | Status | Detail |
+| --- | --- | --- |
+| Phase 0 manual acceptance matrix | Pending | All 13 baseline items remain pending; no dated waiver exists. |
+| Phase 1 24-hour soak | Pending | Only the short smoke and the 2-second ignored-path check ran; neither is 24-hour evidence. |
+| Phase 1 Windows x64 compatibility | Pending | No Windows run of the engine, store, migration, or opener suites is claimed. |
+| Manual real-app local HTTP download | Pending | Not performed at this revision. |
+| Manual macOS acceptance | Pending | Launch, add, controls, details, open, delete, settings, language, and visual checks remain pending. |
+| Manual Windows acceptance | Pending | Install, launch, download, opener, deletion, settings, and platform checks remain pending. |
+| Design review | Not performed | No design review has been recorded for this revision. |
+
+The Phase 0 matrix and the Phase 1 soak and Windows gates block Phase 2 exit unless the user records a dated explicit waiver. The manual real-application download and the design review are also outstanding. No pending item above is recorded as passed.
+
+### Documentation and navigation evidence
+
+The implemented architecture note triplet is paired and validated, and the active shell-baseline and engine notes remain active and linked. The context index was rebuilt and validated. The context indexer discovers only TypeScript modules, so the Rust `engine`, `store`, `commands`, and `engine-harness` entries are maintained by hand; a rebuild without reapplication drops them, and `navigation.md` is regenerated from the JSON authority.
+
+### Exit statement
+
+Phase 2 exit is blocked. It requires the Phase 0 manual matrix and the Phase 1 24-hour soak and Windows compatibility records, or a dated explicit user waiver, plus a recorded manual real-application local HTTP download and a design review. The automated evidence is green, but it is not a phase-exit approval.

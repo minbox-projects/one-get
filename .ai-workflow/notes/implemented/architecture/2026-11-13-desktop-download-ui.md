@@ -1,0 +1,42 @@
+# Agent Note: Desktop download interface and engine service
+
+Status: implemented
+
+English | [中文](2026-11-13-desktop-download-ui.zh.md)
+
+## Problem
+
+OneGet had a verified desktop shell, a headless download engine, and a durable task store, but no usable download surface. A daily user could not add a URL, watch progress, pause or resume a task, inspect segments, open a result, delete a record or file, or change download settings without external tooling. The missing decisions were how to structure a task-first interface over the engine, how the renderer should observe progress without an event storm, where a per-task destination and deletion semantics belong, how settings and stored tasks migrate without data loss, and how bilingual text, keyboard access, and a very large task list should work. This note extends the [OneGet desktop shell baseline](2026-11-11-oneget-desktop-shell-baseline.md) and the [Download engine and durable task store](2026-11-12-download-engine-task-store.md); those records remain active for the process, platform, and headless engine decisions they own.
+
+## Decision
+
+The main window is task-first. A sidebar carries All, Downloading, Completed, Failed, and type categories with counts; a toolbar carries New, Batch, Pause All, Resume All, search, and Settings; the center is the task list; a collapsible details panel shows the selected task; and a status bar reports active tasks and total speed. Categories derive from the sanitized final filename extension and are matched case-insensitively. Sorting, filtering, and keyword search operate on the full data set rather than the rendered window. The React code is split into `src/features/downloads/` for the download surface, `src/features/settings/` for settings, and `src/i18n/` for dictionaries, with typed wrappers in `src/lib/downloads.ts`; components do not call Tauri directly.
+
+The list uses a fixed-height virtual list with overscan, so a 10,000-task set mounts only a bounded window of rows while the first, middle, and last rows remain reachable. The default sort is creation time descending, and the state sort uses the fixed order downloading, connecting, finalizing, paused, queued, failed, completed, cancelled with creation time as the tiebreaker. Every user-visible string comes from the Simplified Chinese or English dictionary, follows the operating-system language by default, switches immediately, and uses locale-aware number, size, speed, ETA, and date formatting. Dialogs trap and restore focus, destructive actions are confirmed, and icon-only actions carry accessible names.
+
+The renderer observes progress through bounded polling. `downloads_list` returns lightweight summaries and runs at most once per second while the window is visible, stops while it is hidden, and refreshes after a control action or mutation. The backend owns the engine and store on one dedicated thread with a current-thread Tokio runtime; requests arrive through a channel, the run loop is polled concurrently, recovery runs before the service starts, and shutdown pauses active downloads and refuses later work. This keeps task controls responsive without a per-task event stream or unbounded renderer state.
+
+Each task stores its resolved destination. Creation validates the directory and persists it with the task, and the part file, final file, recovery, resume, open-folder action, and deletion all reuse that destination. A stored task without a destination falls back to the configured default directory, and a missing, non-directory, unreadable, or unwritable destination fails with a typed error instead of creating or resuming a file elsewhere. The task store uses schema version 2, adding the destination and completion timestamp to the existing task row while the version-1 migration keeps existing rows usable.
+
+Settings use schema version 2 with theme, log level, language, close behavior, optional default directory, default connections, maximum concurrent tasks, and an optional global rate limit. A version-1 document migrates in memory while preserving theme, log level, and unknown top-level fields; corrupt input is backed up to a `.corrupt` sibling, and a future schema stays read-only. Language and theme apply immediately, defaults apply to new downloads, and concurrency and the global rate limit keep the engine's captured-at-task-start semantics, which the interface states explicitly.
+
+Deletion and opening have separate safety rules. Deleting a record is allowed only for a completed, failed, or cancelled task; it removes the task's own part when present and keeps any completed final file. Deleting a file is allowed only for a completed task, requires a second confirmation, validates the final file through the capability root, and then removes that file and the record; a missing final file returns `FILE_MISSING` and keeps the record. Opening a file requires a completed task and an existing final file, and opening a folder uses the recorded destination; both go through the shell-free platform opener.
+
+The browser layer runs against deterministic mock IPC in `e2e/support/mock-ipc.ts`, not a public network. It covers new download, pause and resume, cancel, record and file deletion, settings persistence, language switching, and 10,000-row scrolling. Rust integration tests cover the command surface, settings migration, store migration and destinations, deletion, and the opener alongside the retained engine suites. This record supersedes the earlier shell-only surface and schema-version statements in those notes while retaining their process, platform, engine, and store invariants.
+
+## Alternatives considered
+
+- A per-task progress event stream was declined because high task counts and rapid updates would create an event storm and unbounded renderer state; bounded polling of a lightweight summary keeps the contract and the UI responsive.
+- Keeping the destination only in settings was declined because two tasks can legitimately target different folders, and a resume after restart must not silently move a part file to the current default.
+- Deleting a file by a stored path string without capability validation was declined because a stale, edited, or link-bearing path could escape the destination root or remove an unrelated file.
+- Persisting only a schema version bump without an in-memory version-1 migration was declined because an existing document would otherwise lose theme, log level, or unknown fields.
+- A second task store or an in-memory task cache was declined because recovery, cross-instance control, and progress already depend on one durable store; the interface reuses it through the service.
+- Building the interface without a dictionary layer was declined because bilingual text, system-language detection, immediate switching, and an audit would otherwise be retrofitted component by component.
+
+## Consequences
+
+Later UI work must use the feature boundaries, typed wrappers, dictionaries, virtual list, and polling contract recorded here. Later engine work must keep per-task destinations, the terminal-only record deletion, the completed-only file deletion, and the shell-free opener intact. Settings and task-store schema changes must keep the version-1 migration and unknown-field preservation behavior.
+
+- The migration and deletion rules still require the retained engine, store, settings, command, and opener suites to stay green.
+- Manual macOS and Windows acceptance, a real-application local download, the long soak, and a design review remain required external evidence; automated and mock-IPC results do not replace them.
+- The context indexer discovers only TypeScript modules, so the Rust engine, store, commands, and harness navigation entries stay hand-maintained.

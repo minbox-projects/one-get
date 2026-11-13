@@ -45,7 +45,7 @@
       "id": "engine",
       "path": "src-tauri/src/engine",
       "owner_role": "shared",
-      "responsibility": "Headless download engine: probe, transport, planner, part file, workers, scheduler, retry, rate limiting, cookies, and state machines",
+      "responsibility": "Headless download engine: probe, transport, planner, part file, workers, scheduler, service actor, retry, rate limiting, cookies, destinations, deletion, and state machines",
       "language": "rust",
       "entry_kinds": [
         "file"
@@ -55,7 +55,17 @@
       "id": "store",
       "path": "src-tauri/src/store",
       "owner_role": "shared",
-      "responsibility": "Durable SQLite task store: connection setup, schema migration, task and segment records, and progress persistence",
+      "responsibility": "Durable SQLite task store: connection setup, schema 1 and 2 migrations, per-task destinations, task and segment records, and progress persistence",
+      "language": "rust",
+      "entry_kinds": [
+        "file"
+      ]
+    },
+    {
+      "id": "commands",
+      "path": "src-tauri/src/commands",
+      "owner_role": "shared",
+      "responsibility": "Tauri command surface: typed download, settings, diagnostics, and quit commands plus directly testable service functions",
       "language": "rust",
       "entry_kinds": [
         "file"
@@ -79,13 +89,31 @@
       "aliases": [],
       "module_root": "e2e",
       "entries": [
+        "e2e/support/mock-ipc.ts"
+      ],
+      "symbols": [
+        {
+          "file": "e2e/support/mock-ipc.ts",
+          "name": "MockIpcOptions",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "e2e/support/mock-ipc.ts",
+          "name": "installMockIpc",
+          "kind": "function",
+          "visibility": "public"
+        }
+      ],
+      "related_files": [],
+      "tests": [
         "e2e/app-shell.spec.ts",
         "e2e/design-system.spec.ts",
+        "e2e/downloads.spec.ts",
+        "e2e/keyboard.spec.ts",
+        "e2e/settings.spec.ts",
         "e2e/smoke.spec.ts"
       ],
-      "symbols": [],
-      "related_files": [],
-      "tests": [],
       "depends_on": [],
       "relations": [],
       "owner_role": "shared",
@@ -93,7 +121,11 @@
       "read_scope": [
         "e2e/app-shell.spec.ts",
         "e2e/design-system.spec.ts",
-        "e2e/smoke.spec.ts"
+        "e2e/downloads.spec.ts",
+        "e2e/keyboard.spec.ts",
+        "e2e/settings.spec.ts",
+        "e2e/smoke.spec.ts",
+        "e2e/support/mock-ipc.ts"
       ],
       "shared_entry": false
     },
@@ -152,16 +184,45 @@
         "src/App.tsx",
         "src/app/AppShell.tsx",
         "src/app/ErrorBoundary.tsx",
+        "src/components/ui/Badge.tsx",
         "src/components/ui/Button.tsx",
+        "src/components/ui/Checkbox.tsx",
         "src/components/ui/Dialog.tsx",
         "src/components/ui/Input.tsx",
+        "src/components/ui/ProgressBar.tsx",
+        "src/components/ui/Select.tsx",
+        "src/components/ui/Toast.tsx",
         "src/components/ui/index.ts",
         "src/features/diagnostics/DiagnosticsPanel.tsx",
+        "src/features/downloads/BatchDownloadDialog.tsx",
+        "src/features/downloads/DeleteConfirmDialog.tsx",
+        "src/features/downloads/DownloadsView.tsx",
+        "src/features/downloads/NewDownloadDialog.tsx",
+        "src/features/downloads/TaskDetails.tsx",
+        "src/features/downloads/TaskList.tsx",
+        "src/features/downloads/TaskRow.tsx",
+        "src/features/downloads/VirtualList.tsx",
+        "src/features/downloads/categories.ts",
+        "src/features/downloads/controls.ts",
+        "src/features/downloads/downloadValidation.ts",
+        "src/features/downloads/filters.ts",
+        "src/features/downloads/format.ts",
+        "src/features/downloads/useDownloads.ts",
+        "src/features/downloads/useProbe.ts",
+        "src/features/settings/DownloadSettings.tsx",
+        "src/features/settings/GeneralSettings.tsx",
+        "src/features/settings/NetworkPlaceholder.tsx",
+        "src/features/settings/SettingsDialog.tsx",
+        "src/features/settings/useSettings.ts",
+        "src/i18n/index.tsx",
         "src/lib/cn.ts",
+        "src/lib/downloads.ts",
         "src/lib/events.ts",
+        "src/lib/format.ts",
         "src/lib/tauri.ts",
         "src/test/mocks/tauri.ts",
-        "src/types/app.ts"
+        "src/types/app.ts",
+        "src/types/downloads.ts"
       ],
       "symbols": [
         {
@@ -183,6 +244,24 @@
           "visibility": "public"
         },
         {
+          "file": "src/components/ui/Badge.tsx",
+          "name": "Badge",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Badge.tsx",
+          "name": "BadgeProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Badge.tsx",
+          "name": "BadgeTone",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
           "file": "src/components/ui/Button.tsx",
           "name": "Button",
           "kind": "variable",
@@ -198,6 +277,18 @@
           "file": "src/components/ui/Button.tsx",
           "name": "ButtonVariant",
           "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Checkbox.tsx",
+          "name": "Checkbox",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Checkbox.tsx",
+          "name": "CheckboxProps",
+          "kind": "interface",
           "visibility": "public"
         },
         {
@@ -225,6 +316,72 @@
           "visibility": "public"
         },
         {
+          "file": "src/components/ui/ProgressBar.tsx",
+          "name": "ProgressBar",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/ProgressBar.tsx",
+          "name": "ProgressBarProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Select.tsx",
+          "name": "Select",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Select.tsx",
+          "name": "SelectOption",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Select.tsx",
+          "name": "SelectProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Toast.tsx",
+          "name": "Toast",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Toast.tsx",
+          "name": "ToastProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/Toast.tsx",
+          "name": "ToastTone",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "Badge",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "BadgeProps",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "BadgeTone",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
           "file": "src/components/ui/index.ts",
           "name": "Button",
           "kind": "variable",
@@ -239,6 +396,18 @@
         {
           "file": "src/components/ui/index.ts",
           "name": "ButtonVariant",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "Checkbox",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "CheckboxProps",
           "kind": "type",
           "visibility": "public"
         },
@@ -267,8 +436,512 @@
           "visibility": "public"
         },
         {
+          "file": "src/components/ui/index.ts",
+          "name": "ProgressBar",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "ProgressBarProps",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "Select",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "SelectOption",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "SelectProps",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "Toast",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "ToastProps",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/components/ui/index.ts",
+          "name": "ToastTone",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
           "file": "src/features/diagnostics/DiagnosticsPanel.tsx",
           "name": "DiagnosticsPanel",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/BatchDownloadDialog.tsx",
+          "name": "BatchDownloadDialog",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/BatchDownloadDialog.tsx",
+          "name": "BatchDownloadDialogProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/BatchDownloadDialog.tsx",
+          "name": "BatchDuplicate",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/BatchDownloadDialog.tsx",
+          "name": "BatchEntry",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/BatchDownloadDialog.tsx",
+          "name": "BatchInvalid",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/BatchDownloadDialog.tsx",
+          "name": "BatchParseResult",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/BatchDownloadDialog.tsx",
+          "name": "parseBatchUrls",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/DeleteConfirmDialog.tsx",
+          "name": "DeleteConfirmDialog",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/DeleteConfirmDialog.tsx",
+          "name": "DeleteConfirmDialogProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/DeleteConfirmDialog.tsx",
+          "name": "DeleteMode",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/DownloadsView.tsx",
+          "name": "DownloadsView",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/DownloadsView.tsx",
+          "name": "DownloadsViewProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/NewDownloadDialog.tsx",
+          "name": "DownloadDefaults",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/NewDownloadDialog.tsx",
+          "name": "HeaderEditor",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/NewDownloadDialog.tsx",
+          "name": "HeaderEditorProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/NewDownloadDialog.tsx",
+          "name": "NewDownloadDialog",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/NewDownloadDialog.tsx",
+          "name": "NewDownloadDialogProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/TaskDetails.tsx",
+          "name": "TaskDetails",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/TaskDetails.tsx",
+          "name": "TaskDetailsProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/TaskList.tsx",
+          "name": "TaskList",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/TaskList.tsx",
+          "name": "TaskListProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/TaskRow.tsx",
+          "name": "TaskRow",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/TaskRow.tsx",
+          "name": "TaskRowProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/VirtualList.tsx",
+          "name": "VirtualList",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/VirtualList.tsx",
+          "name": "VirtualListProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/categories.ts",
+          "name": "categoryForFilename",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/controls.ts",
+          "name": "TaskActionAvailability",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/controls.ts",
+          "name": "taskActions",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/downloadValidation.ts",
+          "name": "DownloadFormErrors",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/downloadValidation.ts",
+          "name": "NewDownloadFormValues",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/downloadValidation.ts",
+          "name": "ValidationCode",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/downloadValidation.ts",
+          "name": "validateConnections",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/downloadValidation.ts",
+          "name": "validateDownloadForm",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/downloadValidation.ts",
+          "name": "validateFilename",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/downloadValidation.ts",
+          "name": "validateHeaders",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/downloadValidation.ts",
+          "name": "validateRateLimit",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/downloadValidation.ts",
+          "name": "validateSha256",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/downloadValidation.ts",
+          "name": "validateUrl",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/filters.ts",
+          "name": "STATE_SORT_ORDER",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/filters.ts",
+          "name": "SidebarView",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/filters.ts",
+          "name": "SortDirection",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/filters.ts",
+          "name": "SortKey",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/filters.ts",
+          "name": "filterTasks",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/filters.ts",
+          "name": "sidebarCounts",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/filters.ts",
+          "name": "sortTasks",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/format.ts",
+          "name": "domainFromUrl",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/format.ts",
+          "name": "progressPercent",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/useDownloads.ts",
+          "name": "UseDownloadsOptions",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/useDownloads.ts",
+          "name": "useDownloads",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/useProbe.ts",
+          "name": "ProbeState",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/useProbe.ts",
+          "name": "UseProbeResult",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/useProbe.ts",
+          "name": "useProbe",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/DownloadSettings.tsx",
+          "name": "DownloadSettings",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/DownloadSettings.tsx",
+          "name": "DownloadSettingsErrorKey",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/DownloadSettings.tsx",
+          "name": "DownloadSettingsErrors",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/DownloadSettings.tsx",
+          "name": "DownloadSettingsProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/DownloadSettings.tsx",
+          "name": "DownloadSettingsValue",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/GeneralSettings.tsx",
+          "name": "GeneralSettings",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/GeneralSettings.tsx",
+          "name": "GeneralSettingsProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/GeneralSettings.tsx",
+          "name": "GeneralSettingsValue",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/NetworkPlaceholder.tsx",
+          "name": "NetworkPlaceholder",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/SettingsDialog.tsx",
+          "name": "SettingsDialog",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/SettingsDialog.tsx",
+          "name": "SettingsDialogProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/useSettings.ts",
+          "name": "UseSettingsResult",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/useSettings.ts",
+          "name": "useSettings",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/i18n/index.tsx",
+          "name": "Dictionary",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/i18n/index.tsx",
+          "name": "I18nContextValue",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/i18n/index.tsx",
+          "name": "I18nProvider",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/i18n/index.tsx",
+          "name": "I18nProviderProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/i18n/index.tsx",
+          "name": "Language",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/i18n/index.tsx",
+          "name": "LanguageSetting",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/i18n/index.tsx",
+          "name": "MessageParams",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/i18n/index.tsx",
+          "name": "dictionaries",
+          "kind": "variable",
+          "visibility": "public"
+        },
+        {
+          "file": "src/i18n/index.tsx",
+          "name": "resolveLanguage",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/i18n/index.tsx",
+          "name": "translate",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/i18n/index.tsx",
+          "name": "useI18n",
           "kind": "function",
           "visibility": "public"
         },
@@ -281,6 +954,84 @@
         {
           "file": "src/lib/cn.ts",
           "name": "cn",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/downloads.ts",
+          "name": "addDownload",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/downloads.ts",
+          "name": "cancelDownload",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/downloads.ts",
+          "name": "deleteDownloadFile",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/downloads.ts",
+          "name": "deleteDownloadRecord",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/downloads.ts",
+          "name": "getDownloadSegments",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/downloads.ts",
+          "name": "listDownloads",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/downloads.ts",
+          "name": "openDownloadFile",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/downloads.ts",
+          "name": "openDownloadFolder",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/downloads.ts",
+          "name": "pauseDownload",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/downloads.ts",
+          "name": "probeDownload",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/downloads.ts",
+          "name": "redactStoredUrl",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/downloads.ts",
+          "name": "resumeDownload",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/downloads.ts",
+          "name": "retryDownload",
           "kind": "function",
           "visibility": "public"
         },
@@ -299,6 +1050,42 @@
         {
           "file": "src/lib/events.ts",
           "name": "subscribeToDeepLink",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/format.ts",
+          "name": "Locale",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/format.ts",
+          "name": "formatBytes",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/format.ts",
+          "name": "formatDate",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/format.ts",
+          "name": "formatEta",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/format.ts",
+          "name": "formatNumber",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/format.ts",
+          "name": "formatSpeed",
           "kind": "function",
           "visibility": "public"
         },
@@ -323,6 +1110,12 @@
         {
           "file": "src/lib/tauri.ts",
           "name": "Settings",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/tauri.ts",
+          "name": "SettingsStatus",
           "kind": "type",
           "visibility": "public"
         },
@@ -406,6 +1199,12 @@
         },
         {
           "file": "src/types/app.ts",
+          "name": "CloseBehavior",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
           "name": "CommandArgs",
           "kind": "interface",
           "visibility": "public"
@@ -472,22 +1271,108 @@
         },
         {
           "file": "src/types/app.ts",
+          "name": "SettingsStatus",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
           "name": "Theme",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/downloads.ts",
+          "name": "AddDownloadRequest",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/downloads.ts",
+          "name": "DownloadCategory",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/downloads.ts",
+          "name": "DownloadSegment",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/downloads.ts",
+          "name": "DownloadState",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/downloads.ts",
+          "name": "DownloadSummary",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/downloads.ts",
+          "name": "HeaderPair",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/downloads.ts",
+          "name": "ProbeDownloadRequest",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/downloads.ts",
+          "name": "ProbeResult",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/downloads.ts",
+          "name": "SegmentState",
           "kind": "type",
           "visibility": "public"
         }
       ],
       "related_files": [
+        "src/i18n/en-US.ts",
+        "src/i18n/zh-CN.ts",
         "src/main.tsx",
         "src/test/setup.ts",
         "src/vite-env.d.ts"
       ],
       "tests": [
         "src/App.test.tsx",
+        "src/app/AppShell.keyboard.test.tsx",
+        "src/app/AppShell.test.tsx",
+        "src/components/ui/badge.test.tsx",
         "src/components/ui/button.test.tsx",
+        "src/components/ui/checkbox.test.tsx",
         "src/components/ui/dialog.test.tsx",
         "src/components/ui/input.test.tsx",
-        "src/features/diagnostics/DiagnosticsPanel.test.tsx"
+        "src/components/ui/progress-bar.test.tsx",
+        "src/components/ui/select.test.tsx",
+        "src/components/ui/toast.test.tsx",
+        "src/features/diagnostics/DiagnosticsPanel.test.tsx",
+        "src/features/downloads/BatchDownloadDialog.test.tsx",
+        "src/features/downloads/DeleteConfirmDialog.test.tsx",
+        "src/features/downloads/NewDownloadDialog.test.tsx",
+        "src/features/downloads/TaskDetails.test.tsx",
+        "src/features/downloads/TaskRow.test.tsx",
+        "src/features/downloads/VirtualList.test.tsx",
+        "src/features/downloads/categories.test.ts",
+        "src/features/downloads/controls.test.ts",
+        "src/features/downloads/downloadValidation.test.ts",
+        "src/features/downloads/filters.test.ts",
+        "src/features/downloads/format.test.ts",
+        "src/features/downloads/useDownloads.actions.test.ts",
+        "src/features/downloads/useDownloads.test.ts",
+        "src/features/downloads/useProbe.test.ts",
+        "src/features/settings/SettingsDialog.test.tsx",
+        "src/features/settings/useSettings.test.ts",
+        "src/i18n/index.test.tsx"
       ],
       "depends_on": [],
       "relations": [
@@ -503,13 +1388,13 @@
         },
         {
           "kind": "imports",
-          "from": "src/app/AppShell.tsx#AppShell",
-          "to": "src/components/ui/Button.tsx#Button"
+          "from": "src/App.tsx#App",
+          "to": "src/i18n/index.tsx#I18nProvider"
         },
         {
           "kind": "imports",
           "from": "src/app/AppShell.tsx#AppShell",
-          "to": "src/components/ui/Dialog.tsx#Dialog"
+          "to": "src/components/ui/Button.tsx#Button"
         },
         {
           "kind": "imports",
@@ -519,7 +1404,102 @@
         {
           "kind": "imports",
           "from": "src/app/AppShell.tsx#AppShell",
-          "to": "src/features/diagnostics/DiagnosticsPanel.tsx#DiagnosticsPanel"
+          "to": "src/components/ui/Select.tsx#Select"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/DeleteConfirmDialog.tsx#DeleteConfirmDialog"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/DeleteConfirmDialog.tsx#DeleteMode"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/DownloadsView.tsx#DownloadsView"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/TaskDetails.tsx#TaskDetails"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/controls.ts#taskActions"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/filters.ts#SidebarView"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/filters.ts#SortDirection"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/filters.ts#SortKey"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/filters.ts#filterTasks"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/filters.ts#sidebarCounts"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/downloads/useDownloads.ts#useDownloads"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/features/settings/SettingsDialog.tsx#SettingsDialog"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/lib/downloads.ts#getDownloadSegments"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/lib/downloads.ts#openDownloadFile"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/lib/downloads.ts#openDownloadFolder"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/lib/downloads.ts#redactStoredUrl"
         },
         {
           "kind": "imports",
@@ -529,11 +1509,46 @@
         {
           "kind": "imports",
           "from": "src/app/AppShell.tsx#AppShell",
-          "to": "src/types/app.ts#AppInfo"
+          "to": "src/types/app.ts#AppError"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/types/app.ts#Settings"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/types/downloads.ts#DownloadSegment"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/ErrorBoundary.tsx#ErrorBoundary",
+          "to": "src/i18n/index.tsx#resolveLanguage"
+        },
+        {
+          "kind": "imports",
+          "from": "src/app/ErrorBoundary.tsx#ErrorBoundary",
+          "to": "src/i18n/index.tsx#translate"
+        },
+        {
+          "kind": "imports",
+          "from": "src/components/ui/Badge.tsx#Badge",
+          "to": "src/lib/cn.ts#cn"
         },
         {
           "kind": "imports",
           "from": "src/components/ui/Button.tsx#Button",
+          "to": "src/lib/cn.ts#cn"
+        },
+        {
+          "kind": "imports",
+          "from": "src/components/ui/Checkbox.tsx#Checkbox",
           "to": "src/lib/cn.ts#cn"
         },
         {
@@ -544,6 +1559,21 @@
         {
           "kind": "imports",
           "from": "src/components/ui/Input.tsx#Input",
+          "to": "src/lib/cn.ts#cn"
+        },
+        {
+          "kind": "imports",
+          "from": "src/components/ui/ProgressBar.tsx#ProgressBar",
+          "to": "src/lib/cn.ts#cn"
+        },
+        {
+          "kind": "imports",
+          "from": "src/components/ui/Select.tsx#Select",
+          "to": "src/lib/cn.ts#cn"
+        },
+        {
+          "kind": "imports",
+          "from": "src/components/ui/Toast.tsx#Toast",
           "to": "src/lib/cn.ts#cn"
         },
         {
@@ -623,6 +1653,796 @@
         },
         {
           "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/components/ui/Dialog.tsx#Dialog"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/components/ui/Input.tsx#Input"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/features/downloads/NewDownloadDialog.tsx#HeaderEditor"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/features/downloads/downloadValidation.ts#DownloadFormErrors"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/features/downloads/downloadValidation.ts#ValidationCode"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/features/downloads/downloadValidation.ts#validateConnections"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/features/downloads/downloadValidation.ts#validateHeaders"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/features/downloads/downloadValidation.ts#validateRateLimit"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/lib/downloads.ts#addDownload"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/types/downloads.ts#HeaderPair"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialogProps",
+          "to": "src/features/downloads/NewDownloadDialog.tsx#DownloadDefaults"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchInvalid",
+          "to": "src/features/downloads/downloadValidation.ts#ValidationCode"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#parseBatchUrls",
+          "to": "src/features/downloads/downloadValidation.ts#validateUrl"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DeleteConfirmDialog.tsx#DeleteConfirmDialog",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DeleteConfirmDialog.tsx#DeleteConfirmDialog",
+          "to": "src/components/ui/Checkbox.tsx#Checkbox"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DeleteConfirmDialog.tsx#DeleteConfirmDialog",
+          "to": "src/components/ui/Dialog.tsx#Dialog"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DeleteConfirmDialog.tsx#DeleteConfirmDialog",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DeleteConfirmDialog.tsx#DeleteConfirmDialogProps",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DownloadsView.tsx#DownloadsView",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DownloadsView.tsx#DownloadsView",
+          "to": "src/features/downloads/TaskList.tsx#TaskList"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DownloadsView.tsx#DownloadsView",
+          "to": "src/features/downloads/filters.ts#filterTasks"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DownloadsView.tsx#DownloadsView",
+          "to": "src/features/downloads/filters.ts#sortTasks"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DownloadsView.tsx#DownloadsView",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DownloadsView.tsx#DownloadsViewProps",
+          "to": "src/features/downloads/filters.ts#SidebarView"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DownloadsView.tsx#DownloadsViewProps",
+          "to": "src/features/downloads/filters.ts#SortDirection"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DownloadsView.tsx#DownloadsViewProps",
+          "to": "src/features/downloads/filters.ts#SortKey"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DownloadsView.tsx#DownloadsViewProps",
+          "to": "src/types/app.ts#AppError"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/DownloadsView.tsx#DownloadsViewProps",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#HeaderEditor",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#HeaderEditor",
+          "to": "src/components/ui/Input.tsx#Input"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#HeaderEditor",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#HeaderEditor",
+          "to": "src/types/downloads.ts#HeaderPair"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#HeaderEditorProps",
+          "to": "src/types/downloads.ts#HeaderPair"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/components/ui/Checkbox.tsx#Checkbox"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/components/ui/Dialog.tsx#Dialog"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/components/ui/Input.tsx#Input"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/features/downloads/downloadValidation.ts#DownloadFormErrors"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/features/downloads/downloadValidation.ts#validateDownloadForm"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/features/downloads/downloadValidation.ts#validateUrl"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/features/downloads/useProbe.ts#useProbe"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/lib/downloads.ts#addDownload"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/types/downloads.ts#HeaderPair"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskDetails.tsx#TaskDetails",
+          "to": "src/components/ui/Badge.tsx#Badge"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskDetails.tsx#TaskDetails",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskDetails.tsx#TaskDetails",
+          "to": "src/components/ui/ProgressBar.tsx#ProgressBar"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskDetails.tsx#TaskDetails",
+          "to": "src/features/downloads/controls.ts#taskActions"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskDetails.tsx#TaskDetails",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskDetails.tsx#TaskDetails",
+          "to": "src/lib/downloads.ts#redactStoredUrl"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskDetails.tsx#TaskDetailsProps",
+          "to": "src/types/app.ts#AppError"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskDetails.tsx#TaskDetailsProps",
+          "to": "src/types/downloads.ts#DownloadSegment"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskDetails.tsx#TaskDetailsProps",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskList.tsx#TaskList",
+          "to": "src/features/downloads/TaskRow.tsx#TaskRow"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskList.tsx#TaskList",
+          "to": "src/features/downloads/VirtualList.tsx#VirtualList"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskList.tsx#TaskListProps",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskRow.tsx#TaskRow",
+          "to": "src/components/ui/Badge.tsx#Badge"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskRow.tsx#TaskRow",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskRow.tsx#TaskRow",
+          "to": "src/components/ui/ProgressBar.tsx#ProgressBar"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskRow.tsx#TaskRow",
+          "to": "src/features/downloads/categories.ts#categoryForFilename"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskRow.tsx#TaskRow",
+          "to": "src/features/downloads/controls.ts#taskActions"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskRow.tsx#TaskRow",
+          "to": "src/features/downloads/format.ts#domainFromUrl"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskRow.tsx#TaskRow",
+          "to": "src/features/downloads/format.ts#progressPercent"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskRow.tsx#TaskRow",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskRow.tsx#TaskRowProps",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/categories.ts#categoryForFilename",
+          "to": "src/types/downloads.ts#DownloadCategory"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/controls.ts#taskActions",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/downloadValidation.ts#NewDownloadFormValues",
+          "to": "src/types/downloads.ts#HeaderPair"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/downloadValidation.ts#validateHeaders",
+          "to": "src/types/downloads.ts#HeaderPair"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/filters.ts#STATE_SORT_ORDER",
+          "to": "src/types/downloads.ts#DownloadState"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/filters.ts#SidebarView",
+          "to": "src/types/downloads.ts#DownloadCategory"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/filters.ts#filterTasks",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/filters.ts#sidebarCounts",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/filters.ts#sortTasks",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/format.ts#progressPercent",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/features/downloads/controls.ts#taskActions"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/features/downloads/filters.ts#SidebarView"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/features/downloads/filters.ts#SortDirection"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/features/downloads/filters.ts#SortKey"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/lib/downloads.ts#cancelDownload"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/lib/downloads.ts#deleteDownloadFile"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/lib/downloads.ts#deleteDownloadRecord"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/lib/downloads.ts#listDownloads"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/lib/downloads.ts#pauseDownload"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/lib/downloads.ts#resumeDownload"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/lib/downloads.ts#retryDownload"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/types/app.ts#AppError"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useDownloads.ts#useDownloads",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useProbe.ts#ProbeState",
+          "to": "src/types/app.ts#AppError"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useProbe.ts#ProbeState",
+          "to": "src/types/downloads.ts#ProbeResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useProbe.ts#UseProbeResult",
+          "to": "src/types/downloads.ts#HeaderPair"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useProbe.ts#useProbe",
+          "to": "src/lib/downloads.ts#probeDownload"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useProbe.ts#useProbe",
+          "to": "src/types/downloads.ts#HeaderPair"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/DownloadSettings.tsx#DownloadSettings",
+          "to": "src/components/ui/Input.tsx#Input"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/DownloadSettings.tsx#DownloadSettings",
+          "to": "src/i18n/index.tsx#translate"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/DownloadSettings.tsx#DownloadSettings",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/GeneralSettings.tsx#GeneralSettings",
+          "to": "src/components/ui/Input.tsx#Input"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/GeneralSettings.tsx#GeneralSettings",
+          "to": "src/components/ui/Select.tsx#Select"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/GeneralSettings.tsx#GeneralSettings",
+          "to": "src/i18n/index.tsx#LanguageSetting"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/GeneralSettings.tsx#GeneralSettings",
+          "to": "src/i18n/index.tsx#translate"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/GeneralSettings.tsx#GeneralSettings",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/GeneralSettings.tsx#GeneralSettings",
+          "to": "src/types/app.ts#CloseBehavior"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/GeneralSettings.tsx#GeneralSettings",
+          "to": "src/types/app.ts#LogLevel"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/GeneralSettings.tsx#GeneralSettings",
+          "to": "src/types/app.ts#Theme"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/GeneralSettings.tsx#GeneralSettingsValue",
+          "to": "src/i18n/index.tsx#LanguageSetting"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/GeneralSettings.tsx#GeneralSettingsValue",
+          "to": "src/types/app.ts#CloseBehavior"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/GeneralSettings.tsx#GeneralSettingsValue",
+          "to": "src/types/app.ts#LogLevel"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/GeneralSettings.tsx#GeneralSettingsValue",
+          "to": "src/types/app.ts#Theme"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/NetworkPlaceholder.tsx#NetworkPlaceholder",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/SettingsDialog.tsx#SettingsDialog",
+          "to": "src/components/ui/Dialog.tsx#Dialog"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/SettingsDialog.tsx#SettingsDialog",
+          "to": "src/features/settings/useSettings.ts#useSettings"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/SettingsDialog.tsx#SettingsDialog",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/SettingsDialog.tsx#SettingsDialogProps",
+          "to": "src/types/app.ts#Settings"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/useSettings.ts#UseSettingsResult",
+          "to": "src/types/app.ts#AppError"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/useSettings.ts#UseSettingsResult",
+          "to": "src/types/app.ts#Settings"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/useSettings.ts#UseSettingsResult",
+          "to": "src/types/app.ts#SettingsStatus"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/useSettings.ts#useSettings",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/useSettings.ts#useSettings",
+          "to": "src/types/app.ts#AppError"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/useSettings.ts#useSettings",
+          "to": "src/types/app.ts#Settings"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/useSettings.ts#useSettings",
+          "to": "src/types/app.ts#SettingsStatus"
+        },
+        {
+          "kind": "imports",
+          "from": "src/i18n/index.tsx#I18nProvider",
+          "to": "src/lib/format.ts#Locale"
+        },
+        {
+          "kind": "imports",
+          "from": "src/i18n/index.tsx#I18nProvider",
+          "to": "src/lib/format.ts#formatBytes"
+        },
+        {
+          "kind": "imports",
+          "from": "src/i18n/index.tsx#I18nProvider",
+          "to": "src/lib/format.ts#formatDate"
+        },
+        {
+          "kind": "imports",
+          "from": "src/i18n/index.tsx#I18nProvider",
+          "to": "src/lib/format.ts#formatEta"
+        },
+        {
+          "kind": "imports",
+          "from": "src/i18n/index.tsx#I18nProvider",
+          "to": "src/lib/format.ts#formatNumber"
+        },
+        {
+          "kind": "imports",
+          "from": "src/i18n/index.tsx#I18nProvider",
+          "to": "src/lib/format.ts#formatSpeed"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#addDownload",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#addDownload",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#addDownload",
+          "to": "src/types/downloads.ts#AddDownloadRequest"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#cancelDownload",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#cancelDownload",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#deleteDownloadFile",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#deleteDownloadFile",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#deleteDownloadRecord",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#deleteDownloadRecord",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#getDownloadSegments",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#getDownloadSegments",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#getDownloadSegments",
+          "to": "src/types/downloads.ts#DownloadSegment"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#listDownloads",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#listDownloads",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#listDownloads",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#openDownloadFile",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#openDownloadFile",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#openDownloadFolder",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#openDownloadFolder",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#pauseDownload",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#pauseDownload",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#probeDownload",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#probeDownload",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#probeDownload",
+          "to": "src/types/downloads.ts#ProbeDownloadRequest"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#probeDownload",
+          "to": "src/types/downloads.ts#ProbeResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#resumeDownload",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#resumeDownload",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#retryDownload",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/downloads.ts#retryDownload",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
           "from": "src/lib/events.ts#subscribeToDeepLink",
           "to": "src/lib/tauri.ts#isTauriRuntime"
         },
@@ -635,6 +2455,36 @@
           "kind": "imports",
           "from": "src/lib/tauri.ts#invokeCommand",
           "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/types/app.ts#CommandArgs",
+          "to": "src/types/downloads.ts#AddDownloadRequest"
+        },
+        {
+          "kind": "imports",
+          "from": "src/types/app.ts#CommandArgs",
+          "to": "src/types/downloads.ts#ProbeDownloadRequest"
+        },
+        {
+          "kind": "imports",
+          "from": "src/types/app.ts#CommandResults",
+          "to": "src/types/downloads.ts#DownloadSegment"
+        },
+        {
+          "kind": "imports",
+          "from": "src/types/app.ts#CommandResults",
+          "to": "src/types/downloads.ts#DownloadSummary"
+        },
+        {
+          "kind": "imports",
+          "from": "src/types/app.ts#CommandResults",
+          "to": "src/types/downloads.ts#ProbeResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/types/app.ts#Settings",
+          "to": "src/i18n/index.tsx#LanguageSetting"
         }
       ],
       "owner_role": "shared",
@@ -642,24 +2492,79 @@
       "read_scope": [
         "src/App.test.tsx",
         "src/App.tsx",
+        "src/app/AppShell.keyboard.test.tsx",
+        "src/app/AppShell.test.tsx",
         "src/app/AppShell.tsx",
         "src/app/ErrorBoundary.tsx",
+        "src/components/ui/Badge.tsx",
         "src/components/ui/Button.tsx",
+        "src/components/ui/Checkbox.tsx",
         "src/components/ui/Dialog.tsx",
         "src/components/ui/Input.tsx",
+        "src/components/ui/ProgressBar.tsx",
+        "src/components/ui/Select.tsx",
+        "src/components/ui/Toast.tsx",
+        "src/components/ui/badge.test.tsx",
         "src/components/ui/button.test.tsx",
+        "src/components/ui/checkbox.test.tsx",
         "src/components/ui/dialog.test.tsx",
         "src/components/ui/index.ts",
         "src/components/ui/input.test.tsx",
+        "src/components/ui/progress-bar.test.tsx",
+        "src/components/ui/select.test.tsx",
+        "src/components/ui/toast.test.tsx",
         "src/features/diagnostics/DiagnosticsPanel.test.tsx",
         "src/features/diagnostics/DiagnosticsPanel.tsx",
+        "src/features/downloads/BatchDownloadDialog.test.tsx",
+        "src/features/downloads/BatchDownloadDialog.tsx",
+        "src/features/downloads/DeleteConfirmDialog.test.tsx",
+        "src/features/downloads/DeleteConfirmDialog.tsx",
+        "src/features/downloads/DownloadsView.tsx",
+        "src/features/downloads/NewDownloadDialog.test.tsx",
+        "src/features/downloads/NewDownloadDialog.tsx",
+        "src/features/downloads/TaskDetails.test.tsx",
+        "src/features/downloads/TaskDetails.tsx",
+        "src/features/downloads/TaskList.tsx",
+        "src/features/downloads/TaskRow.test.tsx",
+        "src/features/downloads/TaskRow.tsx",
+        "src/features/downloads/VirtualList.test.tsx",
+        "src/features/downloads/VirtualList.tsx",
+        "src/features/downloads/categories.test.ts",
+        "src/features/downloads/categories.ts",
+        "src/features/downloads/controls.test.ts",
+        "src/features/downloads/controls.ts",
+        "src/features/downloads/downloadValidation.test.ts",
+        "src/features/downloads/downloadValidation.ts",
+        "src/features/downloads/filters.test.ts",
+        "src/features/downloads/filters.ts",
+        "src/features/downloads/format.test.ts",
+        "src/features/downloads/format.ts",
+        "src/features/downloads/useDownloads.actions.test.ts",
+        "src/features/downloads/useDownloads.test.ts",
+        "src/features/downloads/useDownloads.ts",
+        "src/features/downloads/useProbe.test.ts",
+        "src/features/downloads/useProbe.ts",
+        "src/features/settings/DownloadSettings.tsx",
+        "src/features/settings/GeneralSettings.tsx",
+        "src/features/settings/NetworkPlaceholder.tsx",
+        "src/features/settings/SettingsDialog.test.tsx",
+        "src/features/settings/SettingsDialog.tsx",
+        "src/features/settings/useSettings.test.ts",
+        "src/features/settings/useSettings.ts",
+        "src/i18n/en-US.ts",
+        "src/i18n/index.test.tsx",
+        "src/i18n/index.tsx",
+        "src/i18n/zh-CN.ts",
         "src/lib/cn.ts",
+        "src/lib/downloads.ts",
         "src/lib/events.ts",
+        "src/lib/format.ts",
         "src/lib/tauri.ts",
         "src/main.tsx",
         "src/test/mocks/tauri.ts",
         "src/test/setup.ts",
         "src/types/app.ts",
+        "src/types/downloads.ts",
         "src/vite-env.d.ts"
       ],
       "shared_entry": false
@@ -671,6 +2576,7 @@
       "module_root": "engine",
       "entries": [
         "src-tauri/src/engine/scheduler.rs",
+        "src-tauri/src/engine/service.rs",
         "src-tauri/src/engine/cookies.rs",
         "src-tauri/src/engine/error.rs",
         "src-tauri/src/engine/http.rs",
@@ -693,6 +2599,12 @@
         {
           "file": "src-tauri/src/engine/scheduler.rs",
           "name": "EngineOptions",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/engine/service.rs",
+          "name": "EngineService",
           "kind": "struct",
           "visibility": "public"
         },
@@ -762,8 +2674,10 @@
       ],
       "relations": [],
       "owner_role": "shared",
-      "responsibility": "Headless download engine: probe, transport, planner, part file, workers, scheduler, retry, rate limiting, cookies, and state machines",
+      "responsibility": "Headless download engine: probe, transport, planner, part file, workers, scheduler, service actor, retry, rate limiting, cookies, destinations, deletion, and state machines",
       "read_scope": [
+        "src-tauri/src/engine/scheduler.rs",
+        "src-tauri/src/engine/service.rs",
         "src-tauri/src/engine/cookies.rs",
         "src-tauri/src/engine/error.rs",
         "src-tauri/src/engine/http.rs",
@@ -773,7 +2687,6 @@
         "src-tauri/src/engine/probe.rs",
         "src-tauri/src/engine/rate_limit.rs",
         "src-tauri/src/engine/retry.rs",
-        "src-tauri/src/engine/scheduler.rs",
         "src-tauri/src/engine/state.rs",
         "src-tauri/src/engine/worker.rs",
         "src-tauri/tests/engine_download.rs",
@@ -840,7 +2753,7 @@
       "depends_on": [],
       "relations": [],
       "owner_role": "shared",
-      "responsibility": "Durable SQLite task store: connection setup, schema migration, task and segment records, and progress persistence",
+      "responsibility": "Durable SQLite task store: connection setup, schema 1 and 2 migrations, per-task destinations, task and segment records, and progress persistence",
       "read_scope": [
         "src-tauri/src/store/db.rs",
         "src-tauri/src/store/migrations.rs",
@@ -849,6 +2762,75 @@
         "src-tauri/src/store/tasks.rs",
         "src-tauri/src/store/types.rs",
         "src-tauri/tests/store.rs"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "commands",
+      "name": "commands",
+      "aliases": [],
+      "module_root": "commands",
+      "entries": [
+        "src-tauri/src/commands/downloads.rs",
+        "src-tauri/src/commands/app.rs",
+        "src-tauri/src/commands/mod.rs"
+      ],
+      "symbols": [
+        {
+          "file": "src-tauri/src/commands/app.rs",
+          "name": "SettingsStatus",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/downloads.rs",
+          "name": "AddDownloadRequest",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/downloads.rs",
+          "name": "ProbeDownloadRequest",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/downloads.rs",
+          "name": "DownloadSummary",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/downloads.rs",
+          "name": "SegmentView",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/downloads.rs",
+          "name": "ProbeResult",
+          "kind": "struct",
+          "visibility": "public"
+        }
+      ],
+      "related_files": [],
+      "tests": [
+        "src-tauri/tests/downloads_commands.rs",
+        "src-tauri/tests/shell_contract.rs"
+      ],
+      "depends_on": [
+        "engine",
+        "store"
+      ],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Tauri command surface: typed download, settings, diagnostics, and quit commands plus directly testable service functions",
+      "read_scope": [
+        "src-tauri/src/commands/downloads.rs",
+        "src-tauri/src/commands/app.rs",
+        "src-tauri/src/commands/mod.rs",
+        "src-tauri/tests/downloads_commands.rs",
+        "src-tauri/tests/shell_contract.rs"
       ],
       "shared_entry": false
     },
@@ -888,8 +2870,8 @@
       "responsibility": "Command-line harness for adding, running, inspecting, pausing, resuming, and cancelling one task",
       "read_scope": [
         "src-tauri/src/bin/engine_harness.rs",
-        "src-tauri/tests/engine_queue.rs",
-        "src-tauri/tests/engine_recovery.rs"
+        "src-tauri/tests/engine_recovery.rs",
+        "src-tauri/tests/engine_queue.rs"
       ],
       "shared_entry": false
     }
