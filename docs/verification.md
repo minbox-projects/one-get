@@ -441,16 +441,29 @@ Every criterion below is a status for the current revision. Automated evidence i
 | AC-031 | Pending | Manual Chrome and Edge pairing, sniffing, HLS filtering, takeover, prefill, and unpaired or revoked behavior were not performed; Windows install and launch were not performed. |
 | AC-032 | Blocked | The exit statement below records the blocked status and every pending gate without marking a pending item passed. |
 
-### Manual browser and platform status
+### Manual Chrome and Edge acceptance
 
-| Item | Status | Notes |
+Record date: 2026-11-13. Operating system: macOS 27.3 arm64. No OneGet app build was produced or launched for manual acceptance in this run. The production extension build at `extension/dist/chromium` was produced by `npm run build:extension`, but it was not loaded manually into any browser.
+
+| Browser | Version | Status |
 | --- | --- | --- |
-| Chrome pairing, sniffing, HLS filtering, prefill, and takeover | Pending | Not performed. |
-| Chrome unpaired or revoked behavior | Pending | Not performed. |
-| Edge pairing, sniffing, HLS filtering, prefill, and takeover | Pending | Not performed. |
-| Edge unpaired or revoked behavior | Pending | Not performed. |
-| Windows install and launch | Pending | Not performed. |
-| Windows browser capture checks | Pending | Not performed. |
+| Chrome | Not performed / unknown | No manual launch, extension load, pairing, or capture was attempted, so no version was observed. |
+| Edge | Not performed / unknown | No manual launch, extension load, pairing, or capture was attempted, so no version was observed. |
+
+| Manual acceptance item | Status | Detail |
+| --- | --- | --- |
+| Load the unpacked extension in Chrome and Edge | PENDING: not performed | The build was not loaded from `chrome://extensions` or `edge://extensions`. |
+| Desktop pairing with a real generated code | PENDING: not performed | No code was generated and no real pairing was completed. |
+| Response sniffing | PENDING: not performed | No browser traffic was observed or listed. |
+| HLS manifest listing with `.ts` segment filtering | PENDING: not performed | No manifest was listed and no segment filtering was observed in a browser. |
+| Single-resource prefill | PENDING: not performed | No resource was sent and no desktop dialog was opened. |
+| Takeover creating exactly one task with browser-download cancellation | PENDING: not performed | No browser download was started, captured, or canceled. |
+| Unpaired or revoked rejection | PENDING: not performed | No unpaired or revoked capture was attempted in a browser. |
+| Windows status | PENDING: not performed | Windows install, launch, and browser capture checks were not performed. |
+
+The automated headless extension takeover case passed, but it is not a substitute for manual Chrome or Edge evidence.
+
+Phase 3 exit stays BLOCKED. The pending Phase 0/1/2 gates and the pending Phase 3 manual and Windows items below remain unwaived and are not recorded as passed.
 
 ### Pending gates
 
