@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 # ai-workflow notes pairing --project <project-root> --write .ai-workflow/notes/implemented/architecture/2026-11-11-oneget-desktop-shell-baseline.md
-2026-11-11-oneget-desktop-shell-baseline.md: 09e075bc09c9ecca9517736be10bfe7f2dd374ad
-2026-11-11-oneget-desktop-shell-baseline.zh.md: ca681b1368c7321994d25362249d277dd9269c96
+2026-11-11-oneget-desktop-shell-baseline.md: a0eb83b00e77448efd331113a20762fb14f67c75
+2026-11-11-oneget-desktop-shell-baseline.zh.md: 017252f7fb64d409e7f128bd5ffc11ddb6284099

@@ -160,9 +160,10 @@ describe("validateRateLimit", () => {
     expect(validateRateLimit("1048576")).toBeNull();
   });
 
-  it("accepts u64::MAX and rejects values above the u64 bounds", () => {
-    expect(validateRateLimit("18446744073709551615")).toBeNull();
-    expect(validateRateLimit("18446744073709551616")).toBe(
+  it("accepts the largest safe integer and rejects values above it", () => {
+    const maxSafe = String(Number.MAX_SAFE_INTEGER);
+    expect(validateRateLimit(maxSafe)).toBeNull();
+    expect(validateRateLimit(String(Number.MAX_SAFE_INTEGER + 1))).toBe(
       "rate_limit_range",
     );
     expect(validateRateLimit("99999999999999999999999999")).toBe(
@@ -278,12 +279,20 @@ describe("validateDownloadForm", () => {
     const errors = validateDownloadForm(
       form({
         connections: "4294967296",
-        rateLimit: "18446744073709551616",
+        rateLimit: String(Number.MAX_SAFE_INTEGER + 1),
       }),
     );
 
     expect(errors.connections).toBe("connections_range");
     expect(errors.rateLimit).toBe("rate_limit_range");
+  });
+
+  it("accepts the largest safe-integer rate limit in a complete form", () => {
+    expect(
+      validateDownloadForm(
+        form({ rateLimit: String(Number.MAX_SAFE_INTEGER) }),
+      ),
+    ).toEqual({});
   });
 });
 

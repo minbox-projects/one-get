@@ -2088,3 +2088,142 @@ async fn cancelling_one_same_name_task_leaves_the_other_part_and_final_intact() 
         "the surviving same-name task must not leave a part file behind"
     );
 }
+
+#[tokio::test]
+async fn legacy_null_destination_part_owner_forces_distinct_part_and_keeps_bytes() {
+    let body = pattern_bytes(223, 128 * 1024);
+    let server = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let db_path = store_dir.path().join("tasks.db");
+    let legacy_part_name = "legacy.bin.oneget.part";
+    let legacy_part = part_path(dest.path(), "legacy.bin");
+    let legacy_bytes = vec![0xAB_u8; 4096];
+
+    {
+        let db = Database::open(&db_path).expect("open store");
+        let legacy_id = db
+            .create_task("https://example.invalid/legacy.bin", "legacy.bin")
+            .expect("create legacy task without a destination");
+        db.transition_task(&legacy_id, TaskState::Queued, TaskState::Paused)
+            .expect("pause legacy task");
+        std::fs::write(&legacy_part, &legacy_bytes).expect("write legacy part");
+    }
+
+    let engine = Engine::new(
+        Database::open(&db_path).expect("open engine store"),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    let id = engine
+        .add_task(make_spec(server.url("/legacy.bin"), "legacy.bin", 1, None))
+        .expect("add same-name task with the default destination");
+
+    let new_part_name = engine
+        .store()
+        .task(&id)
+        .expect("load new task")
+        .expect("new task exists")
+        .part_path
+        .expect("the new task must persist a part path");
+    assert_ne!(
+        new_part_name, legacy_part_name,
+        "a legacy part owner stored with a NULL destination must still force a distinct part name"
+    );
+    assert_eq!(
+        read_file(&legacy_part),
+        legacy_bytes,
+        "adding a same-name task must not touch the legacy part"
+    );
+
+    tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine.run())
+                .await
+                .expect("run timeout")
+                .expect("run");
+        },
+        wait_for_state(engine.store(), &id, TaskState::Completed, WAIT_TIMEOUT)
+    );
+
+    assert_eq!(
+        read_file(&dest.path().join("legacy.bin")),
+        body,
+        "the new task must finalize its own bytes"
+    );
+    assert_eq!(
+        read_file(&legacy_part),
+        legacy_bytes,
+        "completing the new task must not remove or rewrite the legacy part"
+    );
+}
+
+#[test]
+fn concurrent_cross_engine_same_name_adds_persist_distinct_part_paths() {
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let db_path = store_dir.path().join("tasks.db");
+    let filename = "shared.bin";
+    let barrier = std::sync::Barrier::new(3);
+
+    let ids: Vec<String> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for index in 0..2 {
+            let db_path = db_path.clone();
+            let destination = dest.path().to_path_buf();
+            let barrier = &barrier;
+            handles.push(scope.spawn(move || {
+                let engine = Engine::new(
+                    Database::open(&db_path).expect("open engine store"),
+                    destination,
+                    EngineOptions { max_concurrent: 1 },
+                );
+                barrier.wait();
+                engine
+                    .add_task(make_spec(
+                        format!("https://example.invalid/{index}/{filename}"),
+                        filename,
+                        1,
+                        None,
+                    ))
+                    .expect("concurrent add task")
+            }));
+        }
+        barrier.wait();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("join add thread"))
+            .collect()
+    });
+
+    let store = Database::open(&db_path).expect("reopen store");
+    let tasks: Vec<_> = store
+        .list_tasks()
+        .expect("list tasks")
+        .into_iter()
+        .filter(|task| task.filename == filename)
+        .collect();
+    assert_eq!(tasks.len(), 2, "both concurrent adds must persist a task");
+
+    let part_paths: Vec<String> = tasks
+        .into_iter()
+        .map(|task| task.part_path.expect("every task must persist a part path"))
+        .collect();
+    let unique: HashSet<&String> = part_paths.iter().collect();
+    assert_eq!(
+        unique.len(),
+        2,
+        "concurrent same-name adds across engines must persist distinct part paths, got {part_paths:?} for {ids:?}"
+    );
+    assert!(
+        part_paths
+            .iter()
+            .filter(|path| path.as_str() == "shared.bin.oneget.part")
+            .count()
+            <= 1,
+        "at most one task may own the shared legacy part name, got {part_paths:?}"
+    );
+}

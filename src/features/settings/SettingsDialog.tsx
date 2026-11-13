@@ -49,7 +49,8 @@ function resolveTheme(theme: Theme): "light" | "dark" {
 
 const MAX_CONNECTIONS = 64n;
 const MAX_U32 = 4_294_967_295n;
-const MAX_U64 = 18_446_744_073_709_551_615n;
+/** Largest rate limit that survives the IPC boundary without rounding. */
+const MAX_RATE_LIMIT = BigInt(Number.MAX_SAFE_INTEGER);
 
 function wholeNumberInRange(value: string, min: bigint, max?: bigint): boolean {
   if (!/^\d+$/.test(value)) {
@@ -127,7 +128,7 @@ function SettingsFormPanel({
     if (trimmedRate.length > 0) {
       if (!/^\d+$/.test(trimmedRate) || BigInt(trimmedRate) <= 0n) {
         nextErrors.globalRateLimit = "validation.rate_limit_positive";
-      } else if (!wholeNumberInRange(trimmedRate, 1n, MAX_U64)) {
+      } else if (!wholeNumberInRange(trimmedRate, 1n, MAX_RATE_LIMIT)) {
         nextErrors.globalRateLimit = "validation.rate_limit_range";
       }
     }

@@ -212,6 +212,53 @@ describe("SettingsDialog", () => {
     );
   });
 
+  it("rejects a global rate limit above the safe integer bounds without saving", async () => {
+    const user = userEvent.setup();
+    mockIpc();
+    renderDialog();
+    await screen.findByLabelText(/language/i);
+
+    await fillNumber(
+      user,
+      /global rate limit/i,
+      String(Number.MAX_SAFE_INTEGER + 1),
+    );
+    await user.click(screen.getByRole("button", { name: /^save/i }));
+
+    expectNoSave();
+    expect(en["validation.rate_limit_range"]).toBeTruthy();
+    expect(fieldErrorText(/global rate limit/i)).toBe(
+      en["validation.rate_limit_range"],
+    );
+  });
+
+  it("accepts the largest safe-integer global rate limit and saves it", async () => {
+    const user = userEvent.setup();
+    let saved: Settings | null = null;
+    mockIpc({
+      save: (next) => {
+        saved = next;
+        return { ok: true, data: next };
+      },
+    });
+    renderDialog();
+    await screen.findByLabelText(/language/i);
+
+    await fillNumber(
+      user,
+      /global rate limit/i,
+      String(Number.MAX_SAFE_INTEGER),
+    );
+    await user.click(screen.getByRole("button", { name: /^save/i }));
+
+    await waitFor(() => {
+      expect(saved).not.toBeNull();
+    });
+    expect(saved).toMatchObject({
+      globalRateLimit: Number.MAX_SAFE_INTEGER,
+    });
+  });
+
   it("saves schema-2 values, preserves unknown fields, and applies language and theme immediately", async () => {
     const user = userEvent.setup();
     let saved: Settings | null = null;

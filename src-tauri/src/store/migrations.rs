@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::engine::error::EngineError;
 
@@ -99,9 +99,15 @@ pub(crate) fn migrate(conn: &Connection, from_version: i64) -> Result<(), Engine
         return Ok(());
     }
 
-    let transaction = conn
-        .unchecked_transaction()
+    // Take the write lock before deciding what to apply so a concurrent opener
+    // cannot migrate the same database from a stale schema snapshot.
+    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|_| migration_error())?;
+    let current = read_schema_version(&transaction).map_err(|_| migration_error())?;
+    if current >= SCHEMA_VERSION {
+        transaction.commit().map_err(|_| migration_error())?;
+        return Ok(());
+    }
     transaction
         .execute_batch(SCHEMA_V1)
         .map_err(|_| migration_error())?;

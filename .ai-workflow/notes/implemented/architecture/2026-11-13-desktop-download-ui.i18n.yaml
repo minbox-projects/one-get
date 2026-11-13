@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 # ai-workflow notes pairing --project <project-root> --write .ai-workflow/notes/implemented/architecture/2026-11-13-desktop-download-ui.md
-2026-11-13-desktop-download-ui.md: a75c93d31a54abe2dd528e6c437cd44023e35b4e
-2026-11-13-desktop-download-ui.zh.md: 92fabe982bd073ddd594ed1e07a17e82bbe27737
+2026-11-13-desktop-download-ui.md: 95c695bd6c57a46470f71edb64c5791c766616cb
+2026-11-13-desktop-download-ui.zh.md: 2bdb0d398a1d2ea517dc99791ad88ab7ac722621

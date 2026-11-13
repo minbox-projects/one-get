@@ -125,6 +125,18 @@ describe("TaskDetails", () => {
     expect(document.body).not.toHaveTextContent(/token=/i);
   });
 
+  it("shows the persisted final URL beside the stored URL", () => {
+    renderDetails(
+      task("completed", {
+        finalUrl: "https://cdn.example.com/files/report.pdf",
+      }),
+    );
+
+    expect(screen.getByText(en["details.finalUrl"])).toBeInTheDocument();
+    expectTextOrValue("https://example.com/files/report.pdf");
+    expectTextOrValue("https://cdn.example.com/files/report.pdf");
+  });
+
   it("renders unknown speed and ETA instead of fabricated values", () => {
     renderDetails(
       task("downloading", {

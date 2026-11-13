@@ -43,7 +43,8 @@ export interface DownloadFormErrors {
 
 const MAX_URL_LENGTH = 8 * 1024;
 const MAX_CONNECTIONS = 64n;
-const MAX_U64 = 18_446_744_073_709_551_615n;
+/** Largest rate limit that survives the IPC boundary without rounding. */
+const MAX_RATE_LIMIT = BigInt(Number.MAX_SAFE_INTEGER);
 
 function hasControlCharacters(value: string): boolean {
   for (const character of value) {
@@ -145,7 +146,10 @@ export function validateConnections(value: string): ValidationCode | null {
   return null;
 }
 
-/** Allows an empty rate limit or a positive whole number of bytes per second. */
+/**
+ * Allows an empty rate limit or a positive whole number of bytes per second that
+ * fits the JSON number boundary shared with the backend.
+ */
 export function validateRateLimit(value: string): ValidationCode | null {
   const rate = value.trim();
   if (rate.length === 0) {
@@ -158,7 +162,7 @@ export function validateRateLimit(value: string): ValidationCode | null {
   if (parsed <= 0n) {
     return "rate_limit_positive";
   }
-  if (parsed > MAX_U64) {
+  if (parsed > MAX_RATE_LIMIT) {
     return "rate_limit_range";
   }
   return null;
