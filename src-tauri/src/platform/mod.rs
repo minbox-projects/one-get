@@ -6,6 +6,7 @@
 //! code depends only on the interfaces re-exported here.
 
 pub mod autostart;
+pub mod component;
 pub mod deeplink;
 pub mod filename;
 pub mod files;

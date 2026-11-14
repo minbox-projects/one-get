@@ -233,3 +233,176 @@ fn sleep_interruptible(delay: Duration, shutdown: &AtomicBool) -> bool {
     }
     !shutdown.load(Ordering::SeqCst)
 }
+
+// ---------------------------------------------------------------------------
+// Hand-crafted stored-method ZIP builder.
+//
+// The `zip` crate is intentionally not a test dependency, so archives are
+// assembled byte by byte: a local file header per entry, a central directory,
+// and an end-of-central-directory record. Every entry uses compression method
+// 0 (stored) with a correct CRC-32 over the real data, which keeps the archive
+// valid while leaving the declared uncompressed size independently
+// overridable for compression-ratio metadata cases.
+// ---------------------------------------------------------------------------
+
+const ZIP_LOCAL_HEADER_SIGNATURE: u32 = 0x0403_4b50;
+const ZIP_CENTRAL_HEADER_SIGNATURE: u32 = 0x0201_4b50;
+const ZIP_EOCD_SIGNATURE: u32 = 0x0605_4b50;
+/// Unix host (3) and ZIP specification version 2.0 (20) in the high/low bytes.
+const ZIP_VERSION_MADE_BY_UNIX: u16 = 0x0314;
+
+/// One member of a hand-crafted stored-method ZIP archive.
+#[derive(Clone, Debug)]
+pub struct ZipEntry {
+    /// Member name exactly as written into the archive.
+    pub name: String,
+    /// Member bytes.
+    pub data: Vec<u8>,
+    /// Unix mode stored in the external attributes, for example `0o100644`.
+    pub unix_mode: u32,
+    /// Declared uncompressed size, defaulting to the real data length.
+    pub declared_uncompressed_size: Option<u32>,
+}
+
+impl ZipEntry {
+    /// A regular file member.
+    pub fn file(name: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            name: name.into(),
+            data: data.into(),
+            unix_mode: 0o100_644,
+            declared_uncompressed_size: None,
+        }
+    }
+
+    /// A symbolic-link member whose data is the link target.
+    pub fn symlink(name: impl Into<String>, target: impl Into<Vec<u8>>) -> Self {
+        Self {
+            name: name.into(),
+            data: target.into(),
+            unix_mode: 0o120_777,
+            declared_uncompressed_size: None,
+        }
+    }
+
+    /// A directory member.
+    pub fn directory(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            data: Vec::new(),
+            unix_mode: 0o040_755,
+            declared_uncompressed_size: None,
+        }
+    }
+
+    /// Override the declared uncompressed size without changing stored bytes.
+    pub fn with_declared_uncompressed_size(mut self, size: u32) -> Self {
+        self.declared_uncompressed_size = Some(size);
+        self
+    }
+}
+
+/// Build a valid stored-method ZIP archive from `entries`.
+///
+/// Entries are written in order, so duplicate member names are preserved for
+/// duplicate-entry cases. Callers must stay within the `u16` entry/name limits
+/// of the ZIP format.
+pub fn build_stored_zip(entries: &[ZipEntry]) -> Vec<u8> {
+    assert!(
+        entries.len() <= u16::MAX as usize,
+        "stored zip fixture supports at most 65535 entries"
+    );
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    let mut offsets = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        let name = entry.name.as_bytes();
+        assert!(
+            name.len() <= u16::MAX as usize,
+            "stored zip fixture member names must fit the ZIP name length"
+        );
+        let name_len = name.len() as u16;
+        let crc = crc32(&entry.data);
+        let compressed_size = entry.data.len() as u32;
+        let uncompressed_size = entry.declared_uncompressed_size.unwrap_or(compressed_size);
+        let offset = out.len() as u32;
+        offsets.push(offset);
+
+        push_u32(&mut out, ZIP_LOCAL_HEADER_SIGNATURE);
+        push_u16(&mut out, 20);
+        push_u16(&mut out, 0);
+        push_u16(&mut out, 0);
+        push_u16(&mut out, 0);
+        push_u16(&mut out, 0x0021);
+        push_u32(&mut out, crc);
+        push_u32(&mut out, compressed_size);
+        push_u32(&mut out, uncompressed_size);
+        push_u16(&mut out, name_len);
+        push_u16(&mut out, 0);
+        out.extend_from_slice(name);
+        out.extend_from_slice(&entry.data);
+    }
+
+    let central_offset = out.len() as u32;
+    for (entry, offset) in entries.iter().zip(offsets) {
+        let name = entry.name.as_bytes();
+        let name_len = name.len() as u16;
+        let crc = crc32(&entry.data);
+        let compressed_size = entry.data.len() as u32;
+        let uncompressed_size = entry.declared_uncompressed_size.unwrap_or(compressed_size);
+
+        push_u32(&mut central, ZIP_CENTRAL_HEADER_SIGNATURE);
+        push_u16(&mut central, ZIP_VERSION_MADE_BY_UNIX);
+        push_u16(&mut central, 20);
+        push_u16(&mut central, 0);
+        push_u16(&mut central, 0);
+        push_u16(&mut central, 0);
+        push_u16(&mut central, 0x0021);
+        push_u32(&mut central, crc);
+        push_u32(&mut central, compressed_size);
+        push_u32(&mut central, uncompressed_size);
+        push_u16(&mut central, name_len);
+        push_u16(&mut central, 0);
+        push_u16(&mut central, 0);
+        push_u16(&mut central, 0);
+        push_u16(&mut central, 0);
+        push_u32(&mut central, entry.unix_mode << 16);
+        push_u32(&mut central, offset);
+        central.extend_from_slice(name);
+    }
+
+    let central_size = central.len() as u32;
+    out.extend_from_slice(&central);
+
+    push_u32(&mut out, ZIP_EOCD_SIGNATURE);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, entries.len() as u16);
+    push_u16(&mut out, entries.len() as u16);
+    push_u32(&mut out, central_size);
+    push_u32(&mut out, central_offset);
+    push_u16(&mut out, 0);
+    out
+}
+
+fn push_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+/// CRC-32 (IEEE 802.3) as required by the ZIP format.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
