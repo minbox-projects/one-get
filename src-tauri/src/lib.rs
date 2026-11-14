@@ -12,6 +12,7 @@ pub mod kernel;
 pub mod logging;
 pub mod platform;
 pub mod store;
+pub mod video;
 
 use std::sync::{Arc, Mutex};
 
