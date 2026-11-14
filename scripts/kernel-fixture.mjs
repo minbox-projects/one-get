@@ -117,8 +117,9 @@ function unsignedObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("the catalog root must be a JSON object");
   }
-  const { signature: _signature, ...rest } = value;
-  return rest;
+  return Object.fromEntries(
+    Object.entries(value).filter(([key]) => key !== "signature"),
+  );
 }
 
 function templateCatalog(baseUrl) {
