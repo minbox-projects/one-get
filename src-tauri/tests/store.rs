@@ -5,7 +5,8 @@ use tempfile::tempdir;
 
 use oneget_lib::engine::error::EngineError;
 use oneget_lib::engine::state::{SegmentState, TaskState};
-use oneget_lib::store::{Database, SegmentInput, SegmentProgressInput};
+use oneget_lib::store::{Database, SegmentInput, SegmentProgressInput, TaskKind, VideoTaskInput};
+use serde_json::json;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -23,14 +24,14 @@ fn create_queued_task(db: &Database) -> String {
 }
 
 #[test]
-fn opening_new_database_creates_schema_version_2_and_required_structures_idempotently() {
+fn opening_new_database_creates_schema_version_3_and_required_structures_idempotently() {
     let dir = tempdir().expect("tempdir");
     let db_path = dir.path().join("store.sqlite");
 
     {
         let db = Database::open(&db_path).expect("first open creates schema");
         let meta = db.schema_metadata().expect("read schema metadata");
-        assert_eq!(meta.version, 2, "schema version must be 2");
+        assert_eq!(meta.version, 3, "schema version must be 3");
         assert!(
             meta.journal_mode.eq_ignore_ascii_case("wal"),
             "journal_mode must be WAL"
@@ -254,8 +255,8 @@ fn migrating_schema_1_database_preserves_rows_and_is_idempotent_on_reopen() {
     let db = Database::open(&db_path).expect("schema-1 database must migrate");
     assert_eq!(
         db.schema_metadata().expect("metadata").version,
-        2,
-        "migration must reach schema version 2"
+        3,
+        "migration must reach schema version 3"
     );
     let task = db
         .task("legacy-task")
@@ -284,8 +285,8 @@ fn migrating_schema_1_database_preserves_rows_and_is_idempotent_on_reopen() {
     let reopened = Database::open(&db_path).expect("reopen migrated database");
     assert_eq!(
         reopened.schema_metadata().expect("metadata").version,
-        2,
-        "reopening a migrated database stays at version 2"
+        3,
+        "reopening a migrated database stays at version 3"
     );
     assert!(
         reopened
@@ -309,7 +310,7 @@ fn database_with_schema_version_newer_than_supported_is_refused_with_typed_error
     let dir = tempdir().expect("tempdir");
     let db_path = dir.path().join("store.sqlite");
     {
-        let _db = Database::open(&db_path).expect("create schema version 2 database");
+        let _db = Database::open(&db_path).expect("create schema version 3 database");
     }
 
     {
@@ -330,7 +331,7 @@ fn failing_migration_rolls_back_schema_change_and_leaves_backup_beside_database(
     let dir = tempdir().expect("tempdir");
     let db_path = dir.path().join("store.sqlite");
     {
-        let _db = Database::open(&db_path).expect("create schema version 2 database");
+        let _db = Database::open(&db_path).expect("create schema version 3 database");
     }
 
     // Craft a state that requires migration but makes applying migration fail:
@@ -919,8 +920,8 @@ fn schema_2_tasks_carry_nullable_final_url_and_record_final_url_survives_reopen(
         let db = Database::open(&db_path).expect("open schema-2 database");
         assert_eq!(
             db.schema_metadata().expect("metadata").version,
-            2,
-            "current schema stays at version 2"
+            3,
+            "current schema stays at version 3"
         );
         let task_id = db
             .create_task(
@@ -1027,8 +1028,8 @@ fn migrating_schema_1_database_adds_nullable_final_url_and_preserves_rows() {
     let db = Database::open(&db_path).expect("schema-1 database must migrate");
     assert_eq!(
         db.schema_metadata().expect("metadata").version,
-        2,
-        "migration must reach schema version 2"
+        3,
+        "migration must reach schema version 3"
     );
     let legacy = db
         .task("legacy-task")
@@ -1071,5 +1072,658 @@ fn migrating_schema_1_database_adds_nullable_final_url_and_preserves_rows() {
             .len(),
         1,
         "reopening must not drop migrated segments"
+    );
+}
+
+fn video_input(url: &str, filename: &str) -> VideoTaskInput {
+    VideoTaskInput {
+        url: url.to_string(),
+        filename: filename.to_string(),
+        destination: None,
+        format_selector: "bestvideo+bestaudio".to_string(),
+        cookies_file: None,
+        proxy_url: None,
+        metadata: json!({}),
+        full_url_persisted: false,
+    }
+}
+
+#[test]
+fn migration_to_schema_version_3_adds_kind_and_video_json_and_marks_rows_http() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("store.sqlite");
+
+    {
+        let conn = Connection::open(&db_path).expect("create raw schema-2 database");
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE schema_meta (
+                 key TEXT PRIMARY KEY NOT NULL,
+                 value TEXT NOT NULL
+             );
+             CREATE TABLE tasks (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 url TEXT NOT NULL,
+                 filename TEXT NOT NULL,
+                 part_path TEXT,
+                 state TEXT NOT NULL CHECK (state IN (
+                     'queued', 'connecting', 'downloading', 'paused',
+                     'finalizing', 'completed', 'failed', 'cancelled'
+                 )),
+                 downloaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK (downloaded_bytes >= 0),
+                 total_bytes INTEGER CHECK (total_bytes IS NULL OR total_bytes >= 0),
+                 expected_sha256 TEXT,
+                 actual_sha256 TEXT,
+                 etag TEXT,
+                 last_modified TEXT,
+                 error_code TEXT,
+                 error_message TEXT,
+                 created_at_ms INTEGER NOT NULL,
+                 updated_at_ms INTEGER NOT NULL,
+                 connections INTEGER NOT NULL DEFAULT 1 CHECK (connections > 0),
+                 headers_json TEXT NOT NULL DEFAULT '[]'
+             );
+             CREATE TABLE segments (
+                 task_id TEXT NOT NULL,
+                 segment_index INTEGER NOT NULL CHECK (segment_index >= 0),
+                 start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
+                 end_offset INTEGER NOT NULL CHECK (end_offset > start_offset),
+                 downloaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK (downloaded_bytes >= 0),
+                 state TEXT NOT NULL CHECK (state IN ('pending', 'active', 'done', 'failed')),
+                 PRIMARY KEY (task_id, segment_index),
+                 FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE,
+                 CHECK (downloaded_bytes <= end_offset - start_offset)
+             );
+             CREATE INDEX idx_tasks_state_created_at ON tasks (state, created_at_ms);
+             CREATE INDEX idx_segments_task_id ON segments (task_id);
+             ALTER TABLE tasks ADD COLUMN destination TEXT;
+             ALTER TABLE tasks ADD COLUMN completed_at_ms INTEGER;
+             ALTER TABLE tasks ADD COLUMN final_url TEXT;
+             INSERT INTO schema_meta (key, value) VALUES ('schema_version', '2');
+             INSERT INTO tasks (
+                 id, url, filename, part_path, state, downloaded_bytes, total_bytes,
+                 expected_sha256, etag, last_modified, created_at_ms, updated_at_ms,
+                 connections, destination
+             ) VALUES (
+                 'v2-task', 'https://example.invalid/v2.bin', 'v2.bin',
+                 'v2.bin.oneget.part', 'paused', 512, 4096,
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 'etag-v2', 'Mon, 01 Jan 2024 00:00:00 GMT', 1000, 2000, 4,
+                 '/tmp/oneget-v2'
+             );
+             INSERT INTO segments (
+                 task_id, segment_index, start_offset, end_offset, downloaded_bytes, state
+             ) VALUES ('v2-task', 0, 0, 4096, 512, 'active');",
+        )
+        .expect("write schema-2 fixture");
+    }
+
+    let db = Database::open(&db_path).expect("schema-2 database must migrate");
+    let meta = db.schema_metadata().expect("metadata");
+    assert_eq!(meta.version, 3, "migration must reach schema version 3");
+    assert!(
+        meta.has_required_indexes && meta.has_required_constraints,
+        "the migrated schema must keep its indexes and constraints"
+    );
+
+    let task = db
+        .task("v2-task")
+        .expect("lookup migrated task")
+        .expect("migrated row must be preserved");
+    assert_eq!(task.url, "https://example.invalid/v2.bin");
+    assert_eq!(task.filename, "v2.bin");
+    assert_eq!(task.part_path.as_deref(), Some("v2.bin.oneget.part"));
+    assert_eq!(task.destination.as_deref(), Some("/tmp/oneget-v2"));
+    assert_eq!(task.state, TaskState::Paused);
+    assert_eq!(task.downloaded_bytes, 512);
+    assert_eq!(task.total_bytes, Some(4096));
+    assert_eq!(
+        task.expected_sha256.as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+    assert_eq!(task.etag.as_deref(), Some("etag-v2"));
+    assert_eq!(
+        task.last_modified.as_deref(),
+        Some("Mon, 01 Jan 2024 00:00:00 GMT")
+    );
+    assert_eq!(task.connections, 4);
+    assert_eq!(task.created_at_ms, 1000);
+    assert_eq!(task.updated_at_ms, 2000);
+    assert!(task.completed_at_ms.is_none());
+    assert!(task.final_url.is_none());
+    assert_eq!(task.kind, TaskKind::Http, "existing rows must become http");
+    assert!(
+        task.video.is_none(),
+        "existing rows must have no video JSON"
+    );
+
+    let segments = db.segments_for_task("v2-task").expect("migrated segments");
+    assert_eq!(segments.len(), 1, "existing segments must survive");
+    assert_eq!(segments[0].start, 0);
+    assert_eq!(segments[0].end, 4096);
+    assert_eq!(segments[0].downloaded_bytes, 512);
+    assert_eq!(segments[0].state, SegmentState::Active);
+
+    let backup_path = dir.path().join("store.sqlite.backup");
+    assert!(
+        backup_path.exists(),
+        "a non-empty migration must leave a .backup file beside the database"
+    );
+    let backup = Connection::open(&backup_path).expect("open pre-migration backup");
+    let backup_version: String = backup
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read backup schema version");
+    assert_eq!(
+        backup_version, "2",
+        "the backup must hold the pre-migration schema"
+    );
+    drop(backup);
+
+    drop(db);
+    let reopened = Database::open(&db_path).expect("reopen migrated database");
+    assert_eq!(
+        reopened.schema_metadata().expect("metadata").version,
+        3,
+        "reopening a migrated database stays at version 3"
+    );
+    let reopened_task = reopened
+        .task("v2-task")
+        .expect("lookup after reopen")
+        .expect("row must survive reopen");
+    assert_eq!(reopened_task.kind, TaskKind::Http);
+    assert!(reopened_task.video.is_none());
+    assert_eq!(
+        reopened
+            .segments_for_task("v2-task")
+            .expect("segments after reopen")
+            .len(),
+        1,
+        "reopening must not drop migrated segments"
+    );
+}
+
+#[test]
+fn video_task_records_kind_and_structured_video_json() {
+    let (_dir, db) = open_temp_db();
+    let destination = "/tmp/oneget-video";
+
+    let input = VideoTaskInput {
+        url: "https://example.invalid/watch/abc".to_string(),
+        filename: "clip.mp4".to_string(),
+        destination: Some(destination.to_string()),
+        format_selector: "bestvideo[height<=1080]+bestaudio".to_string(),
+        cookies_file: Some("/tmp/oneget-cookies.txt".to_string()),
+        proxy_url: Some("http://127.0.0.1:8080".to_string()),
+        metadata: json!({ "title": "Example", "durationSeconds": 42 }),
+        full_url_persisted: true,
+    };
+    let video_id = db
+        .create_video_task(&input)
+        .expect("create video task with every field");
+
+    let task = db
+        .task(&video_id)
+        .expect("lookup video task")
+        .expect("video task exists");
+    assert_eq!(task.id, video_id);
+    assert_eq!(task.kind, TaskKind::Video);
+    assert_eq!(task.url, "https://example.invalid/watch/abc");
+    assert_eq!(task.filename, "clip.mp4");
+    assert_eq!(task.destination.as_deref(), Some(destination));
+    assert_eq!(task.state, TaskState::Queued);
+
+    let video = task
+        .video
+        .expect("video task must carry structured video JSON");
+    assert_eq!(
+        video["formatSelector"].as_str(),
+        Some("bestvideo[height<=1080]+bestaudio")
+    );
+    assert_eq!(
+        video["cookiesFile"].as_str(),
+        Some("/tmp/oneget-cookies.txt")
+    );
+    assert_eq!(video["proxyUrl"].as_str(), Some("http://127.0.0.1:8080"));
+    assert_eq!(
+        video["metadata"],
+        json!({ "title": "Example", "durationSeconds": 42 })
+    );
+    assert_eq!(video["fullUrlPersisted"], json!(true));
+
+    assert_eq!(TaskKind::Http.as_str(), "http");
+    assert_eq!(TaskKind::Video.as_str(), "video");
+    assert_eq!(TaskKind::parse("http"), Some(TaskKind::Http));
+    assert_eq!(TaskKind::parse("video"), Some(TaskKind::Video));
+    assert_eq!(TaskKind::parse("other"), None);
+
+    assert_eq!(
+        db.task_kind(&video_id).expect("task kind"),
+        Some(TaskKind::Video)
+    );
+    assert_eq!(
+        db.task_kind("task-does-not-exist")
+            .expect("missing task kind"),
+        None
+    );
+
+    let http_id = db
+        .create_task("https://example.invalid/http.bin", "http.bin")
+        .expect("create http task");
+    let http_task = db
+        .task(&http_id)
+        .expect("lookup http task")
+        .expect("http task exists");
+    assert_eq!(http_task.kind, TaskKind::Http, "an HTTP task stays Http");
+    assert!(
+        http_task.video.is_none(),
+        "an HTTP task carries no video JSON"
+    );
+    assert_eq!(
+        db.task_kind(&http_id).expect("http task kind"),
+        Some(TaskKind::Http)
+    );
+
+    let videos = db.tasks_by_kind(TaskKind::Video).expect("list video tasks");
+    assert_eq!(
+        videos
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![video_id.as_str()],
+        "tasks_by_kind must return only video tasks"
+    );
+    let https = db.tasks_by_kind(TaskKind::Http).expect("list http tasks");
+    assert_eq!(
+        https
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![http_id.as_str()],
+        "tasks_by_kind must return only HTTP tasks"
+    );
+}
+
+#[test]
+fn video_queue_queries_are_independent_of_http_tasks() {
+    let (_dir, db) = open_temp_db();
+
+    let first_video = db
+        .create_video_task(&video_input("https://example.invalid/video/one", "one.mp4"))
+        .expect("create first video task");
+    let http_id = db
+        .create_task("https://example.invalid/queued.bin", "queued.bin")
+        .expect("create http task");
+    let second_video = db
+        .create_video_task(&video_input("https://example.invalid/video/two", "two.mp4"))
+        .expect("create second video task");
+
+    assert_eq!(
+        db.queued_task_count().expect("queued count"),
+        1,
+        "only the queued HTTP task counts toward the HTTP queue"
+    );
+    assert_eq!(
+        db.active_task_count().expect("active count"),
+        0,
+        "queued video tasks must not occupy HTTP scheduler slots"
+    );
+    assert_eq!(
+        db.tasks_by_kind(TaskKind::Video)
+            .expect("video tasks")
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first_video.as_str(), second_video.as_str()],
+        "tasks_by_kind must follow creation order"
+    );
+
+    let claimed_http = db
+        .claim_oldest_queued_task()
+        .expect("claim queued http task")
+        .expect("the queued HTTP task is claimable");
+    assert_eq!(claimed_http.id, http_id);
+    assert!(
+        db.active_video_task().expect("active video task").is_none(),
+        "claiming an HTTP task must not activate a video task"
+    );
+
+    let claimed_video = db
+        .claim_oldest_queued_video_task()
+        .expect("claim queued video task")
+        .expect("the oldest queued video task is claimable");
+    assert_eq!(claimed_video.id, first_video);
+    assert_eq!(claimed_video.state, TaskState::Connecting);
+    assert_eq!(
+        db.active_video_task()
+            .expect("active video task")
+            .expect("the claimed video task is active")
+            .id,
+        first_video
+    );
+    assert_eq!(
+        db.task(&second_video)
+            .expect("lookup second video")
+            .expect("exists")
+            .state,
+        TaskState::Queued,
+        "claiming one video task leaves the next one queued"
+    );
+    assert_eq!(
+        db.active_task_count().expect("active count"),
+        1,
+        "only the connecting HTTP task occupies an HTTP slot"
+    );
+
+    let hash = "b".repeat(64);
+    db.transition_task(&first_video, TaskState::Connecting, TaskState::Downloading)
+        .expect("video connecting->downloading");
+    db.transition_task(&first_video, TaskState::Downloading, TaskState::Finalizing)
+        .expect("video downloading->finalizing");
+    db.complete_video_task(&first_video, "one.mp4", "/tmp/oneget-video/one.mp4", &hash)
+        .expect("complete video task");
+    assert!(
+        db.active_video_task()
+            .expect("active video task after completion")
+            .is_none(),
+        "a completed video task is no longer active"
+    );
+}
+
+#[test]
+fn video_progress_stage_and_completion_round_trip() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("store.sqlite");
+    let db = Database::open(&db_path).expect("open database");
+
+    let video_id = db
+        .create_video_task(&video_input(
+            "https://example.invalid/video/merge",
+            "merge.mp4",
+        ))
+        .expect("create video task");
+    db.claim_oldest_queued_video_task()
+        .expect("claim video task")
+        .expect("video task was queued");
+
+    db.persist_video_progress(&video_id, 1_500_000, Some(4_000_000))
+        .expect("persist video progress");
+    let progressing = db
+        .task(&video_id)
+        .expect("lookup progressing video")
+        .expect("exists");
+    assert_eq!(progressing.downloaded_bytes, 1_500_000);
+    assert_eq!(progressing.total_bytes, Some(4_000_000));
+
+    db.patch_video_json(
+        &video_id,
+        &json!({ "mergeStage": "merging", "tempDir": "/tmp/oneget-video-merge" }),
+    )
+    .expect("patch video JSON");
+    let patched = db
+        .task(&video_id)
+        .expect("lookup patched video")
+        .expect("exists");
+    let patched_video = patched.video.expect("video JSON after patch");
+    assert_eq!(patched_video["mergeStage"].as_str(), Some("merging"));
+    assert_eq!(
+        patched_video["tempDir"].as_str(),
+        Some("/tmp/oneget-video-merge")
+    );
+    assert_eq!(
+        patched_video["formatSelector"].as_str(),
+        Some("bestvideo+bestaudio"),
+        "patching must merge into the existing video JSON"
+    );
+
+    let rejected = db.patch_video_json(&video_id, &json!(["not", "an", "object"]));
+    assert!(
+        rejected.is_err(),
+        "a non-object video JSON patch must be rejected"
+    );
+
+    let hash = "d".repeat(64);
+    let final_path = "/tmp/oneget-video-merge/output (1).mp4";
+    db.transition_task(&video_id, TaskState::Connecting, TaskState::Downloading)
+        .expect("video connecting->downloading");
+    db.transition_task(&video_id, TaskState::Downloading, TaskState::Finalizing)
+        .expect("video downloading->finalizing");
+    db.complete_video_task(&video_id, "output (1).mp4", final_path, &hash)
+        .expect("complete video task with output records");
+
+    let completed = db
+        .task(&video_id)
+        .expect("lookup completed video")
+        .expect("exists");
+    assert_eq!(completed.state, TaskState::Completed);
+    assert_eq!(completed.filename, "output (1).mp4");
+    assert_eq!(completed.actual_sha256.as_deref(), Some(hash.as_str()));
+    let completed_at_ms = completed
+        .completed_at_ms
+        .expect("completion must record completed_at_ms");
+    assert!(completed_at_ms >= completed.created_at_ms);
+    let completed_video = completed.video.expect("video JSON after completion");
+    assert_eq!(
+        completed_video["finalPath"].as_str(),
+        Some(final_path),
+        "completion must record finalPath in the video JSON"
+    );
+    assert_eq!(
+        completed_video["tempDir"].as_str(),
+        Some("/tmp/oneget-video-merge"),
+        "completion must preserve the temporary directory record"
+    );
+    assert_eq!(
+        completed_video["formatSelector"].as_str(),
+        Some("bestvideo+bestaudio")
+    );
+
+    drop(db);
+    let reopened = Database::open(&db_path).expect("reopen database");
+    let persisted = reopened
+        .task(&video_id)
+        .expect("lookup after reopen")
+        .expect("video task survives reopen");
+    assert_eq!(persisted.state, TaskState::Completed);
+    assert_eq!(persisted.downloaded_bytes, 1_500_000);
+    assert_eq!(persisted.total_bytes, Some(4_000_000));
+    assert_eq!(persisted.filename, "output (1).mp4");
+    assert_eq!(persisted.actual_sha256.as_deref(), Some(hash.as_str()));
+    assert_eq!(persisted.completed_at_ms, Some(completed_at_ms));
+    let reopened_video = persisted.video.expect("video JSON after reopen");
+    assert_eq!(reopened_video["mergeStage"].as_str(), Some("merging"));
+    assert_eq!(
+        reopened_video["tempDir"].as_str(),
+        Some("/tmp/oneget-video-merge")
+    );
+    assert_eq!(reopened_video["finalPath"].as_str(), Some(final_path));
+}
+
+#[test]
+fn video_recovery_marks_interrupted_tasks_failed_and_preserves_state() {
+    let (_dir, db) = open_temp_db();
+
+    let connecting = db
+        .create_video_task(&video_input(
+            "https://example.invalid/video/connecting",
+            "connecting.mp4",
+        ))
+        .expect("create connecting video task");
+    let downloading = db
+        .create_video_task(&video_input(
+            "https://example.invalid/video/downloading",
+            "downloading.mp4",
+        ))
+        .expect("create downloading video task");
+    let finalizing = db
+        .create_video_task(&video_input(
+            "https://example.invalid/video/finalizing",
+            "finalizing.mp4",
+        ))
+        .expect("create finalizing video task");
+    let paused = db
+        .create_video_task(&video_input(
+            "https://example.invalid/video/paused",
+            "paused.mp4",
+        ))
+        .expect("create paused video task");
+    let queued = db
+        .create_video_task(&video_input(
+            "https://example.invalid/video/queued",
+            "queued.mp4",
+        ))
+        .expect("create queued video task");
+
+    db.transition_task(&connecting, TaskState::Queued, TaskState::Connecting)
+        .expect("setup connecting");
+    db.transition_task(&downloading, TaskState::Queued, TaskState::Connecting)
+        .expect("setup downloading connecting");
+    db.transition_task(&downloading, TaskState::Connecting, TaskState::Downloading)
+        .expect("setup downloading");
+    db.transition_task(&finalizing, TaskState::Queued, TaskState::Connecting)
+        .expect("setup finalizing connecting");
+    db.transition_task(&finalizing, TaskState::Connecting, TaskState::Downloading)
+        .expect("setup finalizing downloading");
+    db.transition_task(&finalizing, TaskState::Downloading, TaskState::Finalizing)
+        .expect("setup finalizing");
+    db.transition_task(&paused, TaskState::Queued, TaskState::Paused)
+        .expect("setup paused");
+
+    for (id, temp_dir) in [
+        (&connecting, "/tmp/oneget-video-connecting"),
+        (&downloading, "/tmp/oneget-video-downloading"),
+        (&finalizing, "/tmp/oneget-video-finalizing"),
+        (&paused, "/tmp/oneget-video-paused"),
+    ] {
+        db.patch_video_json(id, &json!({ "tempDir": temp_dir }))
+            .expect("record temporary directory");
+    }
+    let connecting_video = db.task(&connecting).unwrap().unwrap().video;
+    let downloading_video = db.task(&downloading).unwrap().unwrap().video;
+    let finalizing_video = db.task(&finalizing).unwrap().unwrap().video;
+    let paused_video = db.task(&paused).unwrap().unwrap().video;
+
+    let interrupted = db
+        .mark_interrupted_video_tasks()
+        .expect("mark interrupted video tasks");
+    assert_eq!(
+        interrupted, 3,
+        "connecting, downloading, and finalizing video tasks are interrupted"
+    );
+
+    for (id, preserved) in [
+        (&connecting, connecting_video),
+        (&downloading, downloading_video),
+        (&finalizing, finalizing_video),
+    ] {
+        let task = db
+            .task(id)
+            .expect("lookup interrupted task")
+            .expect("interrupted task exists");
+        assert_eq!(
+            task.state,
+            TaskState::Failed,
+            "an interrupted video task must become failed"
+        );
+        assert_eq!(
+            task.error_code.as_deref(),
+            Some("VIDEO_INTERRUPTED"),
+            "an interrupted video task must record VIDEO_INTERRUPTED"
+        );
+        assert_eq!(
+            task.video, preserved,
+            "recovery must preserve the video JSON of an interrupted task"
+        );
+    }
+
+    let paused_task = db.task(&paused).unwrap().unwrap();
+    assert_eq!(
+        paused_task.state,
+        TaskState::Paused,
+        "recovery must preserve a paused video task"
+    );
+    assert_eq!(paused_task.video, paused_video);
+    let queued_task = db.task(&queued).unwrap().unwrap();
+    assert_eq!(
+        queued_task.state,
+        TaskState::Queued,
+        "recovery must preserve a queued video task"
+    );
+}
+
+#[test]
+fn http_claims_and_conflicts_ignore_video_tasks() {
+    let (_dir, db) = open_temp_db();
+    let destination = "/tmp/oneget-shared";
+
+    let video_id = db
+        .create_video_task(&VideoTaskInput {
+            url: "https://example.invalid/shared-video".to_string(),
+            filename: "shared.bin".to_string(),
+            destination: Some(destination.to_string()),
+            format_selector: "bestvideo+bestaudio".to_string(),
+            cookies_file: None,
+            proxy_url: None,
+            metadata: json!({}),
+            full_url_persisted: false,
+        })
+        .expect("create video task sharing the filename");
+
+    let (first_http, first_part) = db
+        .create_task_with_part(
+            "https://example.invalid/shared-http-one.bin",
+            "shared.bin",
+            Some(destination),
+            destination,
+        )
+        .expect("an HTTP task must ignore the video conflict");
+    assert_eq!(
+        first_part, "shared.bin.oneget.part",
+        "a video task with the same filename and destination must not conflict"
+    );
+
+    let (second_http, second_part) = db
+        .create_task_with_part(
+            "https://example.invalid/shared-http-two.bin",
+            "shared.bin",
+            Some(destination),
+            destination,
+        )
+        .expect("a second HTTP task still conflicts with the first HTTP task");
+    assert_eq!(
+        second_part,
+        format!("shared.bin.{}.oneget.part", &second_http[..8]),
+        "conflict detection must compare HTTP tasks only"
+    );
+
+    assert_eq!(
+        db.queued_task_count().expect("queued count"),
+        2,
+        "only the two HTTP tasks are queued"
+    );
+
+    let first_claimed = db
+        .claim_oldest_queued_task()
+        .expect("claim first http task")
+        .expect("a queued HTTP task exists");
+    assert_eq!(first_claimed.id, first_http);
+    let second_claimed = db
+        .claim_oldest_queued_task()
+        .expect("claim second http task")
+        .expect("the second queued HTTP task exists");
+    assert_eq!(second_claimed.id, second_http);
+    assert!(
+        db.claim_oldest_queued_task()
+            .expect("claim when only video remains queued")
+            .is_none(),
+        "claim_oldest_queued_task must never return a video task"
+    );
+    assert_eq!(
+        db.task(&video_id).unwrap().unwrap().state,
+        TaskState::Queued,
+        "the video task stays queued while HTTP claims run"
     );
 }

@@ -25,7 +25,8 @@ use oneget_lib::engine::worker::{
 };
 use oneget_lib::platform::files::CapDir;
 use oneget_lib::store::types::{SegmentInput, SegmentProgressInput};
-use oneget_lib::store::Database;
+use oneget_lib::store::{Database, TaskKind, VideoTaskInput};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use support::fixtures::pattern_bytes;
 use support::range_server::{FixtureConfig, RangeMode, RangeServer};
@@ -75,6 +76,19 @@ fn make_spec_with(
         expected_sha256,
         extra_headers: Vec::new(),
         destination: None,
+    }
+}
+
+fn video_input(url: &str, filename: &str) -> VideoTaskInput {
+    VideoTaskInput {
+        url: url.to_string(),
+        filename: filename.to_string(),
+        destination: None,
+        format_selector: "bestvideo+bestaudio".to_string(),
+        cookies_file: None,
+        proxy_url: None,
+        metadata: json!({}),
+        full_url_persisted: false,
     }
 }
 
@@ -1007,5 +1021,117 @@ async fn checksum_mismatch_fails_without_renaming_for_download_once_and_engine_p
     assert!(
         !engine_dest.path().join(engine_name).exists(),
         "the engine path must not create a final file on checksum mismatch"
+    );
+}
+
+#[tokio::test]
+async fn http_controls_reject_video_tasks_with_typed_error() {
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    let video_id = engine
+        .store()
+        .create_video_task(&video_input(
+            "https://example.invalid/video/http-controls",
+            "control-video.mp4",
+        ))
+        .expect("create queued video task");
+    let video_before = engine.store().task(&video_id).unwrap().unwrap();
+    assert_eq!(video_before.kind, TaskKind::Video);
+    assert_eq!(video_before.state, TaskState::Queued);
+
+    let pause_error = engine
+        .pause(&video_id)
+        .await
+        .expect_err("pause must reject a video task");
+    assert_eq!(
+        pause_error.code(),
+        "TASK_KIND_UNSUPPORTED",
+        "pause must report the typed kind error, got {:?}",
+        pause_error
+    );
+    assert_eq!(
+        engine.store().task(&video_id).unwrap().unwrap().state,
+        TaskState::Queued,
+        "a rejected pause must leave the video task queued"
+    );
+
+    let resume_error = engine
+        .resume(&video_id)
+        .await
+        .expect_err("resume must reject a video task");
+    assert_eq!(
+        resume_error.code(),
+        "TASK_KIND_UNSUPPORTED",
+        "resume must report the typed kind error, got {:?}",
+        resume_error
+    );
+    assert_eq!(
+        engine.store().task(&video_id).unwrap().unwrap().state,
+        TaskState::Queued,
+        "a rejected resume must leave the video task queued"
+    );
+
+    let cancel_error = engine
+        .cancel(&video_id)
+        .await
+        .expect_err("cancel must reject a video task");
+    assert_eq!(
+        cancel_error.code(),
+        "TASK_KIND_UNSUPPORTED",
+        "cancel must report the typed kind error, got {:?}",
+        cancel_error
+    );
+    assert_eq!(
+        engine.store().task(&video_id).unwrap().unwrap().state,
+        TaskState::Queued,
+        "a rejected cancel must leave the video task queued"
+    );
+
+    let retry_error = engine
+        .retry(&video_id)
+        .await
+        .expect_err("retry must reject a video task");
+    assert_eq!(
+        retry_error.code(),
+        "TASK_KIND_UNSUPPORTED",
+        "retry must report the typed kind error, got {:?}",
+        retry_error
+    );
+    let video_after = engine.store().task(&video_id).unwrap().unwrap();
+    assert_eq!(video_after.state, TaskState::Queued);
+    assert_eq!(
+        video_after.updated_at_ms, video_before.updated_at_ms,
+        "rejected controls must not touch the video row"
+    );
+
+    // The same controls keep their existing behavior for HTTP tasks.
+    let http_id = engine
+        .add_task(make_spec(
+            "http://127.0.0.1:9/http-control.bin".to_string(),
+            "http-control.bin",
+            1,
+        ))
+        .expect("add queued HTTP task");
+    engine
+        .pause(&http_id)
+        .await
+        .expect("pause a queued HTTP task");
+    assert_eq!(
+        engine.store().task(&http_id).unwrap().unwrap().state,
+        TaskState::Paused
+    );
+    engine
+        .resume(&http_id)
+        .await
+        .expect("resume a paused HTTP task");
+    assert_eq!(
+        engine.store().task(&http_id).unwrap().unwrap().state,
+        TaskState::Queued
     );
 }

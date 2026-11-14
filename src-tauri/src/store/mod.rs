@@ -7,4 +7,6 @@ mod tasks;
 pub mod types;
 
 pub use db::Database;
-pub use types::{SchemaMetadata, Segment, SegmentInput, SegmentProgressInput, Task};
+pub use types::{
+    SchemaMetadata, Segment, SegmentInput, SegmentProgressInput, Task, TaskKind, VideoTaskInput,
+};

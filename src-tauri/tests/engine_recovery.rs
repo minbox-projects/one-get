@@ -17,7 +17,8 @@ use oneget_lib::engine::scheduler::{Engine, EngineOptions};
 use oneget_lib::engine::state::{SegmentState, TaskState};
 use oneget_lib::platform::files::CapDir;
 use oneget_lib::store::types::{SegmentInput, SegmentProgressInput};
-use oneget_lib::store::Database;
+use oneget_lib::store::{Database, TaskKind, VideoTaskInput};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use support::fixtures::pattern_bytes;
 use support::range_server::{FixtureConfig, RangeMode, RangeServer, ServedRange};
@@ -88,6 +89,19 @@ fn make_engine(store: Database, dest: &Path) -> Engine {
         dest.to_path_buf(),
         EngineOptions { max_concurrent: 4 },
     )
+}
+
+fn video_input(url: &str, filename: &str) -> VideoTaskInput {
+    VideoTaskInput {
+        url: url.to_string(),
+        filename: filename.to_string(),
+        destination: None,
+        format_selector: "bestvideo+bestaudio".to_string(),
+        cookies_file: None,
+        proxy_url: None,
+        metadata: json!({}),
+        full_url_persisted: false,
+    }
 }
 
 async fn wait_for_terminal_async(store: &Database, id: &str, deadline: Duration) -> TaskState {
@@ -1193,4 +1207,162 @@ async fn recovery_uses_the_persisted_per_task_destination_instead_of_the_engine_
         !task_dest.path().join(&part_name).exists(),
         "the part file must be removed after completion"
     );
+}
+
+#[tokio::test]
+async fn http_recovery_leaves_video_tasks_untouched() {
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let store = open_store(&store_dir);
+
+    let queued = store
+        .create_video_task(&video_input(
+            "https://example.invalid/video/recovery-queued",
+            "video-queued.mp4",
+        ))
+        .expect("create queued video task");
+    let connecting = store
+        .create_video_task(&video_input(
+            "https://example.invalid/video/recovery-connecting",
+            "video-connecting.mp4",
+        ))
+        .expect("create connecting video task");
+    store
+        .transition_task(&connecting, TaskState::Queued, TaskState::Connecting)
+        .expect("setup connecting video task");
+    let downloading = store
+        .create_video_task(&video_input(
+            "https://example.invalid/video/recovery-downloading",
+            "video-downloading.mp4",
+        ))
+        .expect("create downloading video task");
+    store
+        .transition_task(&downloading, TaskState::Queued, TaskState::Connecting)
+        .expect("setup downloading video task connecting");
+    store
+        .transition_task(&downloading, TaskState::Connecting, TaskState::Downloading)
+        .expect("setup downloading video task");
+    let finalizing = store
+        .create_video_task(&video_input(
+            "https://example.invalid/video/recovery-finalizing",
+            "video-finalizing.mp4",
+        ))
+        .expect("create finalizing video task");
+    store
+        .transition_task(&finalizing, TaskState::Queued, TaskState::Connecting)
+        .expect("setup finalizing video task connecting");
+    store
+        .transition_task(&finalizing, TaskState::Connecting, TaskState::Downloading)
+        .expect("setup finalizing video task downloading");
+    store
+        .transition_task(&finalizing, TaskState::Downloading, TaskState::Finalizing)
+        .expect("setup finalizing video task");
+    let paused = store
+        .create_video_task(&video_input(
+            "https://example.invalid/video/recovery-paused",
+            "video-paused.mp4",
+        ))
+        .expect("create paused video task");
+    store
+        .transition_task(&paused, TaskState::Queued, TaskState::Paused)
+        .expect("setup paused video task");
+
+    let video_states = [
+        (queued.clone(), TaskState::Queued),
+        (connecting.clone(), TaskState::Connecting),
+        (downloading.clone(), TaskState::Downloading),
+        (finalizing.clone(), TaskState::Finalizing),
+        (paused.clone(), TaskState::Paused),
+    ];
+    let video_before: Vec<(String, TaskState, i64)> = video_states
+        .iter()
+        .map(|(id, state)| {
+            let task = store.task(id).unwrap().unwrap();
+            assert_eq!(task.kind, TaskKind::Video);
+            (task.id.clone(), *state, task.updated_at_ms)
+        })
+        .collect();
+
+    // An interrupted HTTP task with its part is still requeued, and one without
+    // a part still fails with PART_MISSING, exactly as before the change.
+    let http_requeued = store
+        .create_task("http://127.0.0.1:9/http-requeue.bin", "http-requeue.bin")
+        .expect("create interrupted HTTP task with part");
+    let http_requeued_part = PartFile::part_name("http-requeue.bin");
+    std::fs::write(dest.path().join(&http_requeued_part), b"partial").expect("write HTTP part");
+    store
+        .record_part_path(&http_requeued, &http_requeued_part)
+        .expect("record HTTP part path");
+    store
+        .transition_task(&http_requeued, TaskState::Queued, TaskState::Connecting)
+        .expect("setup interrupted HTTP task");
+    let http_failed = store
+        .create_task("http://127.0.0.1:9/http-fail.bin", "http-fail.bin")
+        .expect("create interrupted HTTP task without part");
+    store
+        .transition_task(&http_failed, TaskState::Queued, TaskState::Connecting)
+        .expect("setup failed HTTP task");
+
+    let engine = make_engine(open_store_dir(store_dir.path()), dest.path());
+    let report = engine
+        .recover()
+        .expect("recover a database with mixed task kinds");
+
+    assert_eq!(
+        report.requeued, 1,
+        "only the interrupted HTTP task requeues"
+    );
+    assert_eq!(report.failed, 1, "only the part-missing HTTP task fails");
+    assert_eq!(report.finalized, 0, "video tasks must not be finalized");
+    assert_eq!(report.cancelled, 0, "video tasks must not be cancelled");
+    assert_eq!(
+        report.paused, 0,
+        "video paused tasks must not contribute to the recovery report"
+    );
+
+    let requeued_task = engine.store().task(&http_requeued).unwrap().unwrap();
+    assert_eq!(requeued_task.kind, TaskKind::Http);
+    assert_eq!(
+        requeued_task.state,
+        TaskState::Queued,
+        "an interrupted HTTP task with a part must still requeue"
+    );
+    let failed_task = engine.store().task(&http_failed).unwrap().unwrap();
+    assert_eq!(failed_task.kind, TaskKind::Http);
+    assert_eq!(failed_task.state, TaskState::Failed);
+    assert_eq!(failed_task.error_code.as_deref(), Some("PART_MISSING"));
+
+    for (id, expected_state, before_updated) in video_before {
+        let task = engine.store().task(&id).unwrap().unwrap();
+        assert_eq!(task.kind, TaskKind::Video);
+        assert_eq!(
+            task.state, expected_state,
+            "recovery must leave video task {id} in its persisted state"
+        );
+        assert_eq!(
+            task.updated_at_ms, before_updated,
+            "recovery must not touch video task {id}"
+        );
+        assert_eq!(
+            task.error_code, None,
+            "recovery must not record a video error for task {id}"
+        );
+        assert!(
+            engine.store().segments_for_task(&id).unwrap().is_empty(),
+            "recovery must not create segment rows for video task {id}"
+        );
+    }
+
+    for filename in [
+        "video-queued.mp4",
+        "video-connecting.mp4",
+        "video-downloading.mp4",
+        "video-finalizing.mp4",
+        "video-paused.mp4",
+    ] {
+        assert!(
+            !dest.path().join(PartFile::part_name(filename)).exists(),
+            "recovery must not create a part file for {filename}"
+        );
+    }
 }
