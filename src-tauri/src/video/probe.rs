@@ -15,6 +15,8 @@ use super::error::VideoError;
 use super::metadata::{VideoFormat, VideoMetadata};
 use super::process::{run_probe, ProcessSpec, TimeoutPolicy};
 
+/// Maximum accepted source URL length in bytes.
+const MAX_URL_BYTES: usize = 8 * 1024;
 const URL_UNSUPPORTED: &str = "VIDEO_URL_UNSUPPORTED";
 const PROBE_INVALID: &str = "VIDEO_PROBE_INVALID";
 const LIVE_UNSUPPORTED: &str = "VIDEO_LIVE_UNSUPPORTED";
@@ -48,17 +50,31 @@ pub async fn probe_video(url: &str, options: &ProbeOptions) -> Result<VideoMetad
         probe: options.timeout,
         ..TimeoutPolicy::default()
     };
-    let output = run_probe(&spec, &policy).await?;
+    let output = match run_probe(&spec, &policy).await {
+        Ok(output) => output,
+        Err(error) if error.is_missing_js_runtime() => {
+            return Err(VideoError::js_runtime_missing());
+        }
+        Err(error) => return Err(error),
+    };
     parse_metadata(&output.stdout)
 }
 
 fn validate_url(url: &str) -> Result<Url, VideoError> {
-    let parsed = Url::parse(url).map_err(|_| url_unsupported())?;
-    if matches!(parsed.scheme(), "http" | "https") {
-        Ok(parsed)
-    } else {
-        Err(url_unsupported())
+    if url.is_empty() || url.len() > MAX_URL_BYTES || url.chars().any(char::is_control) {
+        return Err(url_unsupported());
     }
+    let parsed = Url::parse(url).map_err(|_| url_unsupported())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(url_unsupported());
+    }
+    if parsed.host_str().map(str::is_empty).unwrap_or(true) {
+        return Err(url_unsupported());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(url_unsupported());
+    }
+    Ok(parsed)
 }
 
 fn probe_args(url: &str, options: &ProbeOptions) -> Vec<String> {

@@ -26,9 +26,6 @@ use crate::kernel::store::ComponentStore;
 use crate::kernel::KernelError;
 use crate::platform::files::CapDir;
 
-/// Local fixture catalogs and artifacts may use loopback HTTP; shipping
-/// catalogs still require HTTPS.
-const ALLOW_LOOPBACK_HTTP: bool = true;
 /// Upper bound for one manifest refresh.
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -47,6 +44,7 @@ pub struct KernelRuntime {
     trust: Option<String>,
     manifest_url: Option<String>,
     target: Target,
+    allow_loopback_http: bool,
     operations: Arc<OperationRegistry>,
     busy: Arc<Mutex<HashSet<String>>>,
     last_errors: Arc<Mutex<HashMap<String, KernelError>>>,
@@ -62,6 +60,7 @@ impl KernelRuntime {
         trust: Option<String>,
         manifest_url: Option<String>,
         target: Target,
+        allow_loopback_http: bool,
     ) -> Result<Arc<Self>, KernelError> {
         let runtime = Arc::new(Self {
             components_db,
@@ -70,15 +69,18 @@ impl KernelRuntime {
             trust: trust.filter(|key| !key.is_empty()),
             manifest_url,
             target,
+            allow_loopback_http,
             operations: Arc::new(OperationRegistry::new()),
             busy: Arc::new(Mutex::new(HashSet::new())),
             last_errors: Arc::new(Mutex::new(HashMap::new())),
             catalog: Arc::new(Mutex::new(None)),
         });
         if let Some(key) = runtime.trust.as_deref() {
-            if let Ok(catalog) =
-                CatalogCache::new(&runtime.cache_dir).load(Some(key), target, ALLOW_LOOPBACK_HTTP)
-            {
+            if let Ok(catalog) = CatalogCache::new(&runtime.cache_dir).load(
+                Some(key),
+                target,
+                runtime.allow_loopback_http,
+            ) {
                 *runtime.lock_catalog() = Some(catalog);
             }
         }
@@ -97,12 +99,16 @@ impl KernelRuntime {
             .enable_all()
             .build()
             .map_err(|_| manifest_unavailable())?;
-        let bytes = runtime.block_on(fetch_catalog(&url, ALLOW_LOOPBACK_HTTP, CATALOG_TIMEOUT))?;
+        let bytes = runtime.block_on(fetch_catalog(
+            &url,
+            self.allow_loopback_http,
+            CATALOG_TIMEOUT,
+        ))?;
         let catalog = CatalogCache::new(&self.cache_dir).store_verified(
             &bytes,
             Some(trust),
             self.target,
-            ALLOW_LOOPBACK_HTTP,
+            self.allow_loopback_http,
         )?;
         *self.lock_catalog() = Some(catalog);
         Ok(())
@@ -213,6 +219,7 @@ impl KernelRuntime {
         let kernel_root = self.kernel_root.clone();
         let trust = self.trust.clone();
         let target = self.target;
+        let allow_loopback_http = self.allow_loopback_http;
         let operations = Arc::clone(&self.operations);
         let busy = Arc::clone(&self.busy);
         let last_errors = Arc::clone(&self.last_errors);
@@ -226,6 +233,7 @@ impl KernelRuntime {
                     kernel_root,
                     trust,
                     target,
+                    allow_loopback_http,
                     operations,
                     catalog,
                     kind,
@@ -276,6 +284,7 @@ struct OperationJob {
     kernel_root: PathBuf,
     trust: Option<String>,
     target: Target,
+    allow_loopback_http: bool,
     operations: Arc<OperationRegistry>,
     catalog: Option<ComponentCatalog>,
     kind: OperationKind,
@@ -297,6 +306,7 @@ fn run_operation(job: OperationJob) -> Result<(), KernelError> {
         kernel_root,
         trust,
         target,
+        allow_loopback_http,
         operations,
         catalog,
         kind,
@@ -305,7 +315,7 @@ fn run_operation(job: OperationJob) -> Result<(), KernelError> {
     runtime.block_on(async move {
         let store = ComponentStore::open(&components_db)?;
         let root = CapDir::open(&kernel_root).map_err(platform_error)?;
-        let mut installer = Installer::new(store, root, target, trust, ALLOW_LOOPBACK_HTTP);
+        let mut installer = Installer::new(store, root, target, trust, allow_loopback_http);
         installer.set_operations(operations);
         match kind {
             OperationKind::Install => {
@@ -421,12 +431,12 @@ impl From<ComponentStatus> for ComponentStatusView {
 fn state_name(state: ComponentState) -> &'static str {
     match state {
         ComponentState::Installed => "installed",
-        ComponentState::NotInstalled => "notInstalled",
-        ComponentState::UpdateAvailable => "updateAvailable",
-        ComponentState::RollbackAvailable => "rollbackAvailable",
+        ComponentState::NotInstalled => "not_installed",
+        ComponentState::UpdateAvailable => "update_available",
+        ComponentState::RollbackAvailable => "rollback_available",
         ComponentState::Tampered => "tampered",
         ComponentState::Unsupported => "unsupported",
-        ComponentState::ManifestUnavailable => "manifestUnavailable",
+        ComponentState::ManifestUnavailable => "manifest_unavailable",
     }
 }
 

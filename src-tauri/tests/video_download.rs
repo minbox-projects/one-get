@@ -675,3 +675,34 @@ fn shutdown_pauses_active_within_bound() {
         "shutdown must terminate the fixture before it writes output"
     );
 }
+
+#[test]
+fn download_js_runtime_failure_is_typed() {
+    let harness = Harness::new();
+    harness.install_download("yt-dlp-js-runtime-error");
+    let service = VideoService::start(harness.config(harness.store(), TimeoutPolicy::default()))
+        .expect("video service starts");
+    let id = service
+        .add(request(&harness, "js-runtime.mp4", true))
+        .expect("js-runtime-error task adds");
+    let reader = harness.store();
+    let failed = wait_for_state(&reader, &id, TaskState::Failed);
+    assert_eq!(
+        failed.error_code.as_deref(),
+        Some("VIDEO_JS_RUNTIME_MISSING"),
+        "a JavaScript-runtime failure must map to the typed code"
+    );
+    assert!(
+        harness
+            .destination
+            .join(format!(".oneget-video-{id}"))
+            .exists(),
+        "the task temporary directory must be preserved"
+    );
+    assert!(
+        output_files(&harness.destination).is_empty(),
+        "a JavaScript-runtime failure must create no final file"
+    );
+
+    service.shutdown().expect("shutdown succeeds");
+}

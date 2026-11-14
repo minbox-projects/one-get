@@ -102,8 +102,12 @@ pub fn video_probe(
     state: &AppState,
     request: VideoProbeRequest,
 ) -> Result<VideoProbeResult, AppError> {
+    let url = validate_url(&request.url).map_err(AppError::from)?;
+    let cookies_file = validate_cookies_file(request.cookies_file)?;
+    let proxy_url = validate_video_proxy(request.proxy_url)?;
+
     let result = video(state)?
-        .probe(&request.url, request.cookies_file, request.proxy_url)
+        .probe(&url, cookies_file, proxy_url)
         .map_err(video_error)?;
     Ok(VideoProbeResult {
         title: result.metadata.title,
@@ -137,23 +141,8 @@ pub fn video_start(state: &AppState, request: VideoStartRequest) -> Result<Strin
         .unwrap_or_else(|| state.paths().downloads.clone());
     let destination = resolve_destination(&destination)?;
 
-    let cookies_file = match &request.cookies_file {
-        Some(path) => {
-            if !Path::new(path).is_file() {
-                return Err(AppError::new(
-                    "INVALID_COOKIES_FILE",
-                    "the cookies file does not exist or is not a file",
-                ));
-            }
-            Some(path.clone())
-        }
-        None => None,
-    };
-
-    let proxy_url = match request.proxy_url.as_deref() {
-        Some(proxy) => Some(validate_proxy_url(proxy).map_err(AppError::from)?),
-        None => None,
-    };
+    let cookies_file = validate_cookies_file(request.cookies_file)?;
+    let proxy_url = validate_video_proxy(request.proxy_url)?;
 
     let service = video(state)?;
     service
@@ -170,6 +159,29 @@ pub fn video_start(state: &AppState, request: VideoStartRequest) -> Result<Strin
             full_url_persisted: false,
         })
         .map_err(video_error)
+}
+
+fn validate_cookies_file(path: Option<PathBuf>) -> Result<Option<PathBuf>, AppError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if !path.is_file() {
+        return Err(AppError::new(
+            "INVALID_COOKIES_FILE",
+            "the cookies file does not exist or is not a file",
+        ));
+    }
+    // Opening checks readability without reading the cookie contents.
+    std::fs::File::open(&path)
+        .map_err(|_| AppError::new("INVALID_COOKIES_FILE", "the cookies file cannot be read"))?;
+    Ok(Some(path))
+}
+
+fn validate_video_proxy(proxy: Option<String>) -> Result<Option<String>, AppError> {
+    match proxy {
+        Some(proxy) => validate_proxy_url(&proxy).map(Some).map_err(AppError::from),
+        None => Ok(None),
+    }
 }
 
 fn resolve_destination(requested: &Path) -> Result<PathBuf, AppError> {

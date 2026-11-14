@@ -187,7 +187,8 @@ fn video_summary(record: Option<&Value>) -> Option<VideoSummary> {
     let metadata = record.get("metadata");
     Some(VideoSummary {
         title: read_string(metadata, record, "title"),
-        duration_secs: read_f64(metadata, record, "duration"),
+        duration_secs: read_f64(metadata, record, "durationSecs")
+            .or_else(|| read_f64(metadata, record, "duration")),
         uploader: read_string(metadata, record, "uploader"),
         quality: read_string(metadata, record, "quality").or_else(|| {
             record

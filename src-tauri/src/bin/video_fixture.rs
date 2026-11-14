@@ -17,8 +17,8 @@ const CHUNK: usize = 64 * 1024;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(name) = executable_name() {
-        if name.starts_with("yt-dlp") {
-            download(&name, &args);
+        if name.starts_with("yt-dlp") || name.contains("js-runtime-error") {
+            fake_yt_dlp(&name, &args);
             return;
         }
     }
@@ -173,6 +173,47 @@ fn executable_name() -> Option<String> {
     Some(name.strip_suffix(".exe").unwrap_or(&name).to_string())
 }
 
+/// Serve as a fake yt-dlp. A probe invocation is recognized by its
+/// `--dump-single-json` flag and otherwise the executable name selects the
+/// download scenario.
+fn fake_yt_dlp(behavior: &str, args: &[String]) {
+    if args.iter().any(|argument| argument == "--dump-single-json") {
+        log_probe_args(args);
+        if behavior.contains("js-runtime-error") {
+            report_missing_js_runtime();
+        }
+        probe_json();
+        return;
+    }
+    download(behavior, args);
+}
+
+/// Append one JSON array line of the probe argv next to the executable.
+fn log_probe_args(args: &[String]) {
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let Some(directory) = executable.parent() else {
+        return;
+    };
+    let Ok(mut line) = serde_json::to_string(args) else {
+        return;
+    };
+    line.push('\n');
+    let path = directory.join(".probe-args.jsonl");
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(line.as_bytes());
+        let _ = file.flush();
+    }
+}
+
+fn report_missing_js_runtime() -> ! {
+    eprintln!(
+        "ERROR: No supported JavaScript runtime could be found. Only deno is enabled by default."
+    );
+    std::process::exit(1);
+}
+
 /// Serve as a fake yt-dlp. The executable name selects the scenario; the
 /// temporary directory comes from the service's `-o <temp>/video.%(ext)s`.
 fn download(behavior: &str, args: &[String]) {
@@ -193,6 +234,10 @@ fn download(behavior: &str, args: &[String]) {
         }
     };
     log_argv(&temp, args);
+
+    if behavior.contains("js-runtime-error") {
+        report_missing_js_runtime();
+    }
 
     let audio_only = args.iter().any(|argument| argument == "--extract-audio");
     let extension = if audio_only { "m4a" } else { "mp4" };

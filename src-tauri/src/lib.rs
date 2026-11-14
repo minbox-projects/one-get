@@ -178,6 +178,7 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         configured_public_key().map(str::to_string),
         manifest_url_override(),
         Target::current(),
+        false,
     )
     .ok();
 

@@ -14,10 +14,11 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signer, SigningKey};
-use oneget_lib::commands::kernel::KernelRuntime;
+use oneget_lib::commands::kernel::{ComponentStatusView, KernelRuntime};
 use oneget_lib::kernel::canonicalize;
 use oneget_lib::kernel::catalog::{FileRole, Target, CATALOG_SCHEMA_VERSION};
 use oneget_lib::kernel::status::{ComponentState, ComponentStatus};
+use oneget_lib::kernel::store::{ComponentInstall, ComponentStore};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use support::kernel_server::{build_stored_zip, KernelServer, KernelServerConfig, ZipEntry};
@@ -319,6 +320,7 @@ impl RuntimeEnv {
             trust,
             manifest_url,
             Target::current(),
+            true,
         )
         .expect("kernel runtime constructs")
     }
@@ -581,4 +583,115 @@ fn kernel_command_error_surfaces_last_operation_error() {
         !env.kernel_root.join("yt-dlp/2-2026.11.14").exists(),
         "a failed update must leave no activated version directory"
     );
+}
+
+#[test]
+fn kernel_status_serializes_snake_case_states() {
+    fn wire_state(status: &ComponentStatus) -> String {
+        let view = ComponentStatusView::from(status.clone());
+        serde_json::to_value(&view).expect("status view serializes")["state"]
+            .as_str()
+            .expect("the state serializes as a string")
+            .to_string()
+    }
+
+    let env = RuntimeEnv::new();
+
+    // No catalog and nothing installed reports the manifest-unavailable state.
+    let runtime = env.runtime(None, None);
+    let statuses = runtime.statuses().expect("statuses without a catalog");
+    for status in &statuses {
+        assert_eq!(
+            wire_state(status),
+            "manifest_unavailable",
+            "{}",
+            status.component
+        );
+    }
+
+    // A verified catalog with no active installations reports not_installed.
+    let artifacts = artifact_server(None);
+    let catalog = catalog_v1(&artifacts, &env.signing_key);
+    let catalog_server = KernelServer::start(KernelServerConfig::new(catalog));
+    let runtime = env.runtime(
+        Some(catalog_server.catalog_url()),
+        Some(env.public_key.clone()),
+    );
+    runtime.refresh().expect("sequence one refreshes");
+    let statuses = runtime.statuses().expect("statuses after refresh");
+    for status in &statuses {
+        assert_eq!(wire_state(status), "not_installed", "{}", status.component);
+    }
+
+    // Verified active installations report the installed state.
+    for component in ["yt-dlp", "ffmpeg", "deno"] {
+        runtime.install(component).expect("install starts");
+    }
+    for component in ["yt-dlp", "ffmpeg", "deno"] {
+        runtime
+            .wait_until_idle(component, WAIT_TIMEOUT)
+            .unwrap_or_else(|error| panic!("install {component}: {error}"));
+    }
+    let statuses = runtime.statuses().expect("statuses after install");
+    for status in &statuses {
+        assert_eq!(wire_state(status), "installed", "{}", status.component);
+    }
+
+    // A newer catalog reports update_available for the installed component.
+    let catalog_v2 = catalog_v2(&artifacts, &env.signing_key);
+    let catalog_server_v2 = KernelServer::start(KernelServerConfig::new(catalog_v2));
+    let runtime_v2 = env.runtime(
+        Some(catalog_server_v2.catalog_url()),
+        Some(env.public_key.clone()),
+    );
+    runtime_v2.refresh().expect("sequence two refreshes");
+    let statuses = runtime_v2.statuses().expect("statuses after sequence two");
+    assert_eq!(
+        wire_state(find_status(&statuses, "yt-dlp")),
+        "update_available"
+    );
+    assert_eq!(wire_state(find_status(&statuses, "ffmpeg")), "installed");
+
+    // Updating to the newer sequence exposes the earlier one for rollback.
+    runtime_v2.update("yt-dlp").expect("update starts");
+    runtime_v2
+        .wait_until_idle("yt-dlp", WAIT_TIMEOUT)
+        .expect("update completes");
+    let statuses = runtime_v2.statuses().expect("statuses after update");
+    assert_eq!(
+        wire_state(find_status(&statuses, "yt-dlp")),
+        "rollback_available"
+    );
+
+    // A corrupt active installation reports the tampered state.
+    let tampered_file = env.kernel_root.join("yt-dlp/2-2026.11.14/yt-dlp");
+    std::fs::write(&tampered_file, b"tampered-bytes").expect("installed file corrupts");
+    let statuses = runtime_v2.statuses().expect("statuses after tamper");
+    assert_eq!(wire_state(find_status(&statuses, "yt-dlp")), "tampered");
+
+    // An install recorded for another target reports the unsupported state.
+    let foreign_env = RuntimeEnv::new();
+    let foreign_target = if Target::current() == Target::WindowsX64 {
+        "macos-arm64"
+    } else {
+        "windows-x64"
+    };
+    let foreign = ComponentInstall {
+        component: "yt-dlp".to_string(),
+        version: "2026.11.13".to_string(),
+        sequence: 1,
+        target: foreign_target.to_string(),
+        version_dir: "yt-dlp/1-2026.11.13".to_string(),
+        files: Vec::new(),
+        installed_at_ms: 1_760_000_000_000,
+    };
+    ComponentStore::open(&foreign_env.components_db)
+        .expect("component store opens")
+        .record_active(&foreign)
+        .expect("foreign install records");
+    let foreign_runtime = foreign_env.runtime(None, None);
+    let statuses = foreign_runtime
+        .statuses()
+        .expect("statuses for the foreign install");
+    assert_eq!(wire_state(find_status(&statuses, "yt-dlp")), "unsupported");
 }

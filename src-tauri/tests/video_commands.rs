@@ -176,6 +176,7 @@ impl Harness {
             None,
             None,
             Target::current(),
+            true,
         )
         .expect("kernel runtime constructs");
 
@@ -268,6 +269,46 @@ impl Harness {
                 installed_file("ffprobe", file_name(&ffprobe_path), &ffprobe_path),
             ],
         );
+    }
+
+    /// Install a direct fixture copy as the probe fake, with an optional deno.
+    fn install_probe_copy(&self, yt_base: &str, with_deno: bool) -> PathBuf {
+        let yt_dir = self.kernel_root.join("yt-dlp/1-probe");
+        let ffmpeg_dir = self.kernel_root.join("ffmpeg/2-probe");
+        fs::create_dir_all(&yt_dir).expect("yt-dlp version dir creates");
+        fs::create_dir_all(&ffmpeg_dir).expect("ffmpeg version dir creates");
+
+        let yt_path = copy_fixture(&self.fixture, &yt_dir, yt_base);
+        let ffmpeg_path = copy_fixture(&self.fixture, &ffmpeg_dir, "ffmpeg");
+        let ffprobe_path = copy_fixture(&self.fixture, &ffmpeg_dir, "ffprobe");
+
+        self.record(
+            "yt-dlp",
+            "probe",
+            1,
+            vec![installed_file("yt-dlp", file_name(&yt_path), &yt_path)],
+        );
+        self.record(
+            "ffmpeg",
+            "probe",
+            2,
+            vec![
+                installed_file("ffmpeg", file_name(&ffmpeg_path), &ffmpeg_path),
+                installed_file("ffprobe", file_name(&ffprobe_path), &ffprobe_path),
+            ],
+        );
+        if with_deno {
+            let deno_dir = self.kernel_root.join("deno/3-probe");
+            fs::create_dir_all(&deno_dir).expect("deno version dir creates");
+            let deno_path = copy_fixture(&self.fixture, &deno_dir, "deno");
+            self.record(
+                "deno",
+                "probe",
+                3,
+                vec![installed_file("deno", file_name(&deno_path), &deno_path)],
+            );
+        }
+        yt_path
     }
 
     fn record(&self, component: &str, version: &str, sequence: u64, files: Vec<InstalledFile>) {
@@ -371,7 +412,7 @@ fn start_request(harness: &Harness, filename: &str) -> VideoStartRequest {
         audio_only: false,
         metadata: json!({
             "title": "Fixture Video",
-            "duration": 12.5,
+            "durationSecs": 12.5,
             "uploader": "Fixture",
         }),
         cookies_file: None,
@@ -389,7 +430,7 @@ fn create_persisted_video(store: &Database, harness: &Harness, quality: &str) ->
         proxy_url: None,
         metadata: json!({
             "title": "Fixture Video",
-            "duration": 123.5,
+            "durationSecs": 123.5,
             "uploader": "Fixture",
             "quality": quality,
         }),
@@ -611,4 +652,150 @@ fn video_probe_returns_quality_choices() {
         "a failed probe creates no task"
     );
     missing.shutdown();
+}
+
+#[test]
+fn video_probe_rejects_invalid_url_proxy_and_cookies() {
+    let harness = Harness::new();
+    let store = harness.store();
+
+    let non_http_url = video_probe(
+        &harness.state,
+        VideoProbeRequest {
+            url: "ftp://fixture.invalid/watch?v=abc".to_string(),
+            cookies_file: None,
+            proxy_url: None,
+        },
+    )
+    .expect_err("a non-http URL must be rejected");
+    assert_eq!(non_http_url.code, "INVALID_URL");
+
+    let credentialed = video_probe(
+        &harness.state,
+        VideoProbeRequest {
+            url: "https://user:pass@fixture.invalid/watch?v=abc".to_string(),
+            cookies_file: None,
+            proxy_url: None,
+        },
+    )
+    .expect_err("a credentialed URL must be rejected");
+    assert_eq!(credentialed.code, "CREDENTIALED_URL");
+
+    let userinfo_proxy = video_probe(
+        &harness.state,
+        VideoProbeRequest {
+            url: "https://fixture.invalid/watch?v=abc".to_string(),
+            cookies_file: None,
+            proxy_url: Some("http://user:pass@127.0.0.1:8080".to_string()),
+        },
+    )
+    .expect_err("a proxy with userinfo must be rejected");
+    assert_eq!(userinfo_proxy.code, "INVALID_PROXY_URL");
+
+    let non_http_proxy = video_probe(
+        &harness.state,
+        VideoProbeRequest {
+            url: "https://fixture.invalid/watch?v=abc".to_string(),
+            cookies_file: None,
+            proxy_url: Some("socks5://127.0.0.1:1080".to_string()),
+        },
+    )
+    .expect_err("a non-http proxy must be rejected");
+    assert_eq!(non_http_proxy.code, "INVALID_PROXY_URL");
+
+    let invalid_proxy_port = video_probe(
+        &harness.state,
+        VideoProbeRequest {
+            url: "https://fixture.invalid/watch?v=abc".to_string(),
+            cookies_file: None,
+            proxy_url: Some("http://127.0.0.1:70000".to_string()),
+        },
+    )
+    .expect_err("a proxy with an invalid host or port must be rejected");
+    assert_eq!(invalid_proxy_port.code, "INVALID_PROXY_URL");
+
+    let missing_cookies = video_probe(
+        &harness.state,
+        VideoProbeRequest {
+            url: "https://fixture.invalid/watch?v=abc".to_string(),
+            cookies_file: Some(harness.dir.path().join("missing-cookies.txt")),
+            proxy_url: None,
+        },
+    )
+    .expect_err("a missing cookies file must be rejected");
+    assert_eq!(missing_cookies.code, "INVALID_COOKIES_FILE");
+
+    assert!(
+        store.list_tasks().expect("tasks list").is_empty(),
+        "a rejected probe must create no task"
+    );
+
+    harness.shutdown();
+}
+
+#[test]
+fn video_probe_uses_js_runtimes_flag_and_maps_missing_runtime() {
+    // A yt-dlp that reports a JavaScript-runtime failure must surface the
+    // typed VIDEO_JS_RUNTIME_MISSING code.
+    let error_case = Harness::new();
+    error_case.install_probe_copy("yt-dlp-js-runtime-error", true);
+    let error = video_probe(
+        &error_case.state,
+        VideoProbeRequest {
+            url: "https://fixture.invalid/watch?v=abc".to_string(),
+            cookies_file: None,
+            proxy_url: None,
+        },
+    )
+    .expect_err("a JavaScript-runtime failure must fail the probe");
+    assert_eq!(error.code, "VIDEO_JS_RUNTIME_MISSING");
+    assert!(
+        error_case
+            .store()
+            .list_tasks()
+            .expect("tasks list")
+            .is_empty(),
+        "a failed probe must create no task"
+    );
+    error_case.shutdown();
+
+    // The probe argv must select the Deno runtime through the plural flag.
+    let harness = Harness::new();
+    let yt_path = harness.install_probe_copy("yt-dlp", true);
+    let result = video_probe(
+        &harness.state,
+        VideoProbeRequest {
+            url: "https://fixture.invalid/watch?v=abc".to_string(),
+            cookies_file: None,
+            proxy_url: None,
+        },
+    )
+    .expect("the probe succeeds");
+    assert_eq!(result.title, "Fixture Video");
+
+    let deno_arg = format!(
+        "deno:{}",
+        fs::canonicalize(&harness.kernel_root)
+            .expect("kernel root canonicalizes")
+            .join("deno/3-probe")
+            .join(fake_name("deno"))
+            .display()
+    );
+    let log_path = yt_path
+        .parent()
+        .expect("the fake tool has a parent directory")
+        .join(".probe-args.jsonl");
+    let text = fs::read_to_string(&log_path).expect("the probe args log exists");
+    let found = text.lines().any(|line| {
+        let argv: Vec<String> =
+            serde_json::from_str(line).expect("the probe args line is a JSON string array");
+        argv.windows(2)
+            .any(|pair| pair[0] == "--js-runtimes" && pair[1] == deno_arg)
+    });
+    assert!(
+        found,
+        "the probe argv must pass --js-runtimes {deno_arg}, log: {text}"
+    );
+
+    harness.shutdown();
 }

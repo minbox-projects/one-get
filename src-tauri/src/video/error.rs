@@ -49,6 +49,25 @@ impl VideoError {
         )
     }
 
+    /// The downloader reported that no supported JavaScript runtime is
+    /// available.
+    pub fn js_runtime_missing() -> Self {
+        Self::new(
+            "VIDEO_JS_RUNTIME_MISSING",
+            "a supported JavaScript runtime is required but none is available",
+        )
+    }
+
+    /// Whether this is a generic process failure whose bounded output tail
+    /// reports that no supported JavaScript runtime is available.
+    pub fn is_missing_js_runtime(&self) -> bool {
+        self.code == "VIDEO_PROCESS_FAILED"
+            && self
+                .message
+                .to_ascii_lowercase()
+                .contains("javascript runtime")
+    }
+
     /// The process could not be started at all.
     pub fn spawn_failed() -> Self {
         Self::new(

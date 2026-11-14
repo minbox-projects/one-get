@@ -123,6 +123,14 @@ pub(crate) async fn run_video_task(
 
     let final_update = latest;
     match outcome {
+        // A downloader that cannot find a JavaScript runtime reports that in
+        // its output; surface it as its own typed failure.
+        Err(error) if error.is_missing_js_runtime() => fail_video_task(
+            &runtime,
+            &id,
+            "VIDEO_JS_RUNTIME_MISSING",
+            "a supported JavaScript runtime is required but none is available",
+        ),
         // Once the merge stage started, an unsuccessful process exit means the
         // streams could not be combined. The temporary directory is preserved
         // and no final file is created because finalization never runs.
@@ -271,7 +279,7 @@ fn download_args(
         args.push(proxy_url);
     }
     if let Some(deno) = &tools.deno {
-        args.push("--js-runtime".to_string());
+        args.push("--js-runtimes".to_string());
         args.push(format!("deno:{}", deno.display()));
     }
 
