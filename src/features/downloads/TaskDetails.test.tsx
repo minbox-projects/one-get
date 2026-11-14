@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi, type Mock } from "vitest";
 
 import { dictionaries, I18nProvider } from "../../i18n";
-import { formatDate } from "../../lib/format";
+import { formatDate, formatEta } from "../../lib/format";
 import type {
   DownloadSegment,
   DownloadState,
@@ -27,11 +27,66 @@ function task(
     downloadedBytes: 2048,
     totalBytes: 2048,
     connections: 8,
+    kind: "http",
     createdAtMs: Date.UTC(2026, 10, 13, 1, 2),
     updatedAtMs: Date.UTC(2026, 10, 13, 2, 3),
     completedAtMs: Date.UTC(2026, 10, 13, 2, 3),
     errorCode: "CHECKSUM_MISMATCH",
     errorMessage: "The file hash did not match the expected value.",
+    ...overrides,
+  };
+}
+
+const VIDEO_AND_COMPONENT_CODES = [
+  "VIDEO_TIMEOUT",
+  "VIDEO_OUTPUT_LIMIT",
+  "VIDEO_PROCESS_FAILED",
+  "VIDEO_OUTPUT_MISSING",
+  "VIDEO_MERGE_FAILED",
+  "VIDEO_INTERRUPTED",
+  "VIDEO_URL_UNAVAILABLE",
+  "VIDEO_LIVE_UNSUPPORTED",
+  "VIDEO_DRM_UNSUPPORTED",
+  "VIDEO_PROBE_INVALID",
+  "VIDEO_JS_RUNTIME_MISSING",
+  "COMPONENT_MISSING",
+  "COMPONENT_HASH",
+  "COMPONENT_UNSUPPORTED",
+  "COMPONENT_TRUST_UNCONFIGURED",
+  "COMPONENT_MANIFEST_UNAVAILABLE",
+] as const;
+
+const escapeRegExp = (value: string) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function durationFallbackRegExp(seconds: number): RegExp {
+  const formatted = formatEta(seconds, "en-US");
+  return new RegExp(
+    formatted === null ? `${seconds}` : `${escapeRegExp(formatted)}|${seconds}`,
+  );
+}
+
+function videoTaskOverrides(
+  overrides: Partial<DownloadSummary> = {},
+): Partial<DownloadSummary> {
+  return {
+    kind: "video",
+    url: "https://example.com/watch?v=1",
+    filename: "sample-video.mp4",
+    destination: "/tmp/downloads",
+    downloadedBytes: 1048576,
+    totalBytes: 524288000,
+    errorCode: null,
+    errorMessage: null,
+    completedAtMs: null,
+    video: {
+      title: "Sample Video Title",
+      durationSecs: 754,
+      uploader: "Sample Channel",
+      quality: "1080p",
+      stage: "merge",
+      audioOnly: false,
+    },
     ...overrides,
   };
 }
@@ -58,6 +113,7 @@ interface Handlers {
   onOpenFolder?: Mock<(task: DownloadSummary | string) => void>;
   onCopyUrl?: Mock<(task: DownloadSummary | string) => void>;
   onClose?: Mock<() => void>;
+  onOpenComponents?: Mock<() => void>;
   segmentsLoading?: boolean;
   segmentsError?: { code: string; message: string } | null;
   speed?: number | null;
@@ -75,6 +131,8 @@ function renderDetails(
   const onCopyUrl =
     handlers.onCopyUrl ?? vi.fn<(task: DownloadSummary | string) => void>();
   const onClose = handlers.onClose ?? vi.fn<() => void>();
+  const onOpenComponents =
+    handlers.onOpenComponents ?? vi.fn<() => void>();
   const view = render(
     <I18nProvider language="en-US">
       <TaskDetails
@@ -87,10 +145,11 @@ function renderDetails(
         onOpenFolder={onOpenFolder}
         onCopyUrl={onCopyUrl}
         onClose={onClose}
+        onOpenComponents={onOpenComponents}
       />
     </I18nProvider>,
   );
-  return { ...view, onOpenFile, onOpenFolder, onCopyUrl, onClose, current };
+  return { ...view, onOpenFile, onOpenFolder, onCopyUrl, onClose, onOpenComponents, current };
 }
 
 function expectTextOrValue(value: string): void {
@@ -320,4 +379,114 @@ describe("TaskDetails", () => {
       unmount();
     },
   );
+
+  it("video_details_show_metadata_quality_stage_and_no_segments", () => {
+    renderDetails(
+      task("downloading", videoTaskOverrides()),
+      { speed: null },
+      [],
+    );
+
+    expect(screen.getByText("Sample Video Title")).toBeInTheDocument();
+    expect(screen.getByText("Sample Channel")).toBeInTheDocument();
+    expect(document.body.textContent).toContain("1080p");
+    expect(document.body.textContent ?? "").toMatch(/merg/i);
+    expect(document.body.textContent ?? "").toMatch(/sample-video\.mp4/);
+    expect(document.body.textContent ?? "").toMatch(
+      durationFallbackRegExp(754),
+    );
+
+    expect(screen.queryByText(/^segment\s*\d+/i)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("video_details_localize_video_and_component_errors", async () => {
+    const user = userEvent.setup();
+
+    for (const language of ["en-US", "zh-CN"] as const) {
+      const dictionary = dictionaries[language];
+      for (const code of VIDEO_AND_COMPONENT_CODES) {
+        expect(
+          dictionary[`error.${code}`],
+          `${language} error.${code}`,
+        ).toBeTruthy();
+      }
+    }
+
+    for (const code of VIDEO_AND_COMPONENT_CODES) {
+      const raw = "Raw engine prose that must not be shown to the user.";
+      const { unmount } = render(
+        <I18nProvider language="en-US">
+          <TaskDetails
+            task={task(
+              "failed",
+              videoTaskOverrides({ errorCode: code, errorMessage: raw }),
+            )}
+            segments={[]}
+            speed={null}
+            onOpenFile={vi.fn()}
+            onOpenFolder={vi.fn()}
+            onCopyUrl={vi.fn()}
+            onClose={vi.fn()}
+            onOpenComponents={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+
+      expect(screen.getByText(en[`error.${code}`])).toBeInTheDocument();
+      expect(screen.queryByText(raw)).not.toBeInTheDocument();
+      unmount();
+    }
+
+    for (const code of [
+      "COMPONENT_MISSING",
+      "COMPONENT_HASH",
+      "COMPONENT_UNSUPPORTED",
+    ] as const) {
+      const onOpenComponents = vi.fn<() => void>();
+      const { unmount } = render(
+        <I18nProvider language="en-US">
+          <TaskDetails
+            task={task(
+              "failed",
+              videoTaskOverrides({
+                errorCode: code,
+                errorMessage: "backend detail",
+              }),
+            )}
+            segments={[]}
+            speed={null}
+            onOpenFile={vi.fn()}
+            onOpenFolder={vi.fn()}
+            onCopyUrl={vi.fn()}
+            onClose={vi.fn()}
+            onOpenComponents={onOpenComponents}
+          />
+        </I18nProvider>,
+      );
+
+      expect(screen.getByText(en[`error.${code}`])).toBeInTheDocument();
+      const installEntry = screen.getByRole("button", {
+        name: en["kernel.openComponents"],
+      });
+      await user.click(installEntry);
+      expect(onOpenComponents).toHaveBeenCalledTimes(1);
+      unmount();
+    }
+  });
+
+  it("http_details_remain_unchanged", () => {
+    renderDetails();
+
+    expect(screen.getByText("Segment 0")).toBeInTheDocument();
+    expect(screen.getByText(en["details.segments"])).toBeInTheDocument();
+    expect(screen.getByText("CHECKSUM_MISMATCH")).toBeInTheDocument();
+    expect(
+      screen.getByText(en["error.CHECKSUM_MISMATCH"]),
+    ).toBeInTheDocument();
+
+    expect(document.body.textContent).not.toMatch(/merg/i);
+    expect(document.body.textContent).not.toContain("Sample Video Title");
+    expect(document.body.textContent).not.toContain("Sample Channel");
+  });
 });

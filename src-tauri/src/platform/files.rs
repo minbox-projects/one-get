@@ -197,6 +197,35 @@ impl CapDir {
     pub fn replace_blocking(&self, source: &str, destination: &str) -> Result<(), PlatformError> {
         self.inner.replace(source, destination)
     }
+
+    /// Create one directory through the capability.
+    ///
+    /// The path is validated like every other operation, the parent must stay
+    /// inside the canonical root, and an existing symbolic link is refused.
+    pub fn create_dir(&self, path: &str) -> Result<(), PlatformError> {
+        self.inner.create_dir(path)
+    }
+
+    /// Create a directory and any missing ancestors through the capability.
+    ///
+    /// An existing directory is accepted; an existing symbolic link or
+    /// non-directory entry is refused.
+    pub fn create_dir_all(&self, path: &str) -> Result<(), PlatformError> {
+        self.inner.create_dir_all(path)
+    }
+
+    /// Remove an empty directory through the capability.
+    pub fn remove_dir(&self, path: &str) -> Result<(), PlatformError> {
+        self.inner.remove_dir(path)
+    }
+
+    /// Rename `source` to `destination` without replacing an existing entry.
+    ///
+    /// Both paths are validated, symbolic links are refused, and an existing
+    /// destination is never overwritten.
+    pub fn rename(&self, source: &str, destination: &str) -> Result<(), PlatformError> {
+        self.inner.rename(source, destination)
+    }
 }
 
 fn join_error(error: tokio::task::JoinError) -> PlatformError {
@@ -369,6 +398,136 @@ impl CapInner {
                 error,
             )),
         }
+    }
+
+    fn create_dir(&self, raw: &str) -> Result<(), PlatformError> {
+        let relative = self.validate(raw)?;
+        self.ensure_parent(&relative)?;
+        self.refuse_symlink_target(&relative, raw)?;
+        self.dir
+            .create_dir(relative.as_path())
+            .map_err(|error| map_io("create directory", raw, error))
+    }
+
+    fn create_dir_all(&self, raw: &str) -> Result<(), PlatformError> {
+        let relative = self.validate(raw)?;
+        self.ensure_parent(&relative)?;
+        self.refuse_symlink_target(&relative, raw)?;
+
+        let candidate = self.root.join(&relative);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.is_dir() => return Ok(()),
+            Ok(_) => {
+                return Err(PlatformError::invalid_path(format!(
+                    "path exists and is not a directory: {raw}"
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(PlatformError::io_error(
+                    format!("inspect create directory target {raw}"),
+                    error,
+                ));
+            }
+        }
+
+        self.dir
+            .create_dir_all(relative.as_path())
+            .map_err(|error| map_io("create directory", raw, error))?;
+
+        let created = std::fs::canonicalize(&candidate)
+            .map_err(|error| PlatformError::io_error("canonicalize created directory", error))?;
+        if !created.starts_with(&self.root) {
+            return Err(PlatformError::link_escape(format!(
+                "created directory escapes capability root: {raw}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn remove_dir(&self, raw: &str) -> Result<(), PlatformError> {
+        let relative = self.validate(raw)?;
+        self.resolve_parent(&relative, raw)?;
+        let candidate = self.root.join(&relative);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => Err(PlatformError::link_escape(
+                format!("refusing to remove symbolic link: {raw}"),
+            )),
+            Ok(metadata) if !metadata.is_dir() => Err(PlatformError::invalid_path(format!(
+                "remove directory target is not a directory: {raw}"
+            ))),
+            Ok(_) => self
+                .dir
+                .remove_dir(relative.as_path())
+                .map_err(|error| map_io("remove directory", raw, error)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(
+                PlatformError::not_found(format!("remove {raw}: path does not exist")),
+            ),
+            Err(error) => Err(PlatformError::io_error(
+                format!("inspect remove directory target {raw}"),
+                error,
+            )),
+        }
+    }
+
+    fn rename(&self, source: &str, destination: &str) -> Result<(), PlatformError> {
+        let source_rel = self.validate(source)?;
+        let destination_rel = self.validate(destination)?;
+
+        let source_path = self.root.join(&source_rel);
+        let source_metadata = std::fs::symlink_metadata(&source_path)
+            .map_err(|error| map_io("inspect rename source", source, error))?;
+        if source_metadata.file_type().is_symlink() {
+            return Err(PlatformError::link_escape(format!(
+                "refusing to rename symbolic link source: {source}"
+            )));
+        }
+        self.resolve_parent(&source_rel, source)?;
+
+        let destination_path = self.root.join(&destination_rel);
+        match std::fs::symlink_metadata(&destination_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(PlatformError::link_escape(format!(
+                    "refusing to rename over symbolic link destination: {destination}"
+                )));
+            }
+            Ok(_) => {
+                return Err(PlatformError::invalid_path(format!(
+                    "rename destination already exists: {destination}"
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(PlatformError::io_error(
+                    format!("inspect rename destination {destination}"),
+                    error,
+                ));
+            }
+        }
+
+        self.resolve_parent(&destination_rel, destination)?;
+        self.ensure_parent(&destination_rel)?;
+
+        if final_is_symlink(&destination_path) {
+            return Err(PlatformError::link_escape(format!(
+                "refusing to rename over symbolic link destination: {destination}"
+            )));
+        }
+
+        self.dir
+            .rename(source_rel.as_path(), &self.dir, destination_rel.as_path())
+            .map_err(|error| {
+                PlatformError::io_error(format!("rename {source} to {destination}"), error)
+            })
+    }
+
+    fn refuse_symlink_target(&self, relative: &Path, raw: &str) -> Result<(), PlatformError> {
+        if final_is_symlink(&self.root.join(relative)) {
+            return Err(PlatformError::link_escape(format!(
+                "refusing symbolic link target: {raw}"
+            )));
+        }
+        Ok(())
     }
 
     fn exists(&self, raw: &str) -> bool {

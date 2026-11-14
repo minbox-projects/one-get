@@ -274,7 +274,7 @@ Automated layers:
 
 The initial review found blockers, and the repair landed before this documentation change. The verified behavior now includes:
 
-- Task-store schema 2 also has nullable `final_url`. The worker persists the post-redirect URL through the same minimizer, so userinfo, query, and fragment are absent, and `downloads_list` exposes it as `finalUrl` for redacted details.
+- This phase delivered task-store schema 2 with nullable `final_url`, later extended by schema version 3; the worker persists the post-redirect URL through the same minimizer, so userinfo, query, and fragment are absent, and `downloads_list` exposes it as `finalUrl` for redacted details.
 - Same destination and filename tasks are safe. The normal part name is `<filename>.oneget.part`; only on a conflict does the engine use `<filename>.<first 8 of task id>.oneget.part`. The chosen name is persisted in `part_path` and drives download, resume, finalize, cancel, recovery, delete, and existence checks, with a legacy-name fallback. Final unique-rename behavior is unchanged.
 - The engine service runs slow probes concurrently with the request and run loops, so a pending probe does not stall downloads or listings. Startup recovery completes before the service starts, and paused-task revalidation is guarded to run once per engine instance rather than on every run-loop restart.
 - `@tauri-apps/plugin-dialog` 2.8.4 provides the localized directory picker in the new and batch dialogs, and `INVALID_DESTINATION` surfaces as a destination-specific actionable error.
@@ -578,3 +578,119 @@ No pending gate or manual item above is recorded as passed.
 ### Exit statement
 
 Phase 3 exit remains BLOCKED with its recorded pending gates and manual Chrome and Edge items. Phase 4 exit is BLOCKED. It requires the complete manual Firefox record, the Phase 3 manual and Windows records, and the earlier Phase 0, Phase 1, and Phase 2 gates above, or a dated explicit user waiver. The automated suites are green, but they are not a phase-exit approval and no real Firefox result is claimed.
+
+## Phase 5: signed components and video pipeline
+
+Date: 2026-11-14
+
+This section records the delivered signed component catalog, separate component store, task-store schema version 3 with task kind, guarded video service, quality interface, and the automated evidence available in the coding worktree. It adds no pass claim for any manual item. Every Phase 0 through Phase 4 gate above remains pending and unchanged, and Phase 5 exit is BLOCKED.
+
+### Environment
+
+| Component | Value |
+| --- | --- |
+| Host | macOS 27.3 (build 26C5035r), arm64 |
+| Node.js | 24.18.0 |
+| npm | 11.16.0 |
+| rustc | 1.99.1 (58cf8f9c3 2026-10-13) |
+| cargo | 1.99.1 (5f94df478 2026-08-27) |
+
+### Automated commands and results
+
+Frontend, extension, and Playwright commands ran from the worktree root; Rust commands ran in `src-tauri/`. Every command below exited 0.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --test kernel_manifest --locked` | Passed: 9 tests covering valid signature and target selection, modified field, wrong key, duplicate key, oversized input, schema rejection, URL and file-name policy, cache re-verification, trust-unconfigured state, and the signed fixture server. |
+| `cargo test --test kernel_install --locked` | Passed: 16 tests covering bounded download and hash rejection, declared-file extraction and zip-slip, link, duplicate, undeclared, entry, size, and ratio rejection, executable preparation, atomic activation, update, rollback, tamper detection, resolver errors, and already-installed-without-key usability. |
+| `cargo test --test kernel_commands --locked` | Passed: 4 tests covering status, manifest refresh, install, update, rollback, operation state, and typed errors. |
+| `cargo test --test video_process --locked` | Passed: 8 tests covering the minimal environment, argument forwarding without a shell, concurrent pipe draining, the 2 MiB capture and tail, probe timeout, timeout over a simultaneous flood, distinct startup and inactivity bounds, and grandchild reaping. |
+| `cargo test --test video_probe --locked` | Passed: 7 tests covering VOD metadata and format parsing, live, DRM-only, malformed and unsupported rejection, quality ordering, MP4 marking, size estimates, default selection and audio-only fallback, and typed timeout and output-limit failures. |
+| `cargo test --test video_download --locked` | Passed: 7 tests covering component preflight before any process or task, one-task progress, output hash and completion, pause and resume, cancel scope, retry after missing output, bounded shutdown, and the one-at-a-time queue. |
+| `cargo test --test video_hls --locked` | Passed: 4 tests covering HLS delegation without a manifest fetch, DASH and audio-only M4A extraction, cookies and proxy forwarding without stored values, and typed merge failure with no final file. |
+| `cargo test --test video_commands --locked` | Passed: 5 tests covering probe results, start validation before persistence, kind and video metadata in list summaries, control routing by kind, and empty segments for a video task. |
+| `cargo test --test video_recovery --locked` | Passed: 2 tests covering interrupted-task recovery with preserved temporary state and the `VIDEO_URL_UNAVAILABLE` retry boundary after restart. |
+| `cargo test --test store --locked` | Passed: 21 tests, including the version-3 kind and video record, the version-2 to version-3 migration, and restoration of the pre-migration backup. |
+| `cargo test --test engine_queue --locked` | Passed: 22 tests, including HTTP-only claim and counts and the `TASK_KIND_UNSUPPORTED` guard. |
+| `cargo test --test engine_recovery --test engine_download --locked` | Passed: 10 and 11 tests, including HTTP-only recovery and unchanged part and finalization behavior with video rows present. |
+| `cargo test --locked` | Passed: 311 tests across all suites with 1 ignored long soak. |
+| `cargo fmt -- --check` | Passed: exit 0. |
+| `cargo clippy --all-targets -- -D warnings` | Passed: exit 0. |
+| `cargo check --locked` | Passed: exit 0. |
+| `npm run check:pins` | Passed: 30 direct npm entries are exact versions; no npm dependency was added. |
+| `npm run typecheck` | Passed: strict TypeScript project build. |
+| `npm run lint` | Passed: exit 0. |
+| `npm run test` | Passed: 53 Vitest files, 475 tests. |
+| `npm run build` | Passed: production Vite build. |
+| `npm run test:e2e` | Passed: 42 Playwright tests across the chromium-light and chromium-dark projects against deterministic mock IPC, including component install, update, rollback, video probe, quality selection, audio-only task, missing-component entry, video details, and video controls. |
+| `npm run typecheck:extension` | Passed: exit 0. |
+| `npm run test:extension` | Passed: 12 files, 132 tests. |
+| `npm run build:extension` | Passed: production Chromium and Firefox packages written. |
+| `npm run build:extension:test` | Passed: Chromium test package written. |
+| `npm run lint:extension:firefox` | Passed: 0 errors, 0 notices, 1 accepted Firefox-for-Android advisory. |
+| `npm run test:e2e:extension` | Passed: 7 Playwright tests against the Chromium test package. |
+
+The only new direct Rust dependency is `zip` 9.5.1 with default features disabled and the `deflate` feature, resolved through the committed `Cargo.lock`; every Rust gate runs with `--locked`. No automated layer contacts a public host or uses a real credential.
+
+### Expected RED evidence
+
+Expected-failure transcripts are retained in the coding run's report set at `.ai-workflow/plans/20261113-component-video-hls/reports/red-evidence.md` and are referenced here rather than reproduced. That record lists the new catalog, store, installer, resolver, store-kind, engine-filter, process, probe, video-download, HLS, recovery, command, and frontend suites with their intended missing behavior and nonzero exit before implementation; the Playwright component and video specs were authored after their unit-TDD delivery and passed on first execution. The report set is evidence of the RED step only and is not acceptance evidence.
+
+### Automated acceptance evidence by behavior
+
+- A valid signed catalog with a current-target artifact is accepted, cached, and re-verified on reload; a modified field, wrong key, duplicate key, missing signature, oversized input, or unsupported schema is rejected with a typed error and changes no install state.
+- A missing current-target artifact reports unsupported instead of selecting another platform; a non-loopback HTTP URL, userinfo, overlong URL, unsafe output name, duplicate output name, or unsupported archive type is rejected before any request or write.
+- Install verifies the exact size and SHA-256, extracts only declared files, prepares executables, activates the version directory atomically, and records per-file hashes; a bad hash, truncation, zip-slip, link, duplicate entry, missing or extra file, or limit violation leaves the previous active version unchanged and removes temporary files.
+- Update activates only a strictly newer sequence; rollback activates a verified installed earlier sequence without a network request; an already installed verified component remains usable without a trust key or catalog.
+- Task creation persists kind and video metadata; every version-2 row becomes `http`; HTTP claim, counts, recovery, and part-conflict detection ignore video tasks; an HTTP control on a video task returns `TASK_KIND_UNSUPPORTED`; the pre-migration backup restores a working version-2 database.
+- A probe returns ordered video and audio-only choices with estimated sizes and MP4 compatibility; live, DRM-only, malformed, and unsupported input fails with a typed error; no task is created.
+- A confirmed video persists one task, reports progress and the merge stage, moves a unique output, stores its SHA-256, and completes; missing output leaves no final file and retry recovers; the second confirmation waits as queued.
+- Pause preserves the temporary directory and resume continues; cancel removes only task-owned data and a finalizing final file; shutdown pauses the active task within the bound; an interrupted task becomes failed with `VIDEO_INTERRUPTED` and preserved temporary data; retry after restart fails with `VIDEO_URL_UNAVAILABLE` instead of using the minimized URL.
+- HLS and DASH are delegated without fetching a manifest; cookies and proxy are forwarded only to yt-dlp and leave no value in storage; a merge failure is typed as `VIDEO_MERGE_FAILED` with no final file.
+- The guard rejects a process beyond the timeout, drains a flood without deadlock or unbounded memory, forwards arguments without a shell, kills a grandchild, and keeps startup and inactivity bounds distinct.
+- Settings shows component states, versions, target, operation progress, localized errors, and install, update, and rollback actions; a missing-component error opens that section; New Download offers Parse video and starts exactly one task per confirmation; video details show metadata and no invented segments.
+
+### Manual acceptance checklist
+
+Record date: 2026-11-14 (Asia/Shanghai, UTC+08:00). Host: macOS Darwin 27.3.0 arm64 (macOS 27.3), development worktree build. No production signing, no release component catalog, and no build-configured component trust public key were supplied for a manual build. `yt-dlp` is not installed on the host, and no manual interaction with a built application was performed.
+
+The public-key-only trust setup is NOT PERFORMED. The fixture procedure in `docs/component-catalog.md` and `scripts/kernel-fixture.mjs` is documentation only for this record and was not executed. The local HLS AES-128 fixture files under `src-tauri/tests/fixtures/hls/aes128/**` and `src-tauri/tests/fixtures/media/sample.mp4` are present and available, but they were not played with real tools. Every item below is PENDING, not passed and not failed, and none is a pass claim. Mocks, unit tests, integration tests, lint, and headless Playwright results are not substituted for any item.
+
+| Manual item | Status | Detail |
+| --- | --- | --- |
+| Build with a public-key-only trust setup and install yt-dlp, ffmpeg with ffprobe, and Deno | PENDING: not performed | No public-key-only build was produced, no catalog or artifact was served, and no application build was launched. |
+| Update to a newer signed sequence and roll back to the installed earlier sequence | PENDING: not performed | No real install, update, or rollback occurred. |
+| Detect a tampered installed file and refuse execution | PENDING: not performed | No installed file was modified on disk. |
+| Keep a verified install usable when the build has no trust key | PENDING: not performed | No already-installed-without-key build was launched. |
+| Probe a real video page, select a quality, and inspect video and audio-only choices | PENDING: not performed | `yt-dlp` is not installed, no real source was probed, and no quality was selected. |
+| Download and merge a real video, then open the MP4 | PENDING: not performed | No real video download, merge, or open occurred. |
+| Play the local HLS AES-128 fixture produced by real yt-dlp and ffmpeg | PENDING: not performed | `src-tauri/tests/fixtures/hls/aes128/**` and `src-tauri/tests/fixtures/media/sample.mp4` are available but unplayed; the automated HLS suite is not real-tool playback evidence. |
+| Remove ffmpeg and confirm the missing-component entry before task creation | PENDING: not performed | No component was removed from a real install and no missing-component entry was observed. |
+| Cancel, time out, kill a grandchild, and quit during an active video | PENDING: not performed | No real process was cancelled, timed out, killed, or left running at quit. |
+| Confirm the one-video queue with a second confirmation | PENDING: not performed | No two real videos were confirmed. |
+| Windows x64 component install, probe, download, merge, and cancellation | PENDING: not performed | No Windows x64 run is claimed or inferred from macOS. |
+
+### Pending gates
+
+| Gate | Status |
+| --- | --- |
+| Phase 0 manual platform acceptance matrix | Pending |
+| Phase 1 24-hour soak | Pending |
+| Phase 1 Windows x64 compatibility | Pending |
+| Phase 2 manual real-application local HTTP download | Pending |
+| Phase 2 final targeted design-review recheck | Pending |
+| Phase 3 manual Chrome and Edge records | Pending |
+| Phase 3 Windows install, launch, and browser checks | Pending |
+| Phase 4 manual Firefox record | Pending |
+| Phase 4 Windows Firefox status | Pending |
+| Phase 5 manual component, video, HLS, cancellation, and Windows evidence | Pending |
+
+Every earlier gate keeps its recorded pending status and is not restated as passed.
+
+### Documentation and navigation evidence
+
+`docs/component-catalog.md` records the manifest schema, targets, roles, URL and extraction policy, signing tool, trust-key setup, and fixture procedure. `docs/architecture.md` records the component and video module boundaries, task-store schema version 3, data model, trust boundaries, and test layers. `MEMORY.md` records the current stack pin, module boundaries, commands, task and component stores, video behavior, process bounds, cookies and proxy boundary, interface, and quality gates. The new implemented architecture note triplet records the delivered decision; the baseline, engine, and UI records are partially superseded and cross-link it, while the local-API and Firefox records keep their unchanged browser boundary. Navigation was rebuilt and the hand-maintained Rust entries reapplied.
+
+### Exit statement
+
+Phase 5 exit is BLOCKED. It requires the complete manual component, video, HLS, cancellation, one-video queue, and Windows evidence above, and every Phase 0 through Phase 4 gate to be complete or a dated explicit user waiver recorded. The automated evidence is green and is not a phase-exit approval.

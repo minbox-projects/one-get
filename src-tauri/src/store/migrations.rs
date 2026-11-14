@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use crate::engine::error::EngineError;
 
 /// Schema version this build creates and understands.
-pub(crate) const SCHEMA_VERSION: i64 = 2;
+pub(crate) const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -63,6 +63,14 @@ ALTER TABLE tasks ADD COLUMN final_url TEXT;
 UPDATE schema_meta SET value = '2' WHERE key = 'schema_version';
 ";
 
+/// Schema 3 adds the task kind and the nullable structured video record.
+const SCHEMA_V3: &str = "
+ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'http'
+    CHECK (kind IN ('http', 'video'));
+ALTER TABLE tasks ADD COLUMN video_json TEXT;
+UPDATE schema_meta SET value = '3' WHERE key = 'schema_version';
+";
+
 /// Read the stored schema version, treating an absent table or row as version 0.
 pub(crate) fn read_schema_version(conn: &Connection) -> rusqlite::Result<i64> {
     let has_meta: bool = conn.query_row(
@@ -94,6 +102,9 @@ pub(crate) fn read_schema_version(conn: &Connection) -> rusqlite::Result<i64> {
 }
 
 /// Apply every migration needed to reach [`SCHEMA_VERSION`] in one transaction.
+///
+/// Steps are applied only for the versions a database has not reached yet, so
+/// a version-2 database never re-runs the schema-1 or schema-2 statements.
 pub(crate) fn migrate(conn: &Connection, from_version: i64) -> Result<(), EngineError> {
     if from_version >= SCHEMA_VERSION {
         return Ok(());
@@ -108,14 +119,24 @@ pub(crate) fn migrate(conn: &Connection, from_version: i64) -> Result<(), Engine
         transaction.commit().map_err(|_| migration_error())?;
         return Ok(());
     }
-    transaction
-        .execute_batch(SCHEMA_V1)
-        .map_err(|_| migration_error())?;
-    transaction
-        .execute_batch(SCHEMA_V2)
-        .map_err(|_| migration_error())?;
+    if current < 1 {
+        transaction
+            .execute_batch(SCHEMA_V1)
+            .map_err(|_| migration_error())?;
+    }
+    if current < 2 {
+        transaction
+            .execute_batch(SCHEMA_V2)
+            .map_err(|_| migration_error())?;
+    }
+    if current < 3 {
+        transaction
+            .execute_batch(SCHEMA_V3)
+            .map_err(|_| migration_error())?;
+    }
     if !required_indexes_present(&transaction).map_err(|_| migration_error())?
         || !required_constraints_present(&transaction).map_err(|_| migration_error())?
+        || !required_columns_present(&transaction).map_err(|_| migration_error())?
     {
         return Err(migration_error());
     }
@@ -185,6 +206,28 @@ pub(crate) fn required_constraints_present(conn: &Connection) -> rusqlite::Resul
         && segments.is_some_and(|sql| {
             sql.contains("PRIMARY KEY") && sql.contains("FOREIGN KEY") && sql.contains("CHECK")
         }))
+}
+
+/// Whether the version-3 `kind` and `video_json` columns are present.
+pub(crate) fn required_columns_present(conn: &Connection) -> rusqlite::Result<bool> {
+    let mut statement = conn.prepare("SELECT name FROM pragma_table_info('tasks')")?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let has_kind = names.iter().any(|name| name == "kind");
+    let has_video_json = names.iter().any(|name| name == "video_json");
+    if !has_kind || !has_video_json {
+        return Ok(false);
+    }
+
+    let tasks_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(tasks_sql.is_some_and(|sql| sql.to_ascii_uppercase().contains("KIND IN")))
 }
 
 fn migration_error() -> EngineError {

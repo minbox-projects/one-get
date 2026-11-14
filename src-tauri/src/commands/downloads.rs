@@ -7,11 +7,13 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::app_state::AppState;
 use crate::engine::service::{AddDownload, EngineService, ProbeRequest};
 use crate::error::AppError;
-use crate::store::{Segment, Task};
+use crate::store::{Segment, Task, TaskKind};
+use crate::video::service::VideoService;
 
 /// A request to create one download task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,12 +49,34 @@ pub struct ProbeDownloadRequest {
     pub extra_headers: Vec<(String, String)>,
 }
 
+/// Persisted video metadata exposed alongside a video task summary.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoSummary {
+    /// Media title.
+    pub title: Option<String>,
+    /// Duration in seconds.
+    pub duration_secs: Option<f64>,
+    /// Uploader or channel name.
+    pub uploader: Option<String>,
+    /// Selected quality label or format selector.
+    pub quality: Option<String>,
+    /// Current video stage, for example `merge`.
+    pub stage: Option<String>,
+    /// Whether the task extracts audio only.
+    pub audio_only: bool,
+}
+
 /// A lightweight task row for the polled download list.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadSummary {
     /// Stable task identifier.
     pub id: String,
+    /// Pipeline that owns the task: `http` or `video`.
+    pub kind: String,
+    /// Structured video metadata for a video task.
+    pub video: Option<VideoSummary>,
     /// Stored, redacted remote URL.
     pub url: String,
     /// Final URL after redirects, redacted before storage.
@@ -119,8 +143,16 @@ pub struct ProbeResult {
 
 impl From<Task> for DownloadSummary {
     fn from(task: Task) -> Self {
+        let kind = task.kind.as_str().to_string();
+        let video = if task.kind == TaskKind::Video {
+            video_summary(task.video.as_ref())
+        } else {
+            None
+        };
         Self {
             id: task.id,
+            kind,
+            video,
             url: task.url,
             final_url: task.final_url,
             filename: task.filename,
@@ -150,16 +182,59 @@ impl From<Segment> for SegmentView {
     }
 }
 
+fn video_summary(record: Option<&Value>) -> Option<VideoSummary> {
+    let record = record?;
+    let metadata = record.get("metadata");
+    Some(VideoSummary {
+        title: read_string(metadata, record, "title"),
+        duration_secs: read_f64(metadata, record, "durationSecs")
+            .or_else(|| read_f64(metadata, record, "duration")),
+        uploader: read_string(metadata, record, "uploader"),
+        quality: read_string(metadata, record, "quality").or_else(|| {
+            record
+                .get("formatSelector")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }),
+        stage: read_string(metadata, record, "mergeStage")
+            .or_else(|| read_string(metadata, record, "stage")),
+        audio_only: record
+            .get("audioOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn read_string(metadata: Option<&Value>, record: &Value, key: &str) -> Option<String> {
+    metadata
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_str)
+        .or_else(|| record.get(key).and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+fn read_f64(metadata: Option<&Value>, record: &Value, key: &str) -> Option<f64> {
+    metadata
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_f64)
+        .or_else(|| record.get(key).and_then(Value::as_f64))
+}
+
 /// List every stored task as a lightweight summary.
 pub fn downloads_list(state: &AppState) -> Result<Vec<DownloadSummary>, AppError> {
     let tasks = engine(state)?.list().map_err(AppError::from)?;
     Ok(tasks.into_iter().map(DownloadSummary::from).collect())
 }
 
-/// Load one task's segment plan.
+/// Load one task's segment plan; a video task has no byte segments.
 pub fn downloads_segments(state: &AppState, id: &str) -> Result<Vec<SegmentView>, AppError> {
-    let segments = engine(state)?.segments(id).map_err(AppError::from)?;
-    Ok(segments.into_iter().map(SegmentView::from).collect())
+    match task_kind(state, id)? {
+        TaskKind::Video => Ok(Vec::new()),
+        TaskKind::Http => {
+            let segments = engine(state)?.segments(id).map_err(AppError::from)?;
+            Ok(segments.into_iter().map(SegmentView::from).collect())
+        }
+    }
 }
 
 /// Probe a remote URL for download metadata.
@@ -202,24 +277,58 @@ pub fn downloads_add(state: &AppState, request: AddDownloadRequest) -> Result<St
         .map_err(AppError::from)
 }
 
-/// Pause a task.
+/// Pause a task through the pipeline that owns it.
 pub fn downloads_pause(state: &AppState, id: &str) -> Result<(), AppError> {
-    engine(state)?.pause(id).map_err(AppError::from)
+    match task_kind(state, id)? {
+        TaskKind::Http => engine(state)?.pause(id).map_err(AppError::from),
+        TaskKind::Video => video(state)?.pause(id).map_err(video_error),
+    }
 }
 
-/// Resume a task.
+/// Resume a paused task through the pipeline that owns it.
 pub fn downloads_resume(state: &AppState, id: &str) -> Result<(), AppError> {
-    engine(state)?.resume(id).map_err(AppError::from)
+    match task_kind(state, id)? {
+        TaskKind::Http => engine(state)?.resume(id).map_err(AppError::from),
+        TaskKind::Video => video(state)?.resume(id).map_err(video_error),
+    }
 }
 
-/// Cancel a task.
+/// Cancel a task through the pipeline that owns it.
 pub fn downloads_cancel(state: &AppState, id: &str) -> Result<(), AppError> {
-    engine(state)?.cancel(id).map_err(AppError::from)
+    match task_kind(state, id)? {
+        TaskKind::Http => engine(state)?.cancel(id).map_err(AppError::from),
+        TaskKind::Video => video(state)?.cancel(id).map_err(video_error),
+    }
 }
 
-/// Retry a failed task.
+/// Retry a failed task through the pipeline that owns it.
 pub fn downloads_retry(state: &AppState, id: &str) -> Result<(), AppError> {
-    engine(state)?.retry(id).map_err(AppError::from)
+    match task_kind(state, id)? {
+        TaskKind::Http => engine(state)?.retry(id).map_err(AppError::from),
+        TaskKind::Video => video(state)?.retry(id).map_err(video_error),
+    }
+}
+
+fn task_kind(state: &AppState, id: &str) -> Result<TaskKind, AppError> {
+    let tasks = engine(state)?.list().map_err(AppError::from)?;
+    tasks
+        .into_iter()
+        .find(|task| task.id == id)
+        .map(|task| task.kind)
+        .ok_or_else(|| AppError::new("TASK_NOT_FOUND", "the requested task does not exist"))
+}
+
+fn video(state: &AppState) -> Result<&VideoService, AppError> {
+    state.video().ok_or_else(|| {
+        AppError::new(
+            "video_unavailable",
+            "the video download service is not available",
+        )
+    })
+}
+
+fn video_error(error: crate::video::error::VideoError) -> AppError {
+    AppError::new(error.code(), error.message())
 }
 
 /// Delete a terminal task record.

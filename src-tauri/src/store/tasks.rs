@@ -2,10 +2,11 @@
 
 use std::borrow::Borrow;
 
-use rusqlite::{params, OptionalExtension, Row, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
+use serde_json::{Map, Value};
 
 use super::db::now_ms;
-use super::types::{SegmentProgressInput, Task};
+use super::types::{SegmentProgressInput, Task, TaskKind, VideoTaskInput};
 use super::Database;
 use crate::engine::error::EngineError;
 use crate::engine::part_file::PartFile;
@@ -14,7 +15,8 @@ use crate::platform::files::CapDir;
 
 const TASK_COLUMNS: &str = "id, url, filename, part_path, state, downloaded_bytes, \
      total_bytes, expected_sha256, actual_sha256, etag, last_modified, error_code, error_message, \
-     created_at_ms, updated_at_ms, connections, destination, completed_at_ms, final_url";
+     created_at_ms, updated_at_ms, connections, destination, completed_at_ms, final_url, \
+     kind, video_json";
 
 impl Database {
     /// Insert a new queued task and return its identifier.
@@ -64,7 +66,7 @@ impl Database {
         let collides = {
             let mut statement = transaction.prepare(
                 "SELECT filename, state, part_path, destination \
-                 FROM tasks WHERE filename = ?1",
+                 FROM tasks WHERE filename = ?1 AND kind = 'http'",
             )?;
             let rows = statement.query_map(params![filename], |row| {
                 Ok((
@@ -117,6 +119,131 @@ impl Database {
         Ok((id, part_name))
     }
 
+    /// Insert a new queued video task with its structured video record.
+    pub fn create_video_task(&self, input: &VideoTaskInput) -> Result<String, EngineError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = now_ms();
+        let encoded = encode_video_object(&video_record(input))?;
+        self.conn.execute(
+            "INSERT INTO tasks \
+                 (id, url, filename, destination, state, downloaded_bytes, created_at_ms, \
+                  updated_at_ms, kind, video_json) \
+             VALUES (?1, ?2, ?3, ?4, 'queued', 0, ?5, ?5, 'video', ?6)",
+            params![
+                id,
+                input.url,
+                input.filename,
+                input.destination,
+                now,
+                encoded
+            ],
+        )?;
+        Ok(id)
+    }
+
+    /// Merge a JSON object into a video task's structured record.
+    ///
+    /// A non-object patch, a malformed stored record, or an HTTP task is
+    /// rejected and leaves the row unchanged.
+    pub fn patch_video_json(&self, id: &str, patch: &Value) -> Result<(), EngineError> {
+        let Value::Object(patch) = patch else {
+            return Err(EngineError::new(
+                "INVALID_VIDEO_JSON",
+                "a video JSON patch must be a JSON object",
+            ));
+        };
+
+        let transaction = self.conn.unchecked_transaction()?;
+        let mut video = video_object(&transaction, id)?;
+        for (key, value) in patch {
+            video.insert(key.clone(), value.clone());
+        }
+        let encoded = encode_video_object(&video)?;
+        let changed = transaction.execute(
+            "UPDATE tasks SET video_json = ?1, updated_at_ms = ?2 \
+             WHERE id = ?3 AND kind = 'video'",
+            params![encoded, now_ms(), id],
+        )?;
+        if changed == 0 {
+            return Err(task_not_found());
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Persist a video task's downloaded and total byte snapshot.
+    pub fn persist_video_progress(
+        &self,
+        id: &str,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+    ) -> Result<(), EngineError> {
+        let downloaded = offset_to_sql(downloaded_bytes)?;
+        let total = total_bytes.map(offset_to_sql).transpose()?;
+        let changed = self.conn.execute(
+            "UPDATE tasks SET downloaded_bytes = ?1, total_bytes = ?2, updated_at_ms = ?3 \
+             WHERE id = ?4 AND kind = 'video'",
+            params![downloaded, total, now_ms(), id],
+        )?;
+        if changed == 0 {
+            return Err(task_not_found());
+        }
+        Ok(())
+    }
+
+    /// Mark a finalizing video task completed with its output and SHA-256.
+    ///
+    /// The recorded filename, final path, hash, and completion time become the
+    /// authoritative output record; the existing video JSON is preserved and
+    /// gains the `finalPath` value.
+    pub fn complete_video_task(
+        &self,
+        id: &str,
+        filename: &str,
+        final_path: &str,
+        actual_sha256: &str,
+    ) -> Result<(), EngineError> {
+        validate_hash(actual_sha256)?;
+
+        let transaction = self.conn.unchecked_transaction()?;
+        let mut video = video_object(&transaction, id)?;
+        video.insert("finalPath".to_owned(), Value::String(final_path.to_owned()));
+        let encoded = encode_video_object(&video)?;
+        let now = now_ms();
+
+        let changed = transaction.execute(
+            "UPDATE tasks SET state = 'completed', filename = ?1, actual_sha256 = ?2, \
+             completed_at_ms = ?3, updated_at_ms = ?3, error_code = NULL, error_message = NULL, \
+             video_json = ?4 \
+             WHERE id = ?5 AND state = 'finalizing' AND kind = 'video'",
+            params![filename, actual_sha256, now, encoded, id],
+        )?;
+        if changed == 0 {
+            return Err(EngineError::invalid_state(
+                "only a finalizing video task can be completed",
+            ));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Fail every video task that was connecting, downloading, or finalizing.
+    ///
+    /// Queued and paused tasks keep their state, and every video record is
+    /// preserved so a later retry can reuse the task-owned temporary directory.
+    pub fn mark_interrupted_video_tasks(&self) -> Result<usize, EngineError> {
+        let changed = self.conn.execute(
+            "UPDATE tasks SET state = 'failed', error_code = 'VIDEO_INTERRUPTED', \
+             error_message = ?1, updated_at_ms = ?2 \
+             WHERE kind = 'video' AND state IN ('connecting', 'downloading', 'finalizing')",
+            params![
+                "the video download was interrupted by an application restart",
+                now_ms()
+            ],
+        )?;
+        Ok(changed)
+    }
+
     /// Remove one task; its segments cascade through the foreign key.
     pub fn delete_task(&self, id: &str) -> Result<(), EngineError> {
         let changed = self
@@ -147,12 +274,12 @@ impl Database {
         Ok(tasks)
     }
 
-    /// Claim the oldest queued task and move it to `connecting`.
+    /// Claim the oldest queued HTTP task and move it to `connecting`.
     pub fn claim_oldest_queued_task(&self) -> Result<Option<Task>, EngineError> {
         let transaction = self.conn.unchecked_transaction()?;
         let id: Option<String> = transaction
             .query_row(
-                "SELECT id FROM tasks WHERE state = 'queued' \
+                "SELECT id FROM tasks WHERE state = 'queued' AND kind = 'http' \
                  ORDER BY created_at_ms ASC, rowid ASC LIMIT 1",
                 [],
                 |row| row.get(0),
@@ -173,25 +300,98 @@ impl Database {
         self.task(&id)
     }
 
-    /// Count tasks that occupy a scheduler slot.
+    /// Claim the oldest queued video task and move it to `connecting`.
+    pub fn claim_oldest_queued_video_task(&self) -> Result<Option<Task>, EngineError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let id: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM tasks WHERE state = 'queued' AND kind = 'video' \
+                 ORDER BY created_at_ms ASC, rowid ASC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let Some(id) = id else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+
+        transaction.execute(
+            "UPDATE tasks SET state = 'connecting', updated_at_ms = ?1 \
+             WHERE id = ?2 AND state = 'queued'",
+            params![now_ms(), id],
+        )?;
+        transaction.commit()?;
+        self.task(&id)
+    }
+
+    /// The video task currently connecting, downloading, or finalizing.
+    pub fn active_video_task(&self) -> Result<Option<Task>, EngineError> {
+        let id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM tasks WHERE kind = 'video' \
+                 AND state IN ('connecting', 'downloading', 'finalizing') \
+                 ORDER BY created_at_ms ASC, rowid ASC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match id {
+            Some(id) => self.task(&id),
+            None => Ok(None),
+        }
+    }
+
+    /// Count HTTP tasks that occupy a scheduler slot.
     pub fn active_task_count(&self) -> Result<i64, EngineError> {
         let count = self.conn.query_row(
-            "SELECT COUNT(*) FROM tasks \
-             WHERE state IN ('connecting', 'downloading', 'finalizing')",
+            "SELECT COUNT(*) FROM tasks WHERE kind = 'http' \
+             AND state IN ('connecting', 'downloading', 'finalizing')",
             [],
             |row| row.get(0),
         )?;
         Ok(count)
     }
 
-    /// Count tasks waiting for a scheduler slot.
+    /// Count HTTP tasks waiting for a scheduler slot.
     pub fn queued_task_count(&self) -> Result<i64, EngineError> {
         let count = self.conn.query_row(
-            "SELECT COUNT(*) FROM tasks WHERE state = 'queued'",
+            "SELECT COUNT(*) FROM tasks WHERE state = 'queued' AND kind = 'http'",
             [],
             |row| row.get(0),
         )?;
         Ok(count)
+    }
+
+    /// Read one task's kind without materializing the whole row.
+    pub fn task_kind(&self, id: &str) -> Result<Option<TaskKind>, EngineError> {
+        let raw: Option<String> = self
+            .conn
+            .query_row("SELECT kind FROM tasks WHERE id = ?1", params![id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        raw.map(|raw| {
+            TaskKind::parse(&raw).ok_or_else(|| {
+                EngineError::new("INVALID_KIND", "the stored task kind is not recognized")
+            })
+        })
+        .transpose()
+    }
+
+    /// List every task of one kind in FIFO creation order.
+    pub fn tasks_by_kind(&self, kind: TaskKind) -> Result<Vec<Task>, EngineError> {
+        let sql = format!(
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE kind = ?1 \
+             ORDER BY created_at_ms ASC, rowid ASC"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let tasks = statement
+            .query_map(params![kind.as_str()], task_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(tasks)
     }
 
     /// Record the expected SHA-256 for a task without changing its state.
@@ -517,14 +717,89 @@ fn part_exists(destination: &str, part_path: Option<&str>, filename: &str) -> bo
         .unwrap_or(false)
 }
 
+fn video_record(input: &VideoTaskInput) -> Map<String, Value> {
+    let mut video = Map::new();
+    video.insert(
+        "formatSelector".to_owned(),
+        Value::String(input.format_selector.clone()),
+    );
+    if let Some(cookies_file) = &input.cookies_file {
+        video.insert(
+            "cookiesFile".to_owned(),
+            Value::String(cookies_file.clone()),
+        );
+    }
+    if let Some(proxy_url) = &input.proxy_url {
+        video.insert("proxyUrl".to_owned(), Value::String(proxy_url.clone()));
+    }
+    video.insert("metadata".to_owned(), input.metadata.clone());
+    video.insert(
+        "fullUrlPersisted".to_owned(),
+        Value::Bool(input.full_url_persisted),
+    );
+    video
+}
+
+fn encode_video_object(video: &Map<String, Value>) -> Result<String, EngineError> {
+    serde_json::to_string(&Value::Object(video.clone())).map_err(|_| {
+        EngineError::new(
+            "INVALID_VIDEO_JSON",
+            "the video record could not be serialized",
+        )
+    })
+}
+
+fn video_object(conn: &Connection, id: &str) -> Result<Map<String, Value>, EngineError> {
+    let stored: Option<Option<String>> = conn
+        .query_row(
+            "SELECT video_json FROM tasks WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(stored) = stored else {
+        return Err(task_not_found());
+    };
+    match stored {
+        Some(raw) => match serde_json::from_str::<Value>(&raw) {
+            Ok(Value::Object(video)) => Ok(video),
+            _ => Err(EngineError::new(
+                "INVALID_VIDEO_JSON",
+                "the stored video record is not a JSON object",
+            )),
+        },
+        None => Ok(Map::new()),
+    }
+}
+
 fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
     let raw_state: String = row.get(4)?;
     let state = TaskState::parse(&raw_state).ok_or_else(|| {
         rusqlite::Error::InvalidColumnType(4, "state".to_owned(), rusqlite::types::Type::Text)
     })?;
 
+    let raw_kind: String = row.get(19)?;
+    let kind = TaskKind::parse(&raw_kind).ok_or_else(|| {
+        rusqlite::Error::InvalidColumnType(19, "kind".to_owned(), rusqlite::types::Type::Text)
+    })?;
+
+    let raw_video: Option<String> = row.get(20)?;
+    let video = raw_video
+        .map(|raw| {
+            serde_json::from_str::<Value>(&raw).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    20,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()?;
+
     Ok(Task {
         id: row.get(0)?,
+        kind,
+        video,
         url: row.get(1)?,
         filename: row.get(2)?,
         part_path: row.get(3)?,

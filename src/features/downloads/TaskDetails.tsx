@@ -7,9 +7,10 @@ import { useI18n } from "../../i18n";
 import { redactStoredUrl } from "../../lib/downloads";
 import type { AppError } from "../../types/app";
 import type { DownloadSegment, DownloadSummary } from "../../types/downloads";
+import { MissingComponentAction } from "../kernel/MissingComponentAction";
 
 import { taskActions } from "./controls";
-import { errorMessageKey } from "./errorMessages";
+import { errorMessageKey, requiresComponentInstall } from "./errorMessages";
 
 export interface TaskDetailsProps {
   task: DownloadSummary;
@@ -27,6 +28,7 @@ export interface TaskDetailsProps {
   onDeleteRecord?: (task: DownloadSummary) => void;
   onDeleteFile?: (task: DownloadSummary) => void;
   onClose?: () => void;
+  onOpenComponents?: () => void;
 }
 
 function remainingSeconds(task: DownloadSummary, speed: number | null): number | null {
@@ -68,12 +70,18 @@ export function TaskDetails({
   onDeleteRecord,
   onDeleteFile,
   onClose,
+  onOpenComponents,
 }: TaskDetailsProps) {
   const { t, formatBytes, formatDate, formatEta, formatNumber, formatSpeed } =
     useI18n();
 
   const available = taskActions(task);
   const unknown = t("common.unknown");
+  const isVideo = task.kind === "video";
+  const video = task.video ?? null;
+  const videoStage =
+    video?.stage === "merge" ? t("video.stage.merge") : unknown;
+  const componentAction = onOpenComponents ?? (() => undefined);
   const storedUrl = redactStoredUrl(task.url);
   const finalUrl = task.finalUrl ? redactStoredUrl(task.finalUrl) : null;
   const eta = formatEta(remainingSeconds(task, speed));
@@ -125,6 +133,30 @@ export function TaskDetails({
         </DetailRow>
       </dl>
 
+      {isVideo ? (
+        <section className="og-details__video" aria-label={t("details.video")}>
+          <h3 className="og-details__section-title">{t("details.video")}</h3>
+          <dl className="og-details__grid">
+            <DetailRow label={t("details.videoTitle")}>
+              {video?.title ?? unknown}
+            </DetailRow>
+            <DetailRow label={t("details.videoDuration")}>
+              {formatEta(video?.durationSecs) ?? unknown}
+            </DetailRow>
+            <DetailRow label={t("details.videoUploader")}>
+              {video?.uploader ?? unknown}
+            </DetailRow>
+            <DetailRow label={t("details.videoQuality")}>
+              {video?.quality ?? unknown}
+            </DetailRow>
+            <DetailRow label={t("details.videoStage")}>{videoStage}</DetailRow>
+            <DetailRow label={t("details.finalFile")}>
+              {task.filename}
+            </DetailRow>
+          </dl>
+        </section>
+      ) : null}
+
       {task.errorCode || task.errorMessage ? (
         <section className="og-details__error" aria-label={t("details.error")}>
           {task.errorCode ? (
@@ -133,9 +165,13 @@ export function TaskDetails({
           <p className="og-details__error-message">
             {t(errorMessageKey(task.errorCode ?? ""))}
           </p>
+          {requiresComponentInstall(task.errorCode) ? (
+            <MissingComponentAction onOpenComponents={componentAction} />
+          ) : null}
         </section>
       ) : null}
 
+      {!isVideo ? (
       <section className="og-details__segments" aria-label={t("details.segments")}>
         <h3 className="og-details__section-title">{t("details.segments")}</h3>
         {segmentsLoading ? (
@@ -182,6 +218,7 @@ export function TaskDetails({
           </ul>
         )}
       </section>
+      ) : null}
 
       <div className="og-details__actions">
         <Button

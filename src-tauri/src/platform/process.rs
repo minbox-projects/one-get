@@ -12,7 +12,7 @@ use process_wrap::tokio::JobObject;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessGroup;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
-use tokio::process::Command;
+use tokio::process::{ChildStderr, ChildStdout, Command};
 
 use super::PlatformError;
 
@@ -41,6 +41,37 @@ impl ChildGuard {
     /// The top-level child process identifier.
     pub fn id(&self) -> Option<u32> {
         self.child.id()
+    }
+
+    /// Take ownership of the child's standard output pipe.
+    ///
+    /// The caller is responsible for draining it; the process group or Job Object
+    /// ownership and kill-on-drop behavior are unchanged.
+    pub fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.stdout().take()
+    }
+
+    /// Take ownership of the child's standard error pipe.
+    ///
+    /// The caller is responsible for draining it; the process group or Job Object
+    /// ownership and kill-on-drop behavior are unchanged.
+    pub fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.child.stderr().take()
+    }
+
+    /// Check for an exited child without blocking.
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, PlatformError> {
+        self.child
+            .try_wait()
+            .map_err(|error| PlatformError::io_error("inspect child process", error))
+    }
+
+    /// Wait for the child and any remaining process group members to exit.
+    pub async fn wait(&mut self) -> Result<ExitStatus, PlatformError> {
+        self.child
+            .wait()
+            .await
+            .map_err(|error| PlatformError::io_error("wait for child process", error))
     }
 
     /// Terminate the entire process tree and wait for the top-level child.

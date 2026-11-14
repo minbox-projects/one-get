@@ -12,7 +12,8 @@ use oneget_lib::engine::part_file::PartFile;
 use oneget_lib::engine::scheduler::{Engine, EngineOptions};
 use oneget_lib::engine::state::{SegmentState, TaskState};
 use oneget_lib::engine::worker::DownloadSpec;
-use oneget_lib::store::Database;
+use oneget_lib::store::{Database, TaskKind, VideoTaskInput};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use support::fixtures::pattern_bytes;
 use support::range_server::{FixtureConfig, RangeMode, RangeServer, ServedRange};
@@ -56,6 +57,19 @@ fn make_spec(
         expected_sha256,
         extra_headers: Vec::new(),
         destination: None,
+    }
+}
+
+fn video_input(url: &str, filename: &str) -> VideoTaskInput {
+    VideoTaskInput {
+        url: url.to_string(),
+        filename: filename.to_string(),
+        destination: None,
+        format_selector: "bestvideo+bestaudio".to_string(),
+        cookies_file: None,
+        proxy_url: None,
+        metadata: json!({}),
+        full_url_persisted: false,
     }
 }
 
@@ -2225,5 +2239,127 @@ fn concurrent_cross_engine_same_name_adds_persist_distinct_part_paths() {
             .count()
             <= 1,
         "at most one task may own the shared legacy part name, got {part_paths:?}"
+    );
+}
+
+#[tokio::test]
+async fn http_engine_controls_and_claims_ignore_video_tasks() {
+    let body = pattern_bytes(191, 512 * 1024);
+    let hash = sha256_hex(&body);
+    let server = RangeServer::start(slow_body_config(body.clone()));
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    let video_id = engine
+        .store()
+        .create_video_task(&video_input(
+            "https://example.invalid/video/queued-before-http",
+            "queued-video.mp4",
+        ))
+        .expect("create queued video task");
+    let video_before = engine.store().task(&video_id).unwrap().unwrap();
+    assert_eq!(video_before.kind, TaskKind::Video);
+    assert_eq!(video_before.state, TaskState::Queued);
+
+    let id1 = engine
+        .add_task(make_spec(
+            server.url("/video-ignore/one"),
+            "http-one.bin",
+            1,
+            Some(hash.clone()),
+        ))
+        .expect("add first HTTP task");
+    let id2 = engine
+        .add_task(make_spec(
+            server.url("/video-ignore/two"),
+            "http-two.bin",
+            1,
+            Some(hash.clone()),
+        ))
+        .expect("add second HTTP task");
+
+    let ((), completion_order) = tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, engine.run())
+                .await
+                .expect("engine run timeout")
+                .expect("engine run");
+        },
+        async {
+            let mut order = Vec::new();
+            let start = Instant::now();
+            while order.len() < 2 {
+                for id in [&id1, &id2] {
+                    if order.iter().any(|seen| seen == id) {
+                        continue;
+                    }
+                    let task = engine.store().task(id).unwrap().unwrap();
+                    if task.state == TaskState::Completed {
+                        order.push(id.clone());
+                    } else {
+                        assert_ne!(
+                            task.state,
+                            TaskState::Failed,
+                            "HTTP task {id} failed: {:?} {:?}",
+                            task.error_code,
+                            task.error_message
+                        );
+                    }
+                }
+                if start.elapsed() > WAIT_TIMEOUT {
+                    panic!("timed out observing the HTTP completion order");
+                }
+                sleep(POLL_INTERVAL).await;
+            }
+            order
+        }
+    );
+
+    assert_eq!(
+        completion_order,
+        vec![id1.clone(), id2.clone()],
+        "HTTP tasks must complete in FIFO order while the video task stays queued"
+    );
+    for id in [&id1, &id2] {
+        let task = engine.store().task(id).unwrap().unwrap();
+        assert_eq!(task.state, TaskState::Completed);
+        assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+    }
+
+    let video_after = engine.store().task(&video_id).unwrap().unwrap();
+    assert_eq!(video_after.kind, TaskKind::Video);
+    assert_eq!(
+        video_after.state,
+        TaskState::Queued,
+        "the HTTP engine must never claim a video task"
+    );
+    assert_eq!(
+        video_after.updated_at_ms, video_before.updated_at_ms,
+        "ignoring a queued video task must not update its row"
+    );
+    assert_eq!(video_after.downloaded_bytes, video_before.downloaded_bytes);
+    assert!(
+        !dest
+            .path()
+            .join(PartFile::part_name("queued-video.mp4"))
+            .exists(),
+        "the HTTP engine must not create a part file for a video task"
+    );
+    assert!(
+        !dest.path().join("queued-video.mp4").exists(),
+        "the HTTP engine must not create a final file for a video task"
+    );
+    assert!(
+        engine
+            .store()
+            .segments_for_task(&video_id)
+            .unwrap()
+            .is_empty(),
+        "the HTTP engine must not create segment rows for a video task"
     );
 }

@@ -1,0 +1,20 @@
+//! Video probing and download support built on the guarded process layer.
+//!
+//! Target-specific process and environment rules stay inside
+//! [`crate::platform::process`]; this module only consumes the guard and applies
+//! the shared timeout, output-bound, and minimal-environment policy.
+
+mod control;
+mod download;
+pub mod error;
+mod files;
+pub mod metadata;
+pub mod probe;
+pub mod process;
+mod progress;
+pub mod quality;
+pub mod service;
+
+pub use metadata::{VideoFormat, VideoMetadata};
+pub use probe::{probe_video, ProbeOptions};
+pub use quality::{build_quality_model, ChoiceKind, QualityChoice, QualityModel};

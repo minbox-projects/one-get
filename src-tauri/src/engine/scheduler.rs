@@ -23,7 +23,7 @@ use crate::logging::{LogLevel, Logger};
 use crate::platform::opener::open_target;
 use crate::platform::PlatformError;
 use crate::platform::{current_target, sanitize_filename, CapDir};
-use crate::store::types::Task;
+use crate::store::types::{Task, TaskKind};
 use crate::store::Database;
 
 use super::cookies::CookieJar;
@@ -295,7 +295,7 @@ impl Engine {
     pub fn recover(&self) -> Result<RecoveryReport, EngineError> {
         let mut report = RecoveryReport::default();
 
-        for task in self.store.list_tasks()? {
+        for task in self.store.tasks_by_kind(TaskKind::Http)? {
             let destination = self.destination_for(&task);
             match task.state {
                 TaskState::Connecting | TaskState::Downloading => {
@@ -336,7 +336,7 @@ impl Engine {
             limiters: Vec::new(),
         };
 
-        for task in self.store.list_tasks()? {
+        for task in self.store.tasks_by_kind(TaskKind::Http)? {
             if task.state != TaskState::Paused {
                 continue;
             }
@@ -421,6 +421,7 @@ impl Engine {
     /// Pause a queued or running task and persist its progress.
     pub async fn pause(&self, id: &str) -> Result<(), EngineError> {
         let task = load_task(&self.store, id)?;
+        require_http_task(&task)?;
         match task.state {
             TaskState::Queued => {
                 self.store
@@ -447,6 +448,7 @@ impl Engine {
     /// Requeue a paused task; ignore states that are already active.
     pub async fn resume(&self, id: &str) -> Result<(), EngineError> {
         let task = load_task(&self.store, id)?;
+        require_http_task(&task)?;
         match task.state {
             TaskState::Paused => {
                 self.store
@@ -467,6 +469,7 @@ impl Engine {
     /// Cancel a task and remove only its own part file.
     pub async fn cancel(&self, id: &str) -> Result<(), EngineError> {
         let task = load_task(&self.store, id)?;
+        require_http_task(&task)?;
         let destination = self.destination_for(&task);
         match task.state {
             TaskState::Queued | TaskState::Paused | TaskState::Failed | TaskState::Finalizing => {
@@ -586,6 +589,7 @@ impl Engine {
     /// Requeue a failed task while preserving its part file.
     pub async fn retry(&self, id: &str) -> Result<(), EngineError> {
         let task = load_task(&self.store, id)?;
+        require_http_task(&task)?;
         if task.state != TaskState::Failed {
             return Err(EngineError::invalid_state(
                 "only a failed task can be retried",
@@ -849,6 +853,17 @@ impl Engine {
             }
         }
     }
+}
+
+/// Reject a task that the video pipeline owns before any HTTP-engine action.
+fn require_http_task(task: &Task) -> Result<(), EngineError> {
+    if task.kind != TaskKind::Http {
+        return Err(EngineError::new(
+            "TASK_KIND_UNSUPPORTED",
+            "the HTTP engine only controls HTTP tasks",
+        ));
+    }
+    Ok(())
 }
 
 fn active_limiter(bytes_per_second: Option<u64>) -> Option<Arc<RateLimiter>> {

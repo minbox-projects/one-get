@@ -1,18 +1,25 @@
 import type { Page } from "@playwright/test";
 
-import type { Settings } from "../../src/types/app";
+import type { AppError, Settings } from "../../src/types/app";
 import type {
   DownloadSegment,
   DownloadSummary,
   ProbeResult,
 } from "../../src/types/downloads";
+import type {
+  ComponentName,
+  ComponentStatusView,
+} from "../../src/types/kernel";
 import type { PendingPrefill } from "../../src/types/pairing";
+import type { VideoProbeResult, VideoStartRequest } from "../../src/types/video";
 
 export interface MockIpcOptions {
   settings?: Partial<Settings>;
   status?: { readOnly: boolean; recovered: boolean };
   tasks?: DownloadSummary[];
   taskCount?: number;
+  videoTasks?: DownloadSummary[];
+  videoProbeError?: AppError | null;
   pendingPrefills?: PendingPrefill[];
 }
 
@@ -22,7 +29,12 @@ interface MockCall {
 }
 
 interface MockSnapshot {
-  tasks: Array<{ id: string; state: string }>;
+  tasks: Array<{
+    id: string;
+    state: string;
+    kind?: string;
+    filename?: string;
+  }>;
   files: string[];
 }
 
@@ -56,6 +68,7 @@ export async function installMockIpc(
     const defaultTasks: DownloadSummary[] = [
       {
         id: "task-active",
+        kind: "http",
         url: "https://fixtures.example.test/media/alpha-video.mp4",
         filename: "alpha-video.mp4",
         destination: "/tmp/oneget",
@@ -71,6 +84,7 @@ export async function installMockIpc(
       },
       {
         id: "task-completed",
+        kind: "http",
         url: "https://fixtures.example.test/docs/report.pdf",
         filename: "report.pdf",
         destination: "/tmp/oneget",
@@ -91,6 +105,7 @@ export async function installMockIpc(
         const state = index < 3 ? "downloading" : "completed";
         return {
           id: `generated-${index}`,
+          kind: "http",
           url: `https://files.example.test/video/file-${String(index).padStart(5, "0")}.mp4`,
           filename: `file-${String(index).padStart(5, "0")}.mp4`,
           destination: "/tmp/oneget",
@@ -106,6 +121,74 @@ export async function installMockIpc(
         } satisfies DownloadSummary;
       });
 
+    const defaultVideoProbe = (): VideoProbeResult => ({
+      title: "Fixture Tutorial",
+      durationSecs: 615,
+      uploader: "Fixture Studio",
+      video: [
+        {
+          id: "video-1080",
+          label: "1080p",
+          sizeBytes: 42 * 1024 * 1024,
+          mp4Compatible: true,
+          formatSelector: "bestvideo[height<=1080]+bestaudio/best",
+        },
+        {
+          id: "video-720",
+          label: "720p",
+          sizeBytes: 18 * 1024 * 1024,
+          mp4Compatible: true,
+          formatSelector: "bestvideo[height<=720]+bestaudio/best",
+        },
+      ],
+      audio: [
+        {
+          id: "audio-128",
+          label: "Audio 128 kbps",
+          sizeBytes: 9 * 1024 * 1024,
+          mp4Compatible: false,
+          formatSelector: "bestaudio/best",
+        },
+      ],
+      defaultIndex: 0,
+    });
+
+    const defaultComponents: ComponentStatusView[] = [
+      {
+        component: "yt-dlp",
+        state: "not_installed",
+        activeVersion: null,
+        availableVersion: "2025.11.01",
+        installedVersions: [],
+        target: "macos-arm64",
+        rollbackVersion: null,
+        operation: null,
+        error: null,
+      },
+      {
+        component: "ffmpeg",
+        state: "update_available",
+        activeVersion: "7.1",
+        availableVersion: "7.2",
+        installedVersions: ["7.1"],
+        target: "macos-arm64",
+        rollbackVersion: null,
+        operation: null,
+        error: null,
+      },
+      {
+        component: "deno",
+        state: "installed",
+        activeVersion: "2.5.0",
+        availableVersion: null,
+        installedVersions: ["2.4.0", "2.5.0"],
+        target: "macos-arm64",
+        rollbackVersion: "2.4.0",
+        operation: null,
+        error: null,
+      },
+    ];
+
     const settings: Settings = {
       schemaVersion: 2,
       language: "en-US",
@@ -119,14 +202,23 @@ export async function installMockIpc(
       ...config.settings,
     };
 
+    const initialTasks =
+      config.tasks ??
+      (typeof config.taskCount === "number"
+        ? generatedTasks(config.taskCount)
+        : defaultTasks);
+
     const state = {
       settings,
       status: config.status ?? { readOnly: false, recovered: false },
-      tasks:
-        config.tasks ??
-        (typeof config.taskCount === "number"
-          ? generatedTasks(config.taskCount)
-          : defaultTasks),
+      tasks: [...initialTasks, ...(config.videoTasks ?? [])].map((task) => ({
+        ...task,
+        video: task.video ? { ...task.video } : task.video,
+      })),
+      components: defaultComponents.map((view) => ({
+        ...view,
+        installedVersions: [...view.installedVersions],
+      })),
       pendingPrefills: [...(config.pendingPrefills ?? [])],
       files: new Set<string>(["report.pdf"]),
       calls: [] as MockCall[],
@@ -134,7 +226,38 @@ export async function installMockIpc(
     };
 
     const cloneTasks = (): DownloadSummary[] =>
-      state.tasks.map((task) => ({ ...task }));
+      state.tasks.map((task) => ({
+        ...task,
+        video: task.video ? { ...task.video } : task.video,
+      }));
+
+    const cloneComponents = (): ComponentStatusView[] =>
+      state.components.map((view) => ({
+        ...view,
+        installedVersions: [...view.installedVersions],
+        operation: view.operation ? { ...view.operation } : null,
+        error: view.error ? { ...view.error } : null,
+      }));
+
+    const componentById = (name: ComponentName): ComponentStatusView => {
+      const view = state.components.find((entry) => entry.component === name);
+      if (view === undefined) {
+        throw { code: "invalid_argument", message: "Unknown component." };
+      }
+      return view;
+    };
+
+    const requireComponent = (args: Record<string, unknown>): ComponentName => {
+      const component = args.component;
+      if (
+        component === "yt-dlp" ||
+        component === "ffmpeg" ||
+        component === "deno"
+      ) {
+        return component;
+      }
+      throw { code: "invalid_argument", message: "Missing component." };
+    };
 
     const taskById = (id: string): DownloadSummary | undefined =>
       state.tasks.find((task) => task.id === id);
@@ -221,6 +344,73 @@ export async function installMockIpc(
           return { code: "12345678", expiresAtMs: baseTime + 600_000 };
         case "pairing_revoke":
           return true;
+        case "kernel_status":
+          return cloneComponents();
+        case "kernel_manifest_refresh":
+          return null;
+        case "kernel_install": {
+          const view = componentById(requireComponent(args));
+          if (view.state !== "not_installed" && view.state !== "tampered") {
+            throw {
+              code: "COMPONENT_BUSY",
+              message: "The component is already installed.",
+            };
+          }
+          const version =
+            view.availableVersion ??
+            (view.component === "ffmpeg"
+              ? "7.2"
+              : view.component === "deno"
+                ? "2.5.0"
+                : "2025.11.01");
+          view.state = "installed";
+          view.activeVersion = version;
+          view.availableVersion = null;
+          view.installedVersions = [...new Set([...view.installedVersions, version])];
+          view.rollbackVersion =
+            view.installedVersions.find((entry) => entry !== version) ?? null;
+          view.operation = null;
+          view.error = null;
+          return null;
+        }
+        case "kernel_update": {
+          const view = componentById(requireComponent(args));
+          if (view.state !== "update_available" || view.availableVersion === null) {
+            throw {
+              code: "COMPONENT_VERSION_MISMATCH",
+              message: "No update is available.",
+            };
+          }
+          const previous = view.activeVersion;
+          const next = view.availableVersion;
+          view.state = "installed";
+          view.activeVersion = next;
+          view.availableVersion = null;
+          view.installedVersions = [...new Set([...view.installedVersions, next])];
+          view.rollbackVersion =
+            previous !== null && previous !== next ? previous : null;
+          view.operation = null;
+          view.error = null;
+          return null;
+        }
+        case "kernel_rollback": {
+          const view = componentById(requireComponent(args));
+          const target = view.rollbackVersion;
+          if (target === null) {
+            throw {
+              code: "COMPONENT_VERSION_MISMATCH",
+              message: "No previous version is available.",
+            };
+          }
+          view.state = "installed";
+          view.activeVersion = target;
+          view.availableVersion = null;
+          view.installedVersions = [...new Set([...view.installedVersions, target])];
+          view.rollbackVersion = null;
+          view.operation = null;
+          view.error = null;
+          return null;
+        }
         case "settings_save": {
           const next = args.settings as Record<string, unknown>;
           state.settings = { ...state.settings, ...next } as Settings;
@@ -237,6 +427,44 @@ export async function installMockIpc(
           return segments(requireId(args));
         case "downloads_probe":
           return probe(args);
+        case "video_probe":
+          if (config.videoProbeError) {
+            throw { ...config.videoProbeError };
+          }
+          return defaultVideoProbe();
+        case "video_start": {
+          const request = args.request as VideoStartRequest | undefined;
+          if (request === undefined) {
+            throw { code: "invalid_argument", message: "Missing video request." };
+          }
+          state.counter += 1;
+          const id = `video-task-${state.counter}`;
+          state.tasks.push({
+            id,
+            kind: "video",
+            video: {
+              title: request.metadata?.title ?? null,
+              durationSecs: request.metadata?.durationSecs ?? null,
+              uploader: request.metadata?.uploader ?? null,
+              quality: request.metadata?.quality ?? null,
+              stage: null,
+              audioOnly: request.audioOnly,
+            },
+            url: request.url,
+            filename: request.filename,
+            destination: request.destination ?? "/tmp/oneget",
+            state: "downloading",
+            downloadedBytes: 0,
+            totalBytes: 42 * 1024 * 1024,
+            connections: 1,
+            createdAtMs: baseTime + 1_000_000 + state.counter,
+            updatedAtMs: baseTime + 1_000_000 + state.counter,
+            completedAtMs: null,
+            errorCode: null,
+            errorMessage: null,
+          });
+          return id;
+        }
         case "downloads_add": {
           const request = args.request as
             | {
@@ -250,6 +478,7 @@ export async function installMockIpc(
           const id = `task-added-${state.counter}`;
           state.tasks.push({
             id,
+            kind: "http",
             url: request?.url ?? "https://fixtures.example.test/file.bin",
             filename: request?.filename ?? "file.bin",
             destination: request?.destination ?? "/tmp/oneget",
@@ -321,7 +550,12 @@ export async function installMockIpc(
     target.__oneGetMock = {
       calls: state.calls,
       snapshot: () => ({
-        tasks: state.tasks.map((task) => ({ id: task.id, state: task.state })),
+        tasks: state.tasks.map((task) => ({
+          id: task.id,
+          state: task.state,
+          kind: task.kind,
+          filename: task.filename,
+        })),
         files: Array.from(state.files),
       }),
     };

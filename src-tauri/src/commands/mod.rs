@@ -2,7 +2,9 @@
 
 pub mod app;
 pub mod downloads;
+pub mod kernel;
 pub mod pairing;
+pub mod video;
 
 /// Tauri command wrappers registered with the runtime.
 pub mod ipc {
@@ -16,7 +18,7 @@ pub mod ipc {
     use crate::error::AppError;
     use crate::platform::deeplink::DeepLinkEvent;
 
-    use super::{app, downloads, pairing};
+    use super::{app, downloads, kernel, pairing, video};
 
     async fn run_blocking<T, F>(task: F) -> Result<T, AppError>
     where
@@ -216,6 +218,65 @@ pub mod ipc {
     ) -> Result<(), AppError> {
         let state = Arc::clone(state.inner());
         run_blocking(move || downloads::downloads_open_folder(&state, &id)).await
+    }
+
+    #[tauri::command]
+    pub async fn kernel_status(
+        state: State<'_, Arc<AppState>>,
+    ) -> Result<Vec<kernel::ComponentStatusView>, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || kernel::kernel_status(&state)).await
+    }
+
+    #[tauri::command]
+    pub async fn kernel_manifest_refresh(state: State<'_, Arc<AppState>>) -> Result<(), AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || kernel::kernel_refresh(&state)).await
+    }
+
+    #[tauri::command]
+    pub async fn kernel_install(
+        state: State<'_, Arc<AppState>>,
+        component: String,
+    ) -> Result<(), AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || kernel::kernel_install(&state, &component)).await
+    }
+
+    #[tauri::command]
+    pub async fn kernel_update(
+        state: State<'_, Arc<AppState>>,
+        component: String,
+    ) -> Result<(), AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || kernel::kernel_update(&state, &component)).await
+    }
+
+    #[tauri::command]
+    pub async fn kernel_rollback(
+        state: State<'_, Arc<AppState>>,
+        component: String,
+    ) -> Result<(), AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || kernel::kernel_rollback(&state, &component)).await
+    }
+
+    #[tauri::command]
+    pub async fn video_probe(
+        state: State<'_, Arc<AppState>>,
+        request: video::VideoProbeRequest,
+    ) -> Result<video::VideoProbeResult, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || video::video_probe(&state, request)).await
+    }
+
+    #[tauri::command]
+    pub async fn video_start(
+        state: State<'_, Arc<AppState>>,
+        request: video::VideoStartRequest,
+    ) -> Result<String, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || video::video_start(&state, request)).await
     }
 
     #[tauri::command]

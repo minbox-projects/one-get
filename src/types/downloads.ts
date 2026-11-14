@@ -17,8 +17,22 @@ export type DownloadCategory =
 
 export type SegmentState = "pending" | "active" | "done" | "failed";
 
+export type DownloadKind = "http" | "video";
+
+/** Persisted video metadata exposed alongside a video task summary. */
+export interface VideoSummary {
+  title: string | null;
+  durationSecs: number | null;
+  uploader: string | null;
+  quality: string | null;
+  stage: string | null;
+  audioOnly: boolean;
+}
+
 export interface DownloadSummary {
   id: string;
+  kind?: DownloadKind;
+  video?: VideoSummary | null;
   url: string;
   finalUrl?: string | null;
   filename: string;

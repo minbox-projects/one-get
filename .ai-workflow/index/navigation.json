@@ -52,6 +52,36 @@
       ]
     },
     {
+      "id": "kernel",
+      "path": "src-tauri/src/kernel",
+      "owner_role": "shared",
+      "responsibility": "Signed component catalog, verified cache, artifact download, declared-file extraction, component store, install/update/rollback, status, and tool resolution",
+      "language": "rust",
+      "entry_kinds": [
+        "file"
+      ]
+    },
+    {
+      "id": "video",
+      "path": "src-tauri/src/video",
+      "owner_role": "shared",
+      "responsibility": "Guarded yt-dlp probe, quality model, process runner, task-owned files, progress, controls, and the one-at-a-time video service",
+      "language": "rust",
+      "entry_kinds": [
+        "file"
+      ]
+    },
+    {
+      "id": "engine-harness",
+      "path": "src-tauri/src/bin",
+      "owner_role": "shared",
+      "responsibility": "Command-line and maintainer binaries: HTTP engine harness, component catalog keygen/sign/verify, and the video process fixture",
+      "language": "rust",
+      "entry_kinds": [
+        "file"
+      ]
+    },
+    {
       "id": "api",
       "path": "src-tauri/src/api",
       "owner_role": "shared",
@@ -65,7 +95,7 @@
       "id": "engine",
       "path": "src-tauri/src/engine",
       "owner_role": "shared",
-      "responsibility": "Headless download engine: probe, transport, planner, conflict-aware part files, workers, scheduler, service actor, retry, rate limiting, cookies, destinations, final-URL recording, deletion, and state machines",
+      "responsibility": "Headless HTTP download engine: probe, transport, planner, conflict-aware part files, HTTP-only workers, scheduler, service actor, retry, rate limiting, cookies, destinations, final-URL recording, deletion, and state machines",
       "language": "rust",
       "entry_kinds": [
         "file"
@@ -75,7 +105,7 @@
       "id": "store",
       "path": "src-tauri/src/store",
       "owner_role": "shared",
-      "responsibility": "Durable SQLite task store: connection setup, schema 1 and 2 migrations, per-task destinations, part names, minimized final URLs, task and segment records, and progress persistence",
+      "responsibility": "Durable SQLite task store: schema 1 to 3 migrations, task kind and video records, destinations, part names, minimized final URLs, task and segment records, and progress persistence",
       "language": "rust",
       "entry_kinds": [
         "file"
@@ -85,17 +115,7 @@
       "id": "commands",
       "path": "src-tauri/src/commands",
       "owner_role": "shared",
-      "responsibility": "Tauri command surface: typed download, settings, diagnostics, pairing, and quit commands plus directly testable service functions",
-      "language": "rust",
-      "entry_kinds": [
-        "file"
-      ]
-    },
-    {
-      "id": "engine-harness",
-      "path": "src-tauri/src/bin",
-      "owner_role": "shared",
-      "responsibility": "Command-line harness for adding, running, inspecting, pausing, resuming, and cancelling one task",
+      "responsibility": "Tauri command surface for downloads, video, components, settings, diagnostics, pairing, and quit",
       "language": "rust",
       "entry_kinds": [
         "file"
@@ -131,9 +151,11 @@
         "e2e/capture-prefill.spec.ts",
         "e2e/design-system.spec.ts",
         "e2e/downloads.spec.ts",
+        "e2e/kernel.spec.ts",
         "e2e/keyboard.spec.ts",
         "e2e/settings.spec.ts",
-        "e2e/smoke.spec.ts"
+        "e2e/smoke.spec.ts",
+        "e2e/video.spec.ts"
       ],
       "depends_on": [],
       "relations": [],
@@ -144,10 +166,12 @@
         "e2e/capture-prefill.spec.ts",
         "e2e/design-system.spec.ts",
         "e2e/downloads.spec.ts",
+        "e2e/kernel.spec.ts",
         "e2e/keyboard.spec.ts",
         "e2e/settings.spec.ts",
         "e2e/smoke.spec.ts",
-        "e2e/support/mock-ipc.ts"
+        "e2e/support/mock-ipc.ts",
+        "e2e/video.spec.ts"
       ],
       "shared_entry": false
     },
@@ -1156,7 +1180,8 @@
       "aliases": [],
       "module_root": "scripts",
       "entries": [
-        "scripts/check-direct-dependency-pins.mjs"
+        "scripts/check-direct-dependency-pins.mjs",
+        "scripts/kernel-fixture.mjs"
       ],
       "symbols": [],
       "related_files": [],
@@ -1166,7 +1191,8 @@
       "owner_role": "shared",
       "responsibility": "Discovered typescript module at scripts",
       "read_scope": [
-        "scripts/check-direct-dependency-pins.mjs"
+        "scripts/check-direct-dependency-pins.mjs",
+        "scripts/kernel-fixture.mjs"
       ],
       "shared_entry": false
     },
@@ -1205,6 +1231,8 @@
         "src/features/downloads/format.ts",
         "src/features/downloads/useDownloads.ts",
         "src/features/downloads/useProbe.ts",
+        "src/features/kernel/ComponentsSection.tsx",
+        "src/features/kernel/MissingComponentAction.tsx",
         "src/features/pairing/PairingRevokeDialog.tsx",
         "src/features/pairing/PairingSettings.tsx",
         "src/features/pairing/usePairing.ts",
@@ -1213,18 +1241,23 @@
         "src/features/settings/NetworkPlaceholder.tsx",
         "src/features/settings/SettingsDialog.tsx",
         "src/features/settings/useSettings.ts",
+        "src/features/video/VideoQualityDialog.tsx",
         "src/i18n/index.tsx",
         "src/lib/cn.ts",
         "src/lib/dialog.ts",
         "src/lib/downloads.ts",
         "src/lib/events.ts",
         "src/lib/format.ts",
+        "src/lib/kernel.ts",
         "src/lib/pairing.ts",
         "src/lib/tauri.ts",
+        "src/lib/video.ts",
         "src/test/mocks/tauri.ts",
         "src/types/app.ts",
         "src/types/downloads.ts",
-        "src/types/pairing.ts"
+        "src/types/kernel.ts",
+        "src/types/pairing.ts",
+        "src/types/video.ts"
       ],
       "symbols": [
         {
@@ -1732,6 +1765,12 @@
           "visibility": "public"
         },
         {
+          "file": "src/features/downloads/errorMessages.ts",
+          "name": "requiresComponentInstall",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
           "file": "src/features/downloads/filters.ts",
           "name": "STATE_SORT_ORDER",
           "kind": "variable",
@@ -1813,6 +1852,24 @@
           "file": "src/features/downloads/useProbe.ts",
           "name": "useProbe",
           "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/kernel/ComponentsSection.tsx",
+          "name": "ComponentsSection",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/kernel/MissingComponentAction.tsx",
+          "name": "MissingComponentAction",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/kernel/MissingComponentAction.tsx",
+          "name": "MissingComponentActionProps",
+          "kind": "interface",
           "visibility": "public"
         },
         {
@@ -1921,6 +1978,18 @@
           "file": "src/features/settings/useSettings.ts",
           "name": "useSettings",
           "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/video/VideoQualityDialog.tsx",
+          "name": "VideoQualityDialog",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/video/VideoQualityDialog.tsx",
+          "name": "VideoQualityDialogProps",
+          "kind": "interface",
           "visibility": "public"
         },
         {
@@ -2152,6 +2221,36 @@
           "visibility": "public"
         },
         {
+          "file": "src/lib/kernel.ts",
+          "name": "getKernelStatus",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/kernel.ts",
+          "name": "installComponent",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/kernel.ts",
+          "name": "refreshKernelManifest",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/kernel.ts",
+          "name": "rollbackComponent",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/kernel.ts",
+          "name": "updateComponent",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
           "file": "src/lib/pairing.ts",
           "name": "generatePairingCode",
           "kind": "function",
@@ -2220,6 +2319,18 @@
         {
           "file": "src/lib/tauri.ts",
           "name": "isTauriRuntime",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/video.ts",
+          "name": "probeVideo",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/video.ts",
+          "name": "startVideoDownload",
           "kind": "function",
           "visibility": "public"
         },
@@ -2387,6 +2498,12 @@
         },
         {
           "file": "src/types/downloads.ts",
+          "name": "DownloadKind",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/downloads.ts",
           "name": "DownloadSegment",
           "kind": "interface",
           "visibility": "public"
@@ -2428,6 +2545,36 @@
           "visibility": "public"
         },
         {
+          "file": "src/types/downloads.ts",
+          "name": "VideoSummary",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/kernel.ts",
+          "name": "ComponentName",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/kernel.ts",
+          "name": "ComponentOperation",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/kernel.ts",
+          "name": "ComponentState",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/kernel.ts",
+          "name": "ComponentStatusView",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
           "file": "src/types/pairing.ts",
           "name": "PairedClientView",
           "kind": "interface",
@@ -2460,6 +2607,36 @@
         {
           "file": "src/types/pairing.ts",
           "name": "PrefillHeader",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/video.ts",
+          "name": "VideoChoice",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/video.ts",
+          "name": "VideoProbeRequest",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/video.ts",
+          "name": "VideoProbeResult",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/video.ts",
+          "name": "VideoStartMetadata",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/video.ts",
+          "name": "VideoStartRequest",
           "kind": "interface",
           "visibility": "public"
         }
@@ -2501,10 +2678,14 @@
         "src/features/downloads/useDownloads.actions.test.ts",
         "src/features/downloads/useDownloads.test.ts",
         "src/features/downloads/useProbe.test.ts",
+        "src/features/kernel/ComponentsSection.test.tsx",
+        "src/features/kernel/api.test.tsx",
         "src/features/pairing/PairingSettings.test.tsx",
         "src/features/pairing/usePairing.test.ts",
         "src/features/settings/SettingsDialog.test.tsx",
         "src/features/settings/useSettings.test.ts",
+        "src/features/video/VideoQualityDialog.test.tsx",
+        "src/features/video/api.test.tsx",
         "src/i18n/index.test.tsx",
         "src/lib/dialog.test.ts",
         "src/lib/events.test.ts",
@@ -3050,7 +3231,27 @@
         {
           "kind": "imports",
           "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/features/downloads/errorMessages.ts#errorMessageKey"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/features/downloads/errorMessages.ts#requiresComponentInstall"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
           "to": "src/features/downloads/useProbe.ts#useProbe"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/features/kernel/MissingComponentAction.tsx#MissingComponentAction"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/features/video/VideoQualityDialog.tsx#VideoQualityDialog"
         },
         {
           "kind": "imports",
@@ -3070,7 +3271,22 @@
         {
           "kind": "imports",
           "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/lib/video.ts#probeVideo"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/types/app.ts#AppError"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
           "to": "src/types/downloads.ts#HeaderPair"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/types/video.ts#VideoProbeResult"
         },
         {
           "kind": "imports",
@@ -3096,6 +3312,16 @@
           "kind": "imports",
           "from": "src/features/downloads/TaskDetails.tsx#TaskDetails",
           "to": "src/features/downloads/errorMessages.ts#errorMessageKey"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskDetails.tsx#TaskDetails",
+          "to": "src/features/downloads/errorMessages.ts#requiresComponentInstall"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/TaskDetails.tsx#TaskDetails",
+          "to": "src/features/kernel/MissingComponentAction.tsx#MissingComponentAction"
         },
         {
           "kind": "imports",
@@ -3334,6 +3560,76 @@
         },
         {
           "kind": "imports",
+          "from": "src/features/kernel/ComponentsSection.tsx#ComponentsSection",
+          "to": "src/components/ui/Badge.tsx#Badge"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/kernel/ComponentsSection.tsx#ComponentsSection",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/kernel/ComponentsSection.tsx#ComponentsSection",
+          "to": "src/components/ui/ProgressBar.tsx#ProgressBar"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/kernel/ComponentsSection.tsx#ComponentsSection",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/kernel/ComponentsSection.tsx#ComponentsSection",
+          "to": "src/lib/kernel.ts#getKernelStatus"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/kernel/ComponentsSection.tsx#ComponentsSection",
+          "to": "src/lib/kernel.ts#installComponent"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/kernel/ComponentsSection.tsx#ComponentsSection",
+          "to": "src/lib/kernel.ts#refreshKernelManifest"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/kernel/ComponentsSection.tsx#ComponentsSection",
+          "to": "src/lib/kernel.ts#rollbackComponent"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/kernel/ComponentsSection.tsx#ComponentsSection",
+          "to": "src/lib/kernel.ts#updateComponent"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/kernel/ComponentsSection.tsx#ComponentsSection",
+          "to": "src/types/app.ts#AppError"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/kernel/ComponentsSection.tsx#ComponentsSection",
+          "to": "src/types/kernel.ts#ComponentName"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/kernel/ComponentsSection.tsx#ComponentsSection",
+          "to": "src/types/kernel.ts#ComponentStatusView"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/kernel/MissingComponentAction.tsx#MissingComponentAction",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/kernel/MissingComponentAction.tsx#MissingComponentAction",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
           "from": "src/features/pairing/PairingRevokeDialog.tsx#PairingRevokeDialog",
           "to": "src/components/ui/Button.tsx#Button"
         },
@@ -3500,6 +3796,11 @@
         {
           "kind": "imports",
           "from": "src/features/settings/SettingsDialog.tsx#SettingsDialog",
+          "to": "src/features/kernel/ComponentsSection.tsx#ComponentsSection"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/SettingsDialog.tsx#SettingsDialog",
           "to": "src/features/pairing/PairingSettings.tsx#PairingSettings"
         },
         {
@@ -3551,6 +3852,61 @@
           "kind": "imports",
           "from": "src/features/settings/useSettings.ts#useSettings",
           "to": "src/types/app.ts#SettingsStatus"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/video/VideoQualityDialog.tsx#VideoQualityDialog",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/video/VideoQualityDialog.tsx#VideoQualityDialog",
+          "to": "src/components/ui/Dialog.tsx#Dialog"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/video/VideoQualityDialog.tsx#VideoQualityDialog",
+          "to": "src/components/ui/Input.tsx#Input"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/video/VideoQualityDialog.tsx#VideoQualityDialog",
+          "to": "src/features/downloads/downloadValidation.ts#validateFilename"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/video/VideoQualityDialog.tsx#VideoQualityDialog",
+          "to": "src/features/downloads/errorMessages.ts#errorMessageKey"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/video/VideoQualityDialog.tsx#VideoQualityDialog",
+          "to": "src/features/downloads/errorMessages.ts#requiresComponentInstall"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/video/VideoQualityDialog.tsx#VideoQualityDialog",
+          "to": "src/features/kernel/MissingComponentAction.tsx#MissingComponentAction"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/video/VideoQualityDialog.tsx#VideoQualityDialog",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/video/VideoQualityDialog.tsx#VideoQualityDialog",
+          "to": "src/lib/video.ts#startVideoDownload"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/video/VideoQualityDialog.tsx#VideoQualityDialog",
+          "to": "src/types/app.ts#AppError"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/video/VideoQualityDialog.tsx#VideoQualityDialogProps",
+          "to": "src/types/video.ts#VideoProbeResult"
         },
         {
           "kind": "imports",
@@ -3749,6 +4105,76 @@
         },
         {
           "kind": "imports",
+          "from": "src/lib/kernel.ts#getKernelStatus",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/kernel.ts#getKernelStatus",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/kernel.ts#getKernelStatus",
+          "to": "src/types/kernel.ts#ComponentStatusView"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/kernel.ts#installComponent",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/kernel.ts#installComponent",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/kernel.ts#installComponent",
+          "to": "src/types/kernel.ts#ComponentName"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/kernel.ts#refreshKernelManifest",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/kernel.ts#refreshKernelManifest",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/kernel.ts#rollbackComponent",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/kernel.ts#rollbackComponent",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/kernel.ts#rollbackComponent",
+          "to": "src/types/kernel.ts#ComponentName"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/kernel.ts#updateComponent",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/kernel.ts#updateComponent",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/kernel.ts#updateComponent",
+          "to": "src/types/kernel.ts#ComponentName"
+        },
+        {
+          "kind": "imports",
           "from": "src/lib/pairing.ts#generatePairingCode",
           "to": "src/lib/tauri.ts#invokeCommand"
         },
@@ -3824,6 +4250,41 @@
         },
         {
           "kind": "imports",
+          "from": "src/lib/video.ts#probeVideo",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/video.ts#probeVideo",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/video.ts#probeVideo",
+          "to": "src/types/video.ts#VideoProbeRequest"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/video.ts#probeVideo",
+          "to": "src/types/video.ts#VideoProbeResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/video.ts#startVideoDownload",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/video.ts#startVideoDownload",
+          "to": "src/types/app.ts#IpcResult"
+        },
+        {
+          "kind": "imports",
+          "from": "src/lib/video.ts#startVideoDownload",
+          "to": "src/types/video.ts#VideoStartRequest"
+        },
+        {
+          "kind": "imports",
           "from": "src/types/app.ts#CommandArgs",
           "to": "src/types/downloads.ts#AddDownloadRequest"
         },
@@ -3851,6 +4312,11 @@
           "kind": "imports",
           "from": "src/types/app.ts#Settings",
           "to": "src/i18n/index.tsx#LanguageSetting"
+        },
+        {
+          "kind": "imports",
+          "from": "src/types/kernel.ts#ComponentStatusView",
+          "to": "src/types/app.ts#AppError"
         }
       ],
       "owner_role": "shared",
@@ -3914,6 +4380,10 @@
         "src/features/downloads/useDownloads.ts",
         "src/features/downloads/useProbe.test.ts",
         "src/features/downloads/useProbe.ts",
+        "src/features/kernel/ComponentsSection.test.tsx",
+        "src/features/kernel/ComponentsSection.tsx",
+        "src/features/kernel/MissingComponentAction.tsx",
+        "src/features/kernel/api.test.tsx",
         "src/features/pairing/PairingRevokeDialog.tsx",
         "src/features/pairing/PairingSettings.test.tsx",
         "src/features/pairing/PairingSettings.tsx",
@@ -3926,6 +4396,9 @@
         "src/features/settings/SettingsDialog.tsx",
         "src/features/settings/useSettings.test.ts",
         "src/features/settings/useSettings.ts",
+        "src/features/video/VideoQualityDialog.test.tsx",
+        "src/features/video/VideoQualityDialog.tsx",
+        "src/features/video/api.test.tsx",
         "src/i18n/en-US.ts",
         "src/i18n/index.test.tsx",
         "src/i18n/index.tsx",
@@ -3937,15 +4410,19 @@
         "src/lib/events.test.ts",
         "src/lib/events.ts",
         "src/lib/format.ts",
+        "src/lib/kernel.ts",
         "src/lib/pairing.test.ts",
         "src/lib/pairing.ts",
         "src/lib/tauri.ts",
+        "src/lib/video.ts",
         "src/main.tsx",
         "src/test/mocks/tauri.ts",
         "src/test/setup.ts",
         "src/types/app.ts",
         "src/types/downloads.ts",
+        "src/types/kernel.ts",
         "src/types/pairing.ts",
+        "src/types/video.ts",
         "src/vite-env.d.ts"
       ],
       "shared_entry": false
@@ -4257,7 +4734,7 @@
       ],
       "relations": [],
       "owner_role": "shared",
-      "responsibility": "Headless download engine: probe, transport, planner, conflict-aware part files, workers, scheduler, service actor, retry, rate limiting, cookies, destinations, final-URL recording, deletion, and state machines",
+      "responsibility": "Headless HTTP download engine: probe, transport, planner, conflict-aware part files, HTTP-only workers, scheduler, service actor, retry, rate limiting, cookies, destinations, final-URL recording, deletion, and state machines",
       "read_scope": [
         "src-tauri/src/engine/scheduler.rs",
         "src-tauri/src/engine/service.rs",
@@ -4306,20 +4783,38 @@
         },
         {
           "file": "src-tauri/src/store/types.rs",
-          "name": "TaskRecord",
-          "kind": "struct",
-          "visibility": "public"
-        },
-        {
-          "file": "src-tauri/src/store/types.rs",
-          "name": "SegmentRecord",
-          "kind": "struct",
-          "visibility": "public"
-        },
-        {
-          "file": "src-tauri/src/store/types.rs",
-          "name": "TaskState",
+          "name": "TaskKind",
           "kind": "enum",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/store/types.rs",
+          "name": "VideoTaskInput",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/store/types.rs",
+          "name": "Task",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/store/types.rs",
+          "name": "Segment",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/store/types.rs",
+          "name": "SegmentInput",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/store/types.rs",
+          "name": "SegmentProgressInput",
+          "kind": "struct",
           "visibility": "public"
         }
       ],
@@ -4330,7 +4825,7 @@
       "depends_on": [],
       "relations": [],
       "owner_role": "shared",
-      "responsibility": "Durable SQLite task store: connection setup, schema 1 and 2 migrations, per-task destinations, part names, minimized final URLs, task and segment records, and progress persistence",
+      "responsibility": "Durable SQLite task store: connection setup, schema 1 to 3 migrations, task kind and video records, per-task destinations, part names, minimized final URLs, task and segment records, and progress persistence",
       "read_scope": [
         "src-tauri/src/store/db.rs",
         "src-tauri/src/store/migrations.rs",
@@ -4348,10 +4843,12 @@
       "aliases": [],
       "module_root": "commands",
       "entries": [
-        "src-tauri/src/commands/downloads.rs",
         "src-tauri/src/commands/app.rs",
+        "src-tauri/src/commands/downloads.rs",
+        "src-tauri/src/commands/kernel.rs",
+        "src-tauri/src/commands/mod.rs",
         "src-tauri/src/commands/pairing.rs",
-        "src-tauri/src/commands/mod.rs"
+        "src-tauri/src/commands/video.rs"
       ],
       "symbols": [
         {
@@ -4363,6 +4860,48 @@
         {
           "file": "src-tauri/src/commands/downloads.rs",
           "name": "downloads_add",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/kernel.rs",
+          "name": "kernel_status",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/mod.rs",
+          "name": "kernel_manifest_refresh",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/kernel.rs",
+          "name": "kernel_install",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/kernel.rs",
+          "name": "kernel_update",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/kernel.rs",
+          "name": "kernel_rollback",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/video.rs",
+          "name": "video_probe",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/video.rs",
+          "name": "video_start",
           "kind": "function",
           "visibility": "public"
         },
@@ -4400,25 +4939,420 @@
       "related_files": [],
       "tests": [
         "src-tauri/tests/downloads_commands.rs",
+        "src-tauri/tests/kernel_commands.rs",
+        "src-tauri/tests/video_commands.rs",
         "src-tauri/tests/shell_contract.rs",
         "src-tauri/tests/pairing_commands.rs"
       ],
       "depends_on": [
         "api",
         "engine",
+        "store",
+        "kernel",
+        "video"
+      ],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Tauri command surface: typed download, video, component, settings, diagnostics, pairing, and quit commands plus directly testable service functions",
+      "read_scope": [
+        "src-tauri/src/commands/app.rs",
+        "src-tauri/src/commands/downloads.rs",
+        "src-tauri/src/commands/kernel.rs",
+        "src-tauri/src/commands/mod.rs",
+        "src-tauri/src/commands/pairing.rs",
+        "src-tauri/src/commands/video.rs",
+        "src-tauri/tests/downloads_commands.rs",
+        "src-tauri/tests/kernel_commands.rs",
+        "src-tauri/tests/video_commands.rs",
+        "src-tauri/tests/shell_contract.rs",
+        "src-tauri/tests/pairing_commands.rs"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "kernel",
+      "name": "kernel",
+      "aliases": [],
+      "module_root": "kernel",
+      "entries": [
+        "src-tauri/src/kernel/archive.rs",
+        "src-tauri/src/kernel/catalog.rs",
+        "src-tauri/src/kernel/download.rs",
+        "src-tauri/src/kernel/error.rs",
+        "src-tauri/src/kernel/install.rs",
+        "src-tauri/src/kernel/manifest.rs",
+        "src-tauri/src/kernel/mod.rs",
+        "src-tauri/src/kernel/source.rs",
+        "src-tauri/src/kernel/status.rs",
+        "src-tauri/src/kernel/store.rs",
+        "src-tauri/src/kernel/tools.rs"
+      ],
+      "symbols": [
+        {
+          "file": "src-tauri/src/kernel/catalog.rs",
+          "name": "Target",
+          "kind": "enum",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/catalog.rs",
+          "name": "ArchiveType",
+          "kind": "enum",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/catalog.rs",
+          "name": "FileRole",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/catalog.rs",
+          "name": "Artifact",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/catalog.rs",
+          "name": "ComponentEntry",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/catalog.rs",
+          "name": "ComponentCatalog",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/catalog.rs",
+          "name": "verify_catalog",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/error.rs",
+          "name": "KernelError",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/install.rs",
+          "name": "Installer",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/install.rs",
+          "name": "InstallOutcome",
+          "kind": "enum",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/manifest.rs",
+          "name": "verify_manifest",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/manifest.rs",
+          "name": "canonicalize",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/source.rs",
+          "name": "CatalogCache",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/status.rs",
+          "name": "ComponentState",
+          "kind": "enum",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/status.rs",
+          "name": "ComponentStatus",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/status.rs",
+          "name": "component_statuses",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/store.rs",
+          "name": "ComponentStore",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/store.rs",
+          "name": "ComponentInstall",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/store.rs",
+          "name": "InstalledFile",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/tools.rs",
+          "name": "ToolRequirement",
+          "kind": "enum",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/tools.rs",
+          "name": "ResolvedTools",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/tools.rs",
+          "name": "ToolResolver",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/archive.rs",
+          "name": "ArchiveLimits",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/kernel/archive.rs",
+          "name": "extract_declared_zip",
+          "kind": "function",
+          "visibility": "public"
+        }
+      ],
+      "related_files": [
+        "src-tauri/tests/support/kernel_server.rs",
+        "src-tauri/src/platform/component.rs"
+      ],
+      "tests": [
+        "src-tauri/tests/kernel_manifest.rs",
+        "src-tauri/tests/kernel_install.rs",
+        "src-tauri/tests/kernel_commands.rs"
+      ],
+      "depends_on": [
         "store"
       ],
       "relations": [],
       "owner_role": "shared",
-      "responsibility": "Tauri command surface: typed download, settings, diagnostics, pairing, and quit commands plus directly testable service functions",
+      "responsibility": "Signed component catalog and installation: strict Ed25519 catalog policy, verified cache, bounded artifact download, declared-file ZIP extraction, component database, update/rollback, status, and hash-verified tool resolution",
       "read_scope": [
-        "src-tauri/src/commands/downloads.rs",
-        "src-tauri/src/commands/app.rs",
-        "src-tauri/src/commands/pairing.rs",
-        "src-tauri/src/commands/mod.rs",
-        "src-tauri/tests/downloads_commands.rs",
-        "src-tauri/tests/shell_contract.rs",
-        "src-tauri/tests/pairing_commands.rs"
+        "src-tauri/src/kernel/archive.rs",
+        "src-tauri/src/kernel/catalog.rs",
+        "src-tauri/src/kernel/download.rs",
+        "src-tauri/src/kernel/error.rs",
+        "src-tauri/src/kernel/install.rs",
+        "src-tauri/src/kernel/manifest.rs",
+        "src-tauri/src/kernel/mod.rs",
+        "src-tauri/src/kernel/source.rs",
+        "src-tauri/src/kernel/status.rs",
+        "src-tauri/src/kernel/store.rs",
+        "src-tauri/src/kernel/tools.rs",
+        "src-tauri/tests/kernel_manifest.rs",
+        "src-tauri/tests/kernel_install.rs",
+        "src-tauri/tests/kernel_commands.rs",
+        "src-tauri/tests/support/kernel_server.rs",
+        "src-tauri/src/platform/component.rs"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "video",
+      "name": "video",
+      "aliases": [],
+      "module_root": "video",
+      "entries": [
+        "src-tauri/src/video/control.rs",
+        "src-tauri/src/video/download.rs",
+        "src-tauri/src/video/error.rs",
+        "src-tauri/src/video/files.rs",
+        "src-tauri/src/video/metadata.rs",
+        "src-tauri/src/video/mod.rs",
+        "src-tauri/src/video/probe.rs",
+        "src-tauri/src/video/process.rs",
+        "src-tauri/src/video/progress.rs",
+        "src-tauri/src/video/quality.rs",
+        "src-tauri/src/video/service.rs"
+      ],
+      "symbols": [
+        {
+          "file": "src-tauri/src/video/error.rs",
+          "name": "VideoError",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/metadata.rs",
+          "name": "VideoFormat",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/metadata.rs",
+          "name": "VideoMetadata",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/probe.rs",
+          "name": "ProbeOptions",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/probe.rs",
+          "name": "probe_video",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/quality.rs",
+          "name": "ChoiceKind",
+          "kind": "enum",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/quality.rs",
+          "name": "QualityChoice",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/quality.rs",
+          "name": "QualityModel",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/quality.rs",
+          "name": "build_quality_model",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/process.rs",
+          "name": "ProcessSpec",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/process.rs",
+          "name": "ProcessOutput",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/process.rs",
+          "name": "TimeoutPolicy",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/process.rs",
+          "name": "run_probe",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/process.rs",
+          "name": "run_download_interruptible",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/control.rs",
+          "name": "ControlAction",
+          "kind": "enum",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/control.rs",
+          "name": "DownloadControl",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/service.rs",
+          "name": "VideoServiceConfig",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/service.rs",
+          "name": "StartVideoRequest",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/service.rs",
+          "name": "ProbeResult",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/video/service.rs",
+          "name": "VideoService",
+          "kind": "struct",
+          "visibility": "public"
+        }
+      ],
+      "related_files": [
+        "src-tauri/tests/fixtures/media/sample.mp4",
+        "src-tauri/tests/fixtures/hls/aes128/index.m3u8",
+        "src-tauri/tests/fixtures/hls/aes128/segment0.ts",
+        "src-tauri/tests/fixtures/hls/aes128/segment1.ts",
+        "src-tauri/tests/fixtures/hls/aes128/segment2.ts"
+      ],
+      "tests": [
+        "src-tauri/tests/video_process.rs",
+        "src-tauri/tests/video_probe.rs",
+        "src-tauri/tests/video_download.rs",
+        "src-tauri/tests/video_hls.rs",
+        "src-tauri/tests/video_recovery.rs",
+        "src-tauri/tests/video_commands.rs"
+      ],
+      "depends_on": [
+        "store",
+        "kernel"
+      ],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Guarded video pipeline: yt-dlp probe and quality model, process containment and bounds, one-at-a-time service, task-owned temporary files, progress, pause/resume/cancel, recovery, and delegated HLS/DASH/AES-128 execution",
+      "read_scope": [
+        "src-tauri/src/video/control.rs",
+        "src-tauri/src/video/download.rs",
+        "src-tauri/src/video/error.rs",
+        "src-tauri/src/video/files.rs",
+        "src-tauri/src/video/metadata.rs",
+        "src-tauri/src/video/mod.rs",
+        "src-tauri/src/video/probe.rs",
+        "src-tauri/src/video/process.rs",
+        "src-tauri/src/video/progress.rs",
+        "src-tauri/src/video/quality.rs",
+        "src-tauri/src/video/service.rs",
+        "src-tauri/tests/video_process.rs",
+        "src-tauri/tests/video_probe.rs",
+        "src-tauri/tests/video_download.rs",
+        "src-tauri/tests/video_hls.rs",
+        "src-tauri/tests/video_recovery.rs",
+        "src-tauri/tests/video_commands.rs",
+        "src-tauri/tests/fixtures/media/sample.mp4",
+        "src-tauri/tests/fixtures/hls/aes128/index.m3u8",
+        "src-tauri/tests/fixtures/hls/aes128/segment0.ts",
+        "src-tauri/tests/fixtures/hls/aes128/segment1.ts",
+        "src-tauri/tests/fixtures/hls/aes128/segment2.ts"
       ],
       "shared_entry": false
     },
@@ -4455,11 +5389,72 @@
       ],
       "relations": [],
       "owner_role": "shared",
-      "responsibility": "Command-line harness for adding, running, inspecting, pausing, resuming, and cancelling one task",
+      "responsibility": "Command-line harness for adding, running, inspecting, pausing, resuming, and cancelling one HTTP task",
       "read_scope": [
         "src-tauri/src/bin/engine_harness.rs",
         "src-tauri/tests/engine_recovery.rs",
         "src-tauri/tests/engine_queue.rs"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "kernel-manifest",
+      "name": "kernel-manifest",
+      "aliases": [],
+      "module_root": "engine-harness",
+      "entries": [
+        "src-tauri/src/bin/kernel_manifest.rs"
+      ],
+      "symbols": [
+        {
+          "file": "src-tauri/src/bin/kernel_manifest.rs",
+          "name": "main",
+          "kind": "function",
+          "visibility": "private"
+        }
+      ],
+      "related_files": [],
+      "tests": [],
+      "depends_on": [],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Maintainer tool for signed component catalogs: keygen, sign, and verify without storing or logging private key material",
+      "read_scope": [
+        "src-tauri/src/bin/kernel_manifest.rs"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "video-fixture",
+      "name": "video-fixture",
+      "aliases": [],
+      "module_root": "engine-harness",
+      "entries": [
+        "src-tauri/src/bin/video_fixture.rs"
+      ],
+      "symbols": [
+        {
+          "file": "src-tauri/src/bin/video_fixture.rs",
+          "name": "main",
+          "kind": "function",
+          "visibility": "private"
+        }
+      ],
+      "related_files": [],
+      "tests": [
+        "src-tauri/tests/video_process.rs",
+        "src-tauri/tests/video_probe.rs"
+      ],
+      "depends_on": [
+        "video"
+      ],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Cross-platform fixture process for valid probe output, progress, merge, failure, hang, flood, grandchild, and missing-output cases",
+      "read_scope": [
+        "src-tauri/src/bin/video_fixture.rs",
+        "src-tauri/tests/video_process.rs",
+        "src-tauri/tests/video_probe.rs"
       ],
       "shared_entry": false
     }

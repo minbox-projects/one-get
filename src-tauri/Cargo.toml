@@ -42,6 +42,7 @@ unicode-normalization = "0.1"
 url = "2.5.8"
 uuid = { version = "=1.29.2", features = ["v4"] }
 zeroize = "1.9.1"
+zip = { version = "=9.5.1", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [

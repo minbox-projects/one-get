@@ -2,6 +2,55 @@
 
 use crate::engine::state::{SegmentState, TaskState};
 
+/// Which pipeline owns and runs a persisted task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TaskKind {
+    /// The byte-range HTTP download engine.
+    Http,
+    /// The external-tool video pipeline.
+    Video,
+}
+
+impl TaskKind {
+    /// Stable lowercase representation stored in the database.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Video => "video",
+        }
+    }
+
+    /// Parse a stored task kind.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "http" => Some(Self::Http),
+            "video" => Some(Self::Video),
+            _ => None,
+        }
+    }
+}
+
+/// Input used to persist a new video task.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VideoTaskInput {
+    /// Minimized source URL; the full URL stays in memory.
+    pub url: String,
+    /// Sanitized destination filename.
+    pub filename: String,
+    /// Destination directory, or `None` for the configured default.
+    pub destination: Option<String>,
+    /// Selected yt-dlp format selector.
+    pub format_selector: String,
+    /// Optional Netscape cookies-file path passed to yt-dlp.
+    pub cookies_file: Option<String>,
+    /// Optional credential-free HTTP proxy URL passed to yt-dlp.
+    pub proxy_url: Option<String>,
+    /// Parsed probe metadata stored for the task details.
+    pub metadata: serde_json::Value,
+    /// Whether the full source URL survived persistence.
+    pub full_url_persisted: bool,
+}
+
 /// Observable configuration and structure of the open database.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaMetadata {
@@ -20,10 +69,14 @@ pub struct SchemaMetadata {
 }
 
 /// A persisted download task.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Task {
     /// Stable task identifier.
     pub id: String,
+    /// Pipeline that owns and runs this task.
+    pub kind: TaskKind,
+    /// Structured video record for a `video` task.
+    pub video: Option<serde_json::Value>,
     /// Original remote URL.
     pub url: String,
     /// Final URL after redirects, stored without userinfo, query, or fragment.
