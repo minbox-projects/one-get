@@ -17,6 +17,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::time::Instant;
 
+use super::control::DownloadControl;
 use super::error::VideoError;
 use crate::platform::process::ChildGuard;
 
@@ -222,6 +223,191 @@ where
         return Err(VideoError::process_failed(error_tail(&output)));
     }
     Ok(output)
+}
+
+/// Why an interruptible download ended.
+#[derive(Debug)]
+pub enum DownloadRunOutcome {
+    /// The process exited successfully and its output was captured.
+    Completed(ProcessOutput),
+    /// A pause or cancel request killed the whole process tree.
+    Cancelled,
+}
+
+/// Run a download while a [`DownloadControl`] can kill the whole tree.
+///
+/// Unlike [`run_download`], the line callback stays on the caller's thread and
+/// no reader task is spawned, so the callback can persist progress through a
+/// non-`Send` store handle. Cancellation, the startup timeout, and the
+/// inactivity timeout all terminate the process group or Job Object before this
+/// future resolves.
+pub async fn run_download_interruptible<F>(
+    spec: &ProcessSpec,
+    policy: &TimeoutPolicy,
+    control: &DownloadControl,
+    mut on_line: F,
+) -> Result<DownloadRunOutcome, VideoError>
+where
+    F: FnMut(&str),
+{
+    let mut guard = spawn_guard(spec)?;
+    let mut stdout = guard.take_stdout();
+    let mut stderr = guard.take_stderr();
+    let mut capture = Capture::new();
+    let mut stdout_buffer = [0u8; READ_CHUNK];
+    let mut stderr_buffer = [0u8; READ_CHUNK];
+    let mut stdout_carry: Vec<u8> = Vec::new();
+    let mut stderr_carry: Vec<u8> = Vec::new();
+    let mut stdout_open = stdout.is_some();
+    let mut stderr_open = stderr.is_some();
+    let mut last_line: Option<Instant> = None;
+    let started = Instant::now();
+    let mut status: Option<ExitStatus> = None;
+
+    loop {
+        if status.is_none() {
+            match guard.try_wait() {
+                Ok(Some(done)) => {
+                    let _ = guard.wait().await;
+                    status = Some(done);
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    let _ = tokio::time::timeout(policy.shutdown, guard.kill_tree()).await;
+                    return Err(VideoError::process_failed(
+                        "the video process status could not be observed",
+                    ));
+                }
+            }
+        }
+
+        if status.is_some() && !stdout_open && !stderr_open {
+            break;
+        }
+
+        if control.reason().is_some() {
+            let _ = tokio::time::timeout(policy.shutdown, guard.kill_tree()).await;
+            return Ok(DownloadRunOutcome::Cancelled);
+        }
+
+        let expired = match last_line {
+            Some(last) => last.elapsed() >= policy.inactivity,
+            None => started.elapsed() >= policy.startup,
+        };
+        if expired && status.is_none() {
+            let _ = tokio::time::timeout(policy.shutdown, guard.kill_tree()).await;
+            return Err(VideoError::timeout());
+        }
+
+        let stdout_ready = stdout_open;
+        let stderr_ready = stderr_open;
+        let read_stdout = async {
+            if !stdout_ready {
+                return std::future::pending().await;
+            }
+            match stdout.as_mut() {
+                Some(reader) => reader.read(&mut stdout_buffer).await,
+                None => std::future::pending().await,
+            }
+        };
+        let read_stderr = async {
+            if !stderr_ready {
+                return std::future::pending().await;
+            }
+            match stderr.as_mut() {
+                Some(reader) => reader.read(&mut stderr_buffer).await,
+                None => std::future::pending().await,
+            }
+        };
+
+        tokio::select! {
+            _ = control.notified() => {
+                continue;
+            }
+            result = read_stdout => {
+                match result {
+                    Ok(0) => {
+                        stdout_open = false;
+                        if !stdout_carry.is_empty() {
+                            let line = String::from_utf8_lossy(&stdout_carry).into_owned();
+                            stdout_carry.clear();
+                            last_line = Some(Instant::now());
+                            on_line(&line);
+                        }
+                    }
+                    Ok(read) => {
+                        capture.push(StreamKind::Stdout, &stdout_buffer[..read]);
+                        stdout_carry.extend_from_slice(&stdout_buffer[..read]);
+                        take_lines(&mut stdout_carry, |line| {
+                            last_line = Some(Instant::now());
+                            on_line(line);
+                        });
+                        if stdout_carry.len() > LINE_CARRY_LIMIT {
+                            let remove = stdout_carry.len() - LINE_CARRY_LIMIT;
+                            stdout_carry.drain(..remove);
+                        }
+                    }
+                    Err(_) => {
+                        stdout_open = false;
+                    }
+                }
+            }
+            result = read_stderr => {
+                match result {
+                    Ok(0) => {
+                        stderr_open = false;
+                        stderr_carry.clear();
+                    }
+                    Ok(read) => {
+                        capture.push(StreamKind::Stderr, &stderr_buffer[..read]);
+                        stderr_carry.extend_from_slice(&stderr_buffer[..read]);
+                        if stderr_carry.len() > LINE_CARRY_LIMIT {
+                            let remove = stderr_carry.len() - LINE_CARRY_LIMIT;
+                            stderr_carry.drain(..remove);
+                        }
+                    }
+                    Err(_) => {
+                        stderr_open = false;
+                    }
+                }
+            }
+            _ = tokio::time::sleep(POLL_INTERVAL) => {}
+        }
+    }
+
+    let captured = capture.finish();
+    let output = ProcessOutput {
+        // The loop only breaks once an exit status was observed.
+        status: status.expect("the guarded process exited before the loop ended"),
+        stdout: captured.stdout,
+        stderr: captured.stderr,
+        truncated: captured.truncated,
+        elapsed: started.elapsed(),
+    };
+
+    if control.reason().is_some() {
+        return Ok(DownloadRunOutcome::Cancelled);
+    }
+    if !output.status.success() {
+        return Err(VideoError::process_failed(error_tail(&output)));
+    }
+    Ok(DownloadRunOutcome::Completed(output))
+}
+
+fn take_lines<F>(carry: &mut Vec<u8>, mut on_line: F)
+where
+    F: FnMut(&str),
+{
+    let mut consumed = 0;
+    while let Some(offset) = carry[consumed..].iter().position(|byte| *byte == b'\n') {
+        let end = consumed + offset;
+        let line = String::from_utf8_lossy(&carry[consumed..end]).into_owned();
+        on_line(&line);
+        consumed = end + 1;
+    }
+    if consumed > 0 {
+        carry.drain(..consumed);
+    }
 }
 
 fn spawn_guard(spec: &ProcessSpec) -> Result<ChildGuard, VideoError> {

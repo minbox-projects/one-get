@@ -4,7 +4,9 @@
 //! only, so the same executable works on macOS and Windows.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -14,6 +16,13 @@ const CHUNK: usize = 64 * 1024;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(name) = executable_name() {
+        if name.starts_with("yt-dlp") {
+            download(&name, &args);
+            return;
+        }
+    }
+
     match args.first().map(String::as_str) {
         Some("probe-json") => probe_json(),
         Some("emit") => emit(&args[1..]),
@@ -155,6 +164,109 @@ fn environment() {
 fn echo_args(args: &[String]) {
     for argument in args {
         println!("{argument}");
+    }
+}
+
+fn executable_name() -> Option<String> {
+    let path = std::env::current_exe().ok()?;
+    let name = path.file_name()?.to_str()?.to_string();
+    Some(name.strip_suffix(".exe").unwrap_or(&name).to_string())
+}
+
+/// Serve as a fake yt-dlp. The executable name selects the scenario; the
+/// temporary directory comes from the service's `-o <temp>/video.%(ext)s`.
+fn download(behavior: &str, args: &[String]) {
+    let Some(template) = args
+        .iter()
+        .position(|argument| argument == "-o")
+        .and_then(|index| args.get(index + 1))
+    else {
+        eprintln!("video_fixture: download requires -o <template>");
+        std::process::exit(2);
+    };
+    let template = Path::new(template);
+    let temp = match template.parent() {
+        Some(temp) => temp.to_path_buf(),
+        None => {
+            eprintln!("video_fixture: output template has no directory");
+            std::process::exit(2);
+        }
+    };
+    log_argv(&temp, args);
+
+    let audio_only = args.iter().any(|argument| argument == "--extract-audio");
+    let extension = if audio_only { "m4a" } else { "mp4" };
+
+    match behavior {
+        "yt-dlp-slow" => slow_download(&temp, extension),
+        "yt-dlp-missing" => {
+            emit_progress(1024, 2048);
+        }
+        "yt-dlp-fail-once" => {
+            let marker = temp.join(".fixture-failed");
+            if marker.exists() {
+                successful_download(&temp, extension);
+            } else {
+                let _ = fs::write(&marker, b"first run fails");
+                emit_progress(512, 2048);
+                std::process::exit(3);
+            }
+        }
+        "yt-dlp-merge-fail" => {
+            emit_progress(1024, 2048);
+            println!("[Merger] Merging formats into \"video.mp4\"");
+            flush_stdout();
+            std::process::exit(1);
+        }
+        _ => successful_download(&temp, extension),
+    }
+}
+
+fn log_argv(temp: &Path, args: &[String]) {
+    let Some(destination) = temp.parent() else {
+        return;
+    };
+    let path = destination.join(".fixture-args.jsonl");
+    let Ok(mut line) = serde_json::to_string(&args) else {
+        return;
+    };
+    line.push('\n');
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(line.as_bytes());
+        let _ = file.flush();
+    }
+}
+
+fn successful_download(temp: &Path, extension: &str) {
+    emit_progress(2048, 2048);
+    write_output(temp, extension);
+}
+
+fn slow_download(temp: &Path, extension: &str) -> ! {
+    let mut stdout = io::stdout().lock();
+    for step in 1..=6u64 {
+        let _ = writeln!(stdout, "ONEGET_PROGRESS {} {} 1000", step * 512, step * 512);
+        let _ = stdout.flush();
+        drop(stdout);
+        thread::sleep(Duration::from_millis(400));
+        stdout = io::stdout().lock();
+    }
+    drop(stdout);
+    write_output(temp, extension);
+    std::process::exit(0);
+}
+
+fn emit_progress(downloaded: u64, total: u64) {
+    println!("ONEGET_PROGRESS {downloaded} {total} NA");
+    flush_stdout();
+}
+
+fn write_output(temp: &Path, extension: &str) {
+    let path = PathBuf::from(temp).join(format!("video.{extension}"));
+    let bytes = format!("oneget fixture video output ({extension})\n");
+    if let Err(error) = fs::write(&path, bytes.as_bytes()) {
+        eprintln!("video_fixture: cannot write {}: {error}", path.display());
+        std::process::exit(2);
     }
 }
 

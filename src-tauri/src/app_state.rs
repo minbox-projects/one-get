@@ -13,12 +13,14 @@ use crate::api::error::ApiError;
 use crate::api::pairing_store::{PairedClient, PairingCode, PairingStore};
 use crate::api::server::ApiServerHandle;
 use crate::commands::app::{AutostartService, NotificationService, QuitService, SecretService};
+use crate::commands::kernel::KernelRuntime;
 use crate::config::{Settings, SettingsStore};
 use crate::engine::service::EngineService;
 use crate::error::AppError;
 use crate::logging::Logger;
 use crate::platform::deeplink::DeepLinkEvent;
 use crate::platform::paths::AppPaths;
+use crate::video::service::VideoService;
 
 /// Browser-integration availability, pairing state, and one pending prefill.
 pub struct PairingRuntime {
@@ -124,6 +126,8 @@ pub struct AppState {
     autostart: Arc<dyn AutostartService>,
     quit: Arc<dyn QuitService>,
     engine: Option<Arc<EngineService>>,
+    kernel: Option<Arc<KernelRuntime>>,
+    video: Option<Arc<VideoService>>,
     pairing: Mutex<PairingRuntime>,
     api_server: Mutex<Option<ApiServerHandle>>,
     last_event: Mutex<DeepLinkEvent>,
@@ -149,6 +153,8 @@ impl AppState {
             autostart,
             quit,
             engine: None,
+            kernel: None,
+            video: None,
             pairing: Mutex::new(PairingRuntime::unavailable("PAIRING_UNAVAILABLE")),
             api_server: Mutex::new(None),
             last_event: Mutex::new(DeepLinkEvent::rejected(
@@ -161,6 +167,18 @@ impl AppState {
     /// Attach the long-lived download engine service.
     pub fn with_engine(mut self, engine: Arc<EngineService>) -> Self {
         self.engine = Some(engine);
+        self
+    }
+
+    /// Attach the runtime component kernel.
+    pub fn with_kernel(mut self, kernel: Arc<KernelRuntime>) -> Self {
+        self.kernel = Some(kernel);
+        self
+    }
+
+    /// Attach the long-lived video download service.
+    pub fn with_video(mut self, video: Arc<VideoService>) -> Self {
+        self.video = Some(video);
         self
     }
 
@@ -210,7 +228,17 @@ impl AppState {
         self.engine.as_deref()
     }
 
-    /// Stop the loopback API before pausing and stopping the engine service.
+    /// The runtime component kernel, when initialization succeeded.
+    pub fn kernel(&self) -> Option<&KernelRuntime> {
+        self.kernel.as_deref()
+    }
+
+    /// The video download service, when initialization succeeded.
+    pub fn video(&self) -> Option<&VideoService> {
+        self.video.as_deref()
+    }
+
+    /// Stop the loopback API, the video service, then the HTTP engine.
     pub fn shutdown_engine(&self) {
         let handle = self
             .api_server
@@ -219,6 +247,9 @@ impl AppState {
             .take();
         if let Some(mut handle) = handle {
             handle.shutdown();
+        }
+        if let Some(video) = &self.video {
+            let _ = video.shutdown();
         }
         if let Some(engine) = &self.engine {
             engine.shutdown();

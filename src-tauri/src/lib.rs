@@ -31,15 +31,20 @@ use crate::commands::app::{
     AutostartService, KeyringSecretService, NotificationService, PlatformQuitService, QuitService,
     SecretService,
 };
+use crate::commands::kernel::KernelRuntime;
 use crate::config::{CloseBehavior, SettingsStore};
 use crate::engine::scheduler::EngineOptions;
 use crate::engine::service::EngineService;
+use crate::kernel::catalog::Target;
+use crate::kernel::source::{configured_public_key, manifest_url_override};
 use crate::logging::{LogConfig, Logger};
 use crate::platform::autostart::PluginAutostartService;
 use crate::platform::deeplink::register_schemes;
 use crate::platform::notifications::PluginNotificationService;
 use crate::platform::paths::AppPaths;
 use crate::store::Database;
+use crate::video::process::TimeoutPolicy;
+use crate::video::service::{VideoService, VideoServiceConfig};
 
 const PAIR_ORIGIN_REQUESTS: usize = 10;
 const PAIR_ORIGIN_WINDOW_MS: i64 = 60_000;
@@ -84,6 +89,13 @@ pub fn run() {
             commands::ipc::downloads_delete_file,
             commands::ipc::downloads_open_file,
             commands::ipc::downloads_open_folder,
+            commands::ipc::kernel_status,
+            commands::ipc::kernel_refresh,
+            commands::ipc::kernel_install,
+            commands::ipc::kernel_update,
+            commands::ipc::kernel_rollback,
+            commands::ipc::video_probe,
+            commands::ipc::video_start,
             commands::ipc::pairing_status,
             commands::ipc::pairing_generate_code,
             commands::ipc::pairing_list_clients,
@@ -137,7 +149,7 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let store = Database::open(paths.data.join("tasks.db"))?;
     let engine = Arc::new(EngineService::start(
         store,
-        destination,
+        destination.clone(),
         EngineOptions { max_concurrent },
     )?);
     engine.apply_settings(max_concurrent, snapshot.global_rate_limit)?;
@@ -159,19 +171,49 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => (PairingRuntime::unavailable(error.code), None),
     };
 
-    let state = Arc::new(
-        AppState::new(
-            paths,
-            settings,
-            logger,
-            secrets,
-            notifications,
-            autostart,
-            quit,
-        )
-        .with_engine(Arc::clone(&engine))
-        .with_pairing(pairing_runtime),
-    );
+    let kernel = KernelRuntime::new(
+        paths.data.join("components.db"),
+        paths.data.join("kernel"),
+        paths.cache.clone(),
+        configured_public_key().map(str::to_string),
+        manifest_url_override(),
+        Target::current(),
+    )
+    .ok();
+
+    let video = Database::open(paths.data.join("tasks.db"))
+        .ok()
+        .and_then(|store| {
+            VideoService::start(VideoServiceConfig {
+                store,
+                kernel_root: paths.data.join("kernel"),
+                components_db_path: paths.data.join("components.db"),
+                default_destination: destination.clone(),
+                timeouts: TimeoutPolicy::default(),
+                progress_persist_interval: std::time::Duration::from_millis(250),
+            })
+            .ok()
+        })
+        .map(Arc::new);
+
+    let mut state = AppState::new(
+        paths,
+        settings,
+        logger,
+        secrets,
+        notifications,
+        autostart,
+        quit,
+    )
+    .with_engine(Arc::clone(&engine))
+    .with_pairing(pairing_runtime);
+    if let Some(kernel) = kernel {
+        state = state.with_kernel(kernel);
+    }
+    if let Some(video) = video {
+        state = state.with_video(video);
+    }
+    let state = Arc::new(state);
 
     if let Some(store) = pairing_store {
         let bridge = Arc::new(TauriDesktopBridge::new(
