@@ -8,8 +8,14 @@ import { Input } from "../../components/ui/Input";
 import { useI18n } from "../../i18n";
 import { pickDirectory } from "../../lib/dialog";
 import { addDownload } from "../../lib/downloads";
+import { probeVideo } from "../../lib/video";
+import type { AppError } from "../../types/app";
 import type { HeaderPair, ProbeResult } from "../../types/downloads";
+import type { VideoProbeResult } from "../../types/video";
+import { MissingComponentAction } from "../kernel/MissingComponentAction";
+import { VideoQualityDialog } from "../video/VideoQualityDialog";
 
+import { errorMessageKey, requiresComponentInstall } from "./errorMessages";
 import type { DownloadFormErrors } from "./downloadValidation";
 import { validateDownloadForm, validateUrl } from "./downloadValidation";
 import { useProbe } from "./useProbe";
@@ -31,6 +37,16 @@ export interface NewDownloadDialogProps {
   defaults?: DownloadDefaults;
   onAdded?: () => void;
   prefill?: BrowserPrefill | null;
+  onOpenComponents?: () => void;
+}
+
+function suggestedVideoFilename(title: string, fallback: string): string {
+  const stem = title
+    .replace(/[\\/:*?"<>|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+  return `${stem.length > 0 ? stem : fallback}.mp4`;
 }
 
 export interface HeaderEditorProps {
@@ -115,6 +131,7 @@ export function NewDownloadDialog({
   defaults,
   onAdded,
   prefill = null,
+  onOpenComponents,
 }: NewDownloadDialogProps) {
   const { t, formatBytes } = useI18n();
   const { state: probeState, probe, reset: resetProbe } = useProbe();
@@ -139,6 +156,11 @@ export function NewDownloadDialog({
   const [headers, setHeaders] = useState<HeaderPair[]>(
     () => prefill?.headers ?? [],
   );
+  const [cookiesFile, setCookiesFile] = useState("");
+  const [proxyUrl, setProxyUrl] = useState("");
+  const [parsingVideo, setParsingVideo] = useState(false);
+  const [videoProbe, setVideoProbe] = useState<VideoProbeResult | null>(null);
+  const [videoError, setVideoError] = useState<AppError | null>(null);
   const [allowHtml, setAllowHtml] = useState(false);
   const [errors, setErrors] = useState<DownloadFormErrors>({});
   const [htmlRequired, setHtmlRequired] = useState(false);
@@ -176,7 +198,36 @@ export function NewDownloadDialog({
     setAllowHtml(false);
     setHtmlRequired(false);
     setSubmitError(null);
+    setVideoProbe(null);
+    setVideoError(null);
+    setParsingVideo(false);
   };
+
+  const handleParseVideo = async () => {
+    setVideoError(null);
+    const urlError = validateUrl(url);
+    if (urlError !== null) {
+      setErrors((current) => ({ ...current, url: urlError }));
+      return;
+    }
+
+    setErrors((current) => ({ ...current, url: undefined }));
+    setParsingVideo(true);
+    const result = await probeVideo({
+      url: url.trim(),
+      cookiesFile: cookiesFile.trim().length === 0 ? null : cookiesFile.trim(),
+      proxyUrl: proxyUrl.trim().length === 0 ? null : proxyUrl.trim(),
+    });
+    setParsingVideo(false);
+
+    if (result.ok) {
+      setVideoProbe(result.data);
+    } else {
+      setVideoError(result.error);
+    }
+  };
+
+  const openComponents = onOpenComponents ?? (() => undefined);
 
   const handleBrowse = async () => {
     setPickingDirectory(true);
@@ -247,10 +298,29 @@ export function NewDownloadDialog({
     onOpenChange(false);
   };
 
+  const videoFilename =
+    filenameOverride !== null && filenameOverride.trim().length > 0
+      ? filenameOverride.trim()
+      : suggestedVideoFilename(
+          videoProbe?.title ?? "",
+          t("download.videoFallbackName"),
+        );
+
+  // The quality dialog is portaled outside this dialog's content, so Radix
+  // reports its pointer interactions as outside dismissals. Keep this dialog
+  // open while the quality dialog owns the interaction.
+  const handleDialogOpenChange = (next: boolean) => {
+    if (!next && videoProbe !== null) {
+      return;
+    }
+    onOpenChange(next);
+  };
+
   return (
+    <>
     <Dialog
       open={open}
-      onOpenChange={onOpenChange}
+      onOpenChange={handleDialogOpenChange}
       title={t("download.newTitle")}
       closeLabel={t("common.close")}
     >
@@ -267,6 +337,41 @@ export function NewDownloadDialog({
           error={errors.url ? t(`validation.${errors.url}`) : undefined}
           onChange={(event) => handleUrlChange(event.target.value)}
         />
+
+        <Input
+          label={t("download.cookiesFile")}
+          value={cookiesFile}
+          autoComplete="off"
+          onChange={(event) => setCookiesFile(event.target.value)}
+        />
+
+        <Input
+          label={t("download.proxyUrl")}
+          value={proxyUrl}
+          autoComplete="off"
+          onChange={(event) => setProxyUrl(event.target.value)}
+        />
+
+        <div className="og-dialog__actions">
+          <Button
+            variant="secondary"
+            loading={parsingVideo}
+            onClick={() => void handleParseVideo()}
+          >
+            {t("download.parseVideo")}
+          </Button>
+        </div>
+
+        {videoError ? (
+          <>
+            <p className="og-probe og-probe--error" role="alert">
+              {t(errorMessageKey(videoError.code))}
+            </p>
+            {requiresComponentInstall(videoError.code) ? (
+              <MissingComponentAction onOpenComponents={openComponents} />
+            ) : null}
+          </>
+        ) : null}
 
         {probeState.status === "detecting" ? (
           <p className="og-probe" role="status">
@@ -408,5 +513,28 @@ export function NewDownloadDialog({
         </div>
       </form>
     </Dialog>
+
+    {videoProbe ? (
+      <VideoQualityDialog
+        open
+        onOpenChange={(next) => {
+          if (!next) {
+            setVideoProbe(null);
+          }
+        }}
+        url={url.trim()}
+        probe={videoProbe}
+        cookiesFile={cookiesFile.trim().length === 0 ? null : cookiesFile.trim()}
+        proxyUrl={proxyUrl.trim().length === 0 ? null : proxyUrl.trim()}
+        initialDestination={destination}
+        initialFilename={videoFilename}
+        onOpenComponents={openComponents}
+        onStarted={() => {
+          onAdded?.();
+          onOpenChange(false);
+        }}
+      />
+    ) : null}
+    </>
   );
 }

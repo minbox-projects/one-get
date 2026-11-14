@@ -82,6 +82,47 @@ const enUS = {
   "error.CHECKSUM_MISSING":
     "The download finished without a checksum to verify it.",
   "error.generic": "The download failed. Try again.",
+  "error.VIDEO_TIMEOUT": "The video process timed out. Try again.",
+  "error.VIDEO_OUTPUT_LIMIT":
+    "The video tool produced too much output. Try again.",
+  "error.VIDEO_PROCESS_FAILED":
+    "The video download failed while running yt-dlp. Try again.",
+  "error.VIDEO_SPAWN_FAILED":
+    "The video tool could not be started. Check the components and try again.",
+  "error.VIDEO_OUTPUT_MISSING":
+    "The video download finished without a valid output file. Try again.",
+  "error.VIDEO_OUTPUT_MOVE_FAILED":
+    "The finished video could not be moved to the destination folder.",
+  "error.VIDEO_OUTPUT_HASH_FAILED":
+    "The finished video could not be checksummed.",
+  "error.VIDEO_MERGE_FAILED":
+    "The video and audio tracks could not be merged. Try another quality.",
+  "error.VIDEO_INTERRUPTED":
+    "The video download was interrupted when the app restarted. Retry to continue.",
+  "error.VIDEO_URL_UNAVAILABLE":
+    "The original video URL was not saved for security, so this task cannot be retried. Add the URL again.",
+  "error.VIDEO_URL_UNSUPPORTED": "This URL is not a supported video page.",
+  "error.VIDEO_LIVE_UNSUPPORTED": "Live streams are not supported.",
+  "error.VIDEO_DRM_UNSUPPORTED":
+    "This video is DRM protected and cannot be downloaded.",
+  "error.VIDEO_PROBE_INVALID":
+    "The video information could not be read. Check the URL and try again.",
+  "error.VIDEO_JS_RUNTIME_MISSING":
+    "yt-dlp needs the Deno JavaScript runtime. Install the Deno component in Components and try again.",
+  "error.INVALID_COOKIES_FILE":
+    "The cookies file is missing or cannot be read.",
+  "error.INVALID_PROXY_URL":
+    "Enter a valid credential-free HTTP proxy URL.",
+  "error.COMPONENT_MISSING":
+    "A required component is not installed. Install it from Components and try again.",
+  "error.COMPONENT_HASH":
+    "An installed component failed verification. Reinstall or roll back the component and try again.",
+  "error.COMPONENT_UNSUPPORTED":
+    "A required component is not available for this platform.",
+  "error.COMPONENT_TRUST_UNCONFIGURED":
+    "Component installation is disabled because this build has no trust key.",
+  "error.COMPONENT_MANIFEST_UNAVAILABLE":
+    "The signed component catalog could not be loaded. Refresh it in Components and try again.",
   "common.close": "Close",
   "common.dismiss": "Dismiss",
   "download.newTitle": "New download",
@@ -112,6 +153,10 @@ const enUS = {
   "download.addFailed": "The download could not be added.",
   "download.browserPrefill":
     "Captured from your browser. Review the values before starting.",
+  "download.cookiesFile": "Cookies file (optional)",
+  "download.proxyUrl": "HTTP proxy (optional)",
+  "download.parseVideo": "Parse video",
+  "download.videoFallbackName": "video",
   "probe.error.http_error": "The server returned an error.",
   "probe.error.timeout": "The server did not respond in time.",
   "validation.url_required": "Enter a URL.",
@@ -172,6 +217,20 @@ const enUS = {
   "details.copied": "URL copied.",
   "details.copyFailed": "The URL could not be copied to the clipboard.",
   "details.close": "Close",
+  "details.video": "Video",
+  "details.videoTitle": "Title",
+  "details.videoDuration": "Duration",
+  "details.videoUploader": "Uploader",
+  "details.videoQuality": "Quality",
+  "details.videoStage": "Merge stage",
+  "details.finalFile": "Final file",
+  "video.qualityTitle": "Video quality",
+  "video.duration": "Duration",
+  "video.videoChoices": "Video quality",
+  "video.audioChoices": "Audio only",
+  "video.mp4": "MP4",
+  "video.start": "Start download",
+  "video.stage.merge": "Merging",
   "toast.paused": "Download paused.",
   "toast.resumed": "Download resumed.",
   "toast.cancelled": "Download cancelled.",

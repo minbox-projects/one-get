@@ -5,13 +5,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { dictionaries, I18nProvider } from "../../i18n";
 import type { AddDownloadRequest, ProbeResult } from "../../types/downloads";
+import type { VideoProbeResult } from "../../types/video";
 
-const { addDownload, probeDownload } = vi.hoisted(() => ({
-  addDownload: vi.fn(),
-  probeDownload: vi.fn(),
-}));
+const { addDownload, probeDownload, probeVideo, startVideoDownload } =
+  vi.hoisted(() => ({
+    addDownload: vi.fn(),
+    probeDownload: vi.fn(),
+    probeVideo: vi.fn(),
+    startVideoDownload: vi.fn(),
+  }));
 
 vi.mock("../../lib/downloads", () => ({ addDownload, probeDownload }));
+vi.mock("../../lib/video", () => ({ probeVideo, startVideoDownload }));
 
 import { NewDownloadDialog } from "./NewDownloadDialog";
 import type { BrowserPrefill } from "./NewDownloadDialog";
@@ -31,6 +36,52 @@ function probe(overrides: Partial<ProbeResult> = {}): ProbeResult {
     lastModified: null,
     ...overrides,
   };
+}
+
+function videoProbe(
+  overrides: Partial<VideoProbeResult> = {},
+): VideoProbeResult {
+  return {
+    title: "Sample Video Title",
+    durationSecs: 754,
+    uploader: "Sample Channel",
+    video: [
+      {
+        id: "137",
+        label: "1080p · 30 fps",
+        sizeBytes: 524288000,
+        mp4Compatible: true,
+        formatSelector: "137+140",
+      },
+      {
+        id: "136",
+        label: "720p · 30 fps",
+        sizeBytes: null,
+        mp4Compatible: false,
+        formatSelector: "136+140",
+      },
+    ],
+    audio: [
+      {
+        id: "140",
+        label: "Audio only · M4A",
+        sizeBytes: 7340032,
+        mp4Compatible: true,
+        formatSelector: "140",
+      },
+    ],
+    defaultIndex: 0,
+    ...overrides,
+  };
+}
+
+function qualityDialog(): HTMLElement {
+  const anchor = screen.queryByText("Sample Video Title");
+  const dialog = anchor?.closest('[role="dialog"]');
+  if (!dialog) {
+    throw new Error("The video quality dialog was not found.");
+  }
+  return dialog as HTMLElement;
 }
 
 function DialogHarness({
@@ -139,8 +190,12 @@ describe("NewDownloadDialog", () => {
   beforeEach(() => {
     addDownload.mockReset();
     probeDownload.mockReset();
+    probeVideo.mockReset();
+    startVideoDownload.mockReset();
     addDownload.mockResolvedValue({ ok: true, data: "task-1" });
     probeDownload.mockResolvedValue({ ok: true, data: probe() });
+    probeVideo.mockResolvedValue({ ok: true, data: videoProbe() });
+    startVideoDownload.mockResolvedValue({ ok: true, data: "task-video-1" });
   });
 
   it("probes on URL change, fills the filename and size, and submits the reviewed values", async () => {
@@ -397,5 +452,122 @@ describe("NewDownloadDialog", () => {
       filename: "captured-video.mp4",
     });
     expect(request.extraHeaders).toEqual([["Referer", referer]]);
+  });
+
+  it("parse_video_probes_and_opens_the_quality_dialog", async () => {
+    const user = userEvent.setup();
+    render(<DialogHarness />);
+
+    const container = dialog();
+    await enterUrl(user, "https://example.com/watch?v=1");
+
+    await setField(
+      user,
+      within(container).getByLabelText(/cookies/i),
+      "/tmp/cookies.txt",
+    );
+    await setField(
+      user,
+      within(container).getByLabelText(/proxy/i),
+      "http://127.0.0.1:8080",
+    );
+
+    await user.click(screen.getByRole("button", { name: /parse video/i }));
+
+    await waitFor(() => {
+      expect(probeVideo).toHaveBeenCalledWith({
+        url: "https://example.com/watch?v=1",
+        cookiesFile: "/tmp/cookies.txt",
+        proxyUrl: "http://127.0.0.1:8080",
+      });
+    });
+
+    expect(await screen.findByText("Sample Video Title")).toBeInTheDocument();
+
+    await user.click(
+      within(qualityDialog()).getByRole("button", { name: /cancel/i }),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByText("Sample Video Title")).not.toBeInTheDocument();
+    });
+    expect(startVideoDownload).not.toHaveBeenCalled();
+    expect(within(dialog()).getByLabelText(/url/i)).toBeInTheDocument();
+  });
+
+  it("video_start_creates_one_video_task_and_http_flow_is_unchanged", async () => {
+    const user = userEvent.setup();
+    const view = render(<DialogHarness />);
+
+    await enterUrl(user, "https://example.com/watch?v=1");
+
+    await user.click(screen.getByRole("button", { name: /parse video/i }));
+    expect(await screen.findByText("Sample Video Title")).toBeInTheDocument();
+
+    const quality = qualityDialog();
+    await setField(
+      user,
+      within(quality).getByLabelText(/filename/i),
+      "video-output.mp4",
+    );
+    await setField(
+      user,
+      within(quality).getByLabelText(/destination/i),
+      "/tmp/videos",
+    );
+    await user.click(
+      within(quality).getByRole("button", { name: /start download|confirm/i }),
+    );
+
+    await waitFor(() => {
+      expect(startVideoDownload).toHaveBeenCalledTimes(1);
+    });
+    const videoRequest = startVideoDownload.mock.calls[0][0] as {
+      url: string;
+      filename: string;
+      destination: string;
+      formatSelector: string;
+      audioOnly: boolean;
+      cookiesFile: string | null;
+      proxyUrl: string | null;
+      metadata: unknown;
+    };
+    expect(videoRequest).toMatchObject({
+      url: "https://example.com/watch?v=1",
+      filename: "video-output.mp4",
+      destination: "/tmp/videos",
+      formatSelector: "137+140",
+      audioOnly: false,
+      cookiesFile: null,
+      proxyUrl: null,
+    });
+    expect(videoRequest.metadata).toBeDefined();
+    expect(addDownload).not.toHaveBeenCalled();
+
+    view.unmount();
+    startVideoDownload.mockClear();
+    addDownload.mockClear();
+
+    render(<DialogHarness />);
+    const httpDialog = dialog();
+    await enterUrl(user, "https://example.com/file.bin");
+    await waitFor(() => {
+      expect(probeDownload).toHaveBeenCalledWith({
+        url: "https://example.com/file.bin",
+        allowHtml: false,
+        extraHeaders: [],
+      });
+    });
+
+    await user.click(submitButton(httpDialog));
+
+    await waitFor(() => {
+      expect(addDownload).toHaveBeenCalledTimes(1);
+    });
+    expect(addDownload.mock.calls[0][0]).toMatchObject({
+      url: "https://example.com/file.bin",
+      filename: "probed-file.bin",
+    });
+    expect(startVideoDownload).not.toHaveBeenCalled();
   });
 });

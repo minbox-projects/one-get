@@ -361,6 +361,11 @@ export function AppShell() {
     [batchOpen, deleteMode, flushQueuedPrefill, settingsOpen],
   );
 
+  const openComponentsFromVideo = useCallback(() => {
+    handleNewOpenChange(false);
+    openSettings();
+  }, [handleNewOpenChange, openSettings]);
+
   const handleBatchOpenChange = useCallback(
     (open: boolean) => {
       setBatchOpen(open);
@@ -770,6 +775,7 @@ export function AppShell() {
                 onDeleteRecord={() => requestDelete("record")}
                 onDeleteFile={() => requestDelete("file")}
                 onClose={clearSelection}
+                onOpenComponents={openSettings}
               />
             ) : (
               <p className="og-details__empty">{t("details.empty")}</p>
@@ -818,6 +824,7 @@ export function AppShell() {
           onAdded={() => {
             void downloads.refresh();
           }}
+          onOpenComponents={openComponentsFromVideo}
         />
       ) : null}
       {batchOpen ? (
