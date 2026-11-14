@@ -258,6 +258,62 @@ const enUS = {
   "settings.pairing.revokeConfirm": "Revoke",
   "settings.pairing.revoked":
     "{label} was revoked. Pair the browser extension again to continue.",
+  "settings.components": "Components",
+  "kernel.description":
+    "Manage the external tools used for video downloads. Installs are verified against the signed component catalog.",
+  "kernel.state.not_installed": "Not installed",
+  "kernel.state.installed": "Installed",
+  "kernel.state.update_available": "Update available",
+  "kernel.state.rollback_available": "Rollback available",
+  "kernel.state.tampered": "Verification failed",
+  "kernel.state.unsupported": "Not supported on this platform",
+  "kernel.state.manifest_unavailable": "Component catalog unavailable",
+  "kernel.install": "Install",
+  "kernel.update": "Update",
+  "kernel.rollback": "Roll back",
+  "kernel.refresh": "Refresh",
+  "kernel.activeVersion": "Active version",
+  "kernel.availableVersion": "Available version",
+  "kernel.installedVersions": "Installed versions",
+  "kernel.platform": "Platform",
+  "kernel.rollbackTo": "Rollback version",
+  "kernel.none": "None",
+  "kernel.operation": "Operation: {phase} · {percent}%",
+  "kernel.phase.downloading": "Downloading",
+  "kernel.phase.verifying": "Verifying",
+  "kernel.phase.preparing": "Preparing",
+  "kernel.phase.activating": "Activating",
+  "kernel.phase.installed": "Installed",
+  "kernel.error.COMPONENT_TRUST_UNCONFIGURED":
+    "Component installation is disabled because this build has no trust key.",
+  "kernel.error.COMPONENT_MANIFEST_UNAVAILABLE":
+    "The signed component catalog could not be loaded. Refresh and try again.",
+  "kernel.error.COMPONENT_MISSING":
+    "A required component is not installed. Install it from Components and try again.",
+  "kernel.error.COMPONENT_HASH":
+    "An installed component failed verification. Reinstall or roll back the component and try again.",
+  "kernel.error.COMPONENT_UNSUPPORTED":
+    "This component is not available for the current platform.",
+  "kernel.error.COMPONENT_SCHEMA_UNSUPPORTED":
+    "The component catalog uses a newer schema that this version cannot read. Update OneGet.",
+  "kernel.error.COMPONENT_BUSY":
+    "Another component operation is already running. Try again when it finishes.",
+  "kernel.error.unknown": "The component operation failed ({code}).",
+  "kernel.missingTitle": "Required components are missing",
+  "kernel.missingBody":
+    "Install or repair the components in Settings > Components, then try again.",
+  "kernel.openComponents": "Open Components",
+  "kernel.hint.notInstalled":
+    "Install this component to use video downloads.",
+  "kernel.hint.tampered":
+    "The installed files failed verification. Reinstall or roll back this component.",
+  "kernel.hint.manifestUnavailable":
+    "The signed component catalog is unavailable, so installation is disabled. Refresh to try again.",
+  "kernel.hint.unsupported":
+    "This component has no artifact for the current platform.",
+  "kernel.loading": "Loading components…",
+  "kernel.loadFailed": "Component status could not be loaded.",
+  "kernel.empty": "No components are available for this platform.",
 
 };
 

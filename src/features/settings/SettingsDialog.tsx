@@ -5,6 +5,7 @@ import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { translate, useI18n } from "../../i18n";
 import type { Settings, Theme } from "../../types/app";
+import { ComponentsSection } from "../kernel/ComponentsSection";
 import { PairingSettings } from "../pairing/PairingSettings";
 
 import { DownloadSettings } from "./DownloadSettings";
@@ -232,6 +233,7 @@ export function SettingsDialog({
             onSaved={onSaved}
           />
           <PairingSettings />
+          <ComponentsSection />
         </>
       )}
     </Dialog>

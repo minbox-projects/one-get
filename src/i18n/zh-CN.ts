@@ -242,6 +242,56 @@ const zhCN = {
     "要撤销 {label} 的配对吗？该浏览器需要重新配对后才能继续发送捕获。",
   "settings.pairing.revokeConfirm": "撤销配对",
   "settings.pairing.revoked": "{label} 的配对已撤销。请重新配对浏览器扩展后继续。",
+  "settings.components": "组件",
+  "kernel.description":
+    "管理视频下载使用的外部工具。安装内容会依据已签名的组件目录进行校验。",
+  "kernel.state.not_installed": "未安装",
+  "kernel.state.installed": "已安装",
+  "kernel.state.update_available": "可更新",
+  "kernel.state.rollback_available": "可回滚",
+  "kernel.state.tampered": "校验失败",
+  "kernel.state.unsupported": "当前平台不支持",
+  "kernel.state.manifest_unavailable": "组件目录不可用",
+  "kernel.install": "安装",
+  "kernel.update": "更新",
+  "kernel.rollback": "回滚",
+  "kernel.refresh": "刷新",
+  "kernel.activeVersion": "当前版本",
+  "kernel.availableVersion": "可用版本",
+  "kernel.installedVersions": "已安装版本",
+  "kernel.platform": "平台",
+  "kernel.rollbackTo": "可回滚版本",
+  "kernel.none": "无",
+  "kernel.operation": "操作：{phase} · {percent}%",
+  "kernel.phase.downloading": "正在下载",
+  "kernel.phase.verifying": "正在校验",
+  "kernel.phase.preparing": "正在准备",
+  "kernel.phase.activating": "正在启用",
+  "kernel.phase.installed": "已安装",
+  "kernel.error.COMPONENT_TRUST_UNCONFIGURED":
+    "此版本未配置信任密钥，组件安装已禁用。",
+  "kernel.error.COMPONENT_MANIFEST_UNAVAILABLE":
+    "无法加载已签名的组件目录。请刷新后重试。",
+  "kernel.error.COMPONENT_MISSING":
+    "缺少必要的组件。请在组件设置中安装后重试。",
+  "kernel.error.COMPONENT_HASH":
+    "已安装的组件未通过校验。请重新安装或回滚该组件后重试。",
+  "kernel.error.COMPONENT_UNSUPPORTED": "当前平台不提供该组件。",
+  "kernel.error.COMPONENT_SCHEMA_UNSUPPORTED":
+    "组件目录使用了当前版本无法读取的新架构。请更新 OneGet。",
+  "kernel.error.COMPONENT_BUSY": "已有其他组件操作正在进行，请等待完成后再试。",
+  "kernel.error.unknown": "组件操作失败（{code}）。",
+  "kernel.missingTitle": "缺少必要组件",
+  "kernel.missingBody": "请在“设置 > 组件”中安装或修复组件，然后重试。",
+  "kernel.openComponents": "打开组件设置",
+  "kernel.hint.notInstalled": "安装此组件后才能使用视频下载。",
+  "kernel.hint.tampered": "已安装的文件未通过校验。请重新安装或回滚此组件。",
+  "kernel.hint.manifestUnavailable":
+    "已签名的组件目录不可用，因此无法安装。请刷新后重试。",
+  "kernel.hint.unsupported": "当前平台没有该组件的安装文件。",
+  "kernel.loading": "正在加载组件…",
+  "kernel.loadFailed": "无法加载组件状态。",
+  "kernel.empty": "当前平台没有可用的组件。",
 
 };
 

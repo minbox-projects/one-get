@@ -36,11 +36,13 @@ function settings(overrides: Partial<Settings> = {}): Settings {
   };
 }
 
-function mockIpc(options: {
-  initial?: Settings;
-  status?: Status;
-  save?: (next: Settings) => IpcResult<Settings>;
-} = {}) {
+function mockIpc(
+  options: {
+    initial?: Settings;
+    status?: Status;
+    save?: (next: Settings) => IpcResult<Settings>;
+  } = {},
+) {
   const initial = options.initial ?? settings();
   invokeCommand.mockImplementation(async (command: string, args?: unknown) => {
     if (command === "settings_get") {
@@ -51,7 +53,27 @@ function mockIpc(options: {
     }
     if (command === "settings_save") {
       const next = (args as { settings: Settings }).settings;
-      return options.save ? options.save(next) : { ok: true as const, data: next };
+      return options.save
+        ? options.save(next)
+        : { ok: true as const, data: next };
+    }
+    if (command === "kernel_status") {
+      return {
+        ok: true as const,
+        data: [
+          {
+            component: "yt-dlp",
+            state: "installed",
+            activeVersion: "2025.11.01",
+            availableVersion: null,
+            installedVersions: ["2025.11.01"],
+            target: "macos-arm64",
+            rollbackVersion: null,
+            operation: null,
+            error: null,
+          },
+        ],
+      };
     }
     if (command === "pairing_status") {
       return {
@@ -83,11 +105,7 @@ function renderDialog() {
   const onSaved = vi.fn();
   const view = render(
     <I18nProvider language="en-US">
-      <SettingsDialog
-        open
-        onOpenChange={onOpenChange}
-        onSaved={onSaved}
-      />
+      <SettingsDialog open onOpenChange={onOpenChange} onSaved={onSaved} />
     </I18nProvider>,
   );
   return { ...view, onOpenChange, onSaved };
@@ -107,7 +125,9 @@ function fieldErrorText(label: RegExp): string {
   const field = screen.getByLabelText(label);
   const describedBy = field.getAttribute("aria-describedby");
   expect(describedBy).toBeTruthy();
-  return document.getElementById(describedBy as string)?.textContent?.trim() ?? "";
+  return (
+    document.getElementById(describedBy as string)?.textContent?.trim() ?? ""
+  );
 }
 
 function expectNoSave(): void {
@@ -131,10 +151,14 @@ describe("SettingsDialog", () => {
     expect(
       screen.getByRole("combobox", { name: /clos(e|ing)/i }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText(/default (download )?directory/i)).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/default (download )?directory/i),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText(/log level/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/default connections/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/max(imum)? concurrent tasks/i)).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/max(imum)? concurrent tasks/i),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText(/global rate limit/i)).toBeInTheDocument();
     expect(
       await screen.findByRole("heading", { name: /browser/i }),
@@ -346,7 +370,24 @@ describe("SettingsDialog", () => {
 
     const save = await screen.findByRole("button", { name: /^save/i });
     expect(save).toBeDisabled();
-    expect(screen.getAllByText(/read.?only|future|cannot be saved/i).length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(/read.?only|future|cannot be saved/i).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("renders the Components section alongside the existing settings", async () => {
+    expect(en["settings.components"]).toEqual(expect.any(String));
+    expect(zh["settings.components"]).toEqual(expect.any(String));
+    mockIpc();
+    renderDialog();
+
+    expect(
+      await screen.findByRole("heading", { name: en["settings.components"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/language/i)).toBeInTheDocument();
+    expect(
+      invokeCommand.mock.calls.some(([command]) => command === "kernel_status"),
+    ).toBe(true);
   });
 
   it("shows a corrupt-settings recovery notice", async () => {
