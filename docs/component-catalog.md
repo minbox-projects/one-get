@@ -53,7 +53,7 @@ The `ffprobe` role is part of the `ffmpeg` component's missing and hash state. E
 
 ## URL and extraction policy
 
-Catalog and artifact URLs must use HTTPS, or loopback HTTP only in a test or local-fixture configuration. Both reject embedded userinfo, fragments, a missing host, and lengths above 8 KiB. Automatic redirects are disabled so a redirect cannot leave the policy. The catalog body is capped at 1 MiB and an artifact body is rejected as soon as it exceeds the declared size.
+Catalog and artifact URLs must use HTTPS. The URL policy accepts loopback HTTP only when its caller explicitly enables it, which production wiring never does and only the automated Rust test fixture does. Both reject embedded userinfo, fragments, a missing host, and lengths above 8 KiB. Automatic redirects are disabled so a redirect cannot leave the policy. The catalog body is capped at 1 MiB and an artifact body is rejected as soon as it exceeds the declared size.
 
 An install downloads the artifact, requires the exact declared size and SHA-256 before extraction, and writes nothing on a mismatch. A `binary` artifact is one declared file. A `zip` artifact is read once into memory and validated before the first write:
 
@@ -93,8 +93,8 @@ kernel_manifest verify --public-key <64 hex characters> --input <signed.json>
 1. Run `node scripts/kernel-fixture.mjs --key-dir <directory outside the repository> [--input <unsigned.json>] [--base-url <artifact base>]`. The script creates an ephemeral Ed25519 key pair, refuses a key directory inside the repository, and writes the seed and signed `catalog.json` with owner-only permissions.
 2. Replace the template SHA-256 and size values with the real artifact bytes, or supply a complete unsigned catalog with `--input`, then sign it again with `kernel_manifest sign`.
 3. Build the application with `ONEGET_COMPONENT_TRUST_PUBLIC_KEY` set to the printed public key.
-4. Set `ONEGET_COMPONENT_MANIFEST_URL` to a loopback URL serving the signed catalog.
-5. Serve the artifacts from the same loopback host, for example `python3 -m http.server 8787 --bind 127.0.0.1 --directory <artifact-directory>`.
+4. Set `ONEGET_COMPONENT_MANIFEST_URL` to an HTTPS URL serving the signed catalog. Production wiring disables loopback HTTP for both the catalog and artifact URL policy, so a built application rejects a plain loopback HTTP URL.
+5. Serve the catalog and artifacts over HTTPS from a locally trusted development certificate — for example a local TLS endpoint on `127.0.0.1` whose certificate the operating system trusts — and pass that HTTPS base as `--base-url` in step 1. Plain loopback HTTP is exercised only by the automated Rust fixture server described below, never by a production build.
 6. Remove the key directory when the fixture check is finished.
 
 The Rust fixture server in `src-tauri/tests/support/kernel_server.rs` is the automated equivalent: it serves signed catalog and artifact responses on an ephemeral loopback port and is the only place loopback HTTP acceptance is enabled.

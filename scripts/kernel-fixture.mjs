@@ -25,7 +25,7 @@ function parseArgs(argv) {
     keyDir: undefined,
     input: undefined,
     out: undefined,
-    baseUrl: "http://127.0.0.1:8787/artifacts",
+    baseUrl: "https://127.0.0.1:8787/artifacts",
     print: false,
     help: false,
   };
@@ -74,7 +74,8 @@ function usage() {
     "  --key-dir <dir>   directory for ephemeral key material and the signed catalog",
     "  --input <file>    unsigned catalog JSON; a template is generated when omitted",
     "  --out <file>      signed catalog path (default: <key-dir>/catalog.json)",
-    "  --base-url <url>  artifact base URL used by the generated template",
+    "  --base-url <url>  HTTPS artifact base used by the generated template",
+    "                    (default: https://127.0.0.1:8787/artifacts)",
     "  --print           print the signed catalog to stdout instead of only writing it",
     "  --help            show this help",
   ].join("\n");
@@ -245,18 +246,34 @@ async function main() {
   }
   console.log("");
   console.log("Manual fixture steps:");
-  console.log(`  1. Build the application with ONEGET_COMPONENT_TRUST_PUBLIC_KEY=${publicKeyHex}`);
   console.log(
-    `  2. Set ONEGET_COMPONENT_MANIFEST_URL to a loopback URL serving ${path.basename(outputPath)}`,
+    "  1. Pick the HTTPS catalog and artifact endpoint the built application will reach and serve it",
   );
   console.log(
-    `  3. Serve the artifacts under ${options.baseUrl} from the same loopback host, for example:`,
+    "     over TLS from a local certificate the operating system trusts; the certificate must cover",
+  );
+  console.log("     the URL host.");
+  console.log(
+    `     Artifacts resolve under ${options.baseUrl}; re-run this script with --base-url when the`,
+  );
+  console.log("     endpoint differs.");
+  console.log(
+    `  2. Build the application with ONEGET_COMPONENT_TRUST_PUBLIC_KEY=${publicKeyHex}`,
   );
   console.log(
-    "     python3 -m http.server 8787 --bind 127.0.0.1 --directory <artifact-directory>",
+    `  3. Set ONEGET_COMPONENT_MANIFEST_URL to the HTTPS URL serving ${path.basename(outputPath)} from that trusted endpoint.`,
+  );
+  console.log(
+    "     A production build rejects plain loopback HTTP for both the catalog and artifact URLs.",
   );
   console.log(
     "  4. Replace the template SHA-256 and size values with the real artifact values before signing.",
+  );
+  console.log(
+    "  Plain loopback HTTP is exercised only by the automated Rust fixture server",
+  );
+  console.log(
+    "  (src-tauri/tests/support/kernel_server.rs), never by a production build.",
   );
 }
 
