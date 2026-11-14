@@ -229,7 +229,7 @@ pub mod ipc {
     }
 
     #[tauri::command]
-    pub async fn kernel_refresh(state: State<'_, Arc<AppState>>) -> Result<(), AppError> {
+    pub async fn kernel_manifest_refresh(state: State<'_, Arc<AppState>>) -> Result<(), AppError> {
         let state = Arc::clone(state.inner());
         run_blocking(move || kernel::kernel_refresh(&state)).await
     }

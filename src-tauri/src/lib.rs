@@ -90,7 +90,7 @@ pub fn run() {
             commands::ipc::downloads_open_file,
             commands::ipc::downloads_open_folder,
             commands::ipc::kernel_status,
-            commands::ipc::kernel_refresh,
+            commands::ipc::kernel_manifest_refresh,
             commands::ipc::kernel_install,
             commands::ipc::kernel_update,
             commands::ipc::kernel_rollback,
