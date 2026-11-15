@@ -65,6 +65,57 @@ pub mod ipc {
     }
 
     #[tauri::command]
+    pub async fn hf_token_status(
+        state: State<'_, Arc<AppState>>,
+    ) -> Result<app::SecretStatus, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || app::hf_token_status(&state)).await
+    }
+
+    #[tauri::command]
+    pub async fn hf_token_save(
+        state: State<'_, Arc<AppState>>,
+        token: String,
+    ) -> Result<app::SecretStatus, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || app::hf_token_save(&state, token)).await
+    }
+
+    #[tauri::command]
+    pub async fn hf_token_clear(
+        state: State<'_, Arc<AppState>>,
+    ) -> Result<app::SecretStatus, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || app::hf_token_clear(&state)).await
+    }
+
+    #[tauri::command]
+    pub async fn proxy_credentials_status(
+        state: State<'_, Arc<AppState>>,
+    ) -> Result<app::SecretStatus, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || app::proxy_credentials_status(&state)).await
+    }
+
+    #[tauri::command]
+    pub async fn proxy_credentials_save(
+        state: State<'_, Arc<AppState>>,
+        username: String,
+        password: String,
+    ) -> Result<app::SecretStatus, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || app::proxy_credentials_save(&state, username, password)).await
+    }
+
+    #[tauri::command]
+    pub async fn proxy_credentials_clear(
+        state: State<'_, Arc<AppState>>,
+    ) -> Result<app::SecretStatus, AppError> {
+        let state = Arc::clone(state.inner());
+        run_blocking(move || app::proxy_credentials_clear(&state)).await
+    }
+
+    #[tauri::command]
     pub async fn diagnostics_secret_roundtrip(
         state: State<'_, Arc<AppState>>,
         secret: String,
