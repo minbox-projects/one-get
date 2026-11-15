@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, COOKIE, LOCATION};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, COOKIE, LOCATION, USER_AGENT};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Response};
 use url::Url;
@@ -211,11 +211,40 @@ pub fn build_client_with_options(
     read: Duration,
     proxy: Option<&ProxyConfig>,
 ) -> Result<Client, EngineError> {
+    build_client_with_network(connect, read, proxy, None)
+}
+
+/// Build a client with explicit timeouts, proxy behavior, and a fallback
+/// `User-Agent`.
+///
+/// The User-Agent is installed as a default header, so a request-level value
+/// replaces it for the task that supplied one. Without either value no global
+/// User-Agent is sent.
+pub fn build_client_with_network(
+    connect: Duration,
+    read: Duration,
+    proxy: Option<&ProxyConfig>,
+    user_agent: Option<&str>,
+) -> Result<Client, EngineError> {
     let mut builder = Client::builder()
         .http1_only()
         .connect_timeout(connect)
         .read_timeout(read)
         .redirect(Policy::none());
+
+    if let Some(agent) = user_agent {
+        let mut defaults = HeaderMap::new();
+        defaults.insert(
+            USER_AGENT,
+            HeaderValue::from_str(agent).map_err(|_| {
+                EngineError::new(
+                    "INVALID_HEADER",
+                    "the configured User-Agent is not a valid header value",
+                )
+            })?,
+        );
+        builder = builder.default_headers(defaults);
+    }
 
     match proxy {
         None => builder = builder.no_proxy(),

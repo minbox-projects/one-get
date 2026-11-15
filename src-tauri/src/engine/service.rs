@@ -17,12 +17,13 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use futures_util::future::LocalBoxFuture;
+use reqwest::Client;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::error::EngineError;
 use super::http;
-use super::probe::{probe as probe_url, ProbeOptions, ProbeOutcome};
-use super::scheduler::{Engine, EngineOptions};
+use super::probe::{probe_with_client, ProbeOptions, ProbeOutcome};
+use super::scheduler::{Engine, EngineOptions, NetworkOptions};
 use super::state::TaskState;
 use super::worker::DownloadSpec;
 use crate::store::{Database, Segment, Task};
@@ -227,6 +228,15 @@ impl EngineService {
         self.call(move |reply| Command::SetProxy(proxy, reply), expect_unit)
     }
 
+    /// Replace the User-Agent fallback, timeouts, and retry budget used by
+    /// later engine requests.
+    pub fn apply_network_settings(&self, options: NetworkOptions) -> Result<(), EngineError> {
+        self.call(
+            move |reply| Command::SetNetworkOptions(options, reply),
+            expect_unit,
+        )
+    }
+
     /// Pause active downloads, stop the request loop, and refuse later work.
     pub fn shutdown(&self) {
         if self.stopped.swap(true, Ordering::SeqCst) {
@@ -285,6 +295,7 @@ enum Command {
         reply: ReplySender,
     },
     SetProxy(Option<http::ProxyConfig>, ReplySender),
+    SetNetworkOptions(NetworkOptions, ReplySender),
     Shutdown(Sender<Result<(), EngineError>>),
 }
 
@@ -395,11 +406,19 @@ async fn handle_command(engine: &Rc<Engine>, run: &mut Option<RunFuture>, comman
         Command::Probe(request, reply) => {
             // A probe can stall on the network. Run it alongside the request
             // loop and the engine loop so list and control requests keep
-            // flowing while it is pending.
-            drop(tokio::spawn(async move {
-                let result = probe_request(request).await;
-                let _ = reply.send(result.map(Reply::Probe));
-            }));
+            // flowing while it is pending. The client is captured up front so
+            // the spawned future does not borrow the non-Send engine.
+            match engine.client() {
+                Ok(client) => {
+                    drop(tokio::spawn(async move {
+                        let result = probe_request(client, request).await;
+                        let _ = reply.send(result.map(Reply::Probe));
+                    }));
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            }
         }
         Command::Add(request, reply) => {
             let result = add_request(engine, request);
@@ -455,6 +474,10 @@ async fn handle_command(engine: &Rc<Engine>, run: &mut Option<RunFuture>, comman
             let result = engine.set_proxy(proxy);
             let _ = reply.send(result.map(|()| Reply::Unit));
         }
+        Command::SetNetworkOptions(options, reply) => {
+            engine.set_network_options(options);
+            let _ = reply.send(Ok(Reply::Unit));
+        }
         Command::Shutdown(_) => {}
     }
 }
@@ -496,14 +519,14 @@ fn add_request(engine: &Engine, request: AddDownload) -> Result<String, EngineEr
     Ok(id)
 }
 
-async fn probe_request(request: ProbeRequest) -> Result<ProbeOutcome, EngineError> {
+async fn probe_request(client: Client, request: ProbeRequest) -> Result<ProbeOutcome, EngineError> {
     let url = http::validate_url(&request.url)?;
     http::validate_extra_headers(&request.extra_headers)?;
     let options = ProbeOptions {
         allow_html: request.allow_html,
         extra_headers: request.extra_headers,
     };
-    probe_url(&url, &options).await
+    probe_with_client(&client, &url, &options).await
 }
 
 fn ensure_run(engine: &Rc<Engine>, run: &mut Option<RunFuture>) {

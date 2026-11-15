@@ -17,8 +17,14 @@ use std::collections::HashMap;
 use oneget_lib::engine::error::EngineError;
 use oneget_lib::engine::http::{check_redirect, validate_url};
 use oneget_lib::engine::probe::{probe, ProbeOptions, ProbeOutcome};
+use oneget_lib::engine::scheduler::{EngineOptions, NetworkOptions};
+use oneget_lib::engine::service::{EngineService, ProbeRequest};
+use oneget_lib::store::Database;
+use std::time::Duration;
 use support::fixtures::pattern_bytes;
 use support::range_server::{FixtureConfig, RangeMode, RangeServer};
+use tempfile::tempdir;
+use tokio::time::timeout;
 
 fn opts_default() -> ProbeOptions {
     ProbeOptions::default()
@@ -476,4 +482,74 @@ async fn probe_filename_prefers_filename_star_then_filename_then_url_fallback_an
     });
     let out5 = probe(&s5.url("/x"), &opts_default()).await.unwrap();
     assert!(!out5.filename.contains('/') && !out5.filename.contains('\\'));
+}
+
+#[tokio::test]
+async fn probe_command_path_uses_global_user_agent_and_honors_read_timeout() {
+    const GLOBAL_UA: &str = "OneGet-Global/1.0";
+    let stalled = RangeServer::start(FixtureConfig {
+        body: pattern_bytes(7, 256),
+        range_mode: RangeMode::HonorRange,
+        stall_before_response: Some(Duration::from_secs(3)),
+        ..Default::default()
+    });
+
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let service = std::sync::Arc::new(
+        EngineService::start(
+            Database::open(store_dir.path().join("tasks.db")).expect("open store"),
+            dest.path().to_path_buf(),
+            EngineOptions { max_concurrent: 1 },
+        )
+        .expect("start service"),
+    );
+    service
+        .apply_network_settings(NetworkOptions {
+            user_agent: Some(GLOBAL_UA.to_string()),
+            read_timeout: Duration::from_millis(150),
+            retry_attempts: 1,
+            ..NetworkOptions::default()
+        })
+        .expect("apply network settings");
+
+    let url = stalled.url("/probe-stalled");
+    let started = std::time::Instant::now();
+    let probe_result = timeout(Duration::from_secs(5), async {
+        let service = std::sync::Arc::clone(&service);
+        let url = url.clone();
+        tokio::task::spawn_blocking(move || {
+            service.probe(ProbeRequest {
+                url,
+                allow_html: false,
+                extra_headers: Vec::new(),
+            })
+        })
+        .await
+        .expect("probe task join")
+    })
+    .await
+    .expect("probe must fail within bounded wall-clock window");
+    let elapsed = started.elapsed();
+
+    let err = probe_result.expect_err("stalled probe must fail");
+    assert_code(&err, "TIMEOUT");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "configured 150ms read timeout must fail quickly, elapsed {elapsed:?}"
+    );
+
+    let requests = stalled.requests();
+    assert!(
+        !requests.is_empty(),
+        "the stalled fixture must record the probe request even when the client times out"
+    );
+    assert!(
+        requests.iter().any(|request| {
+            request.headers.get("user-agent").map(String::as_str) == Some(GLOBAL_UA)
+        }),
+        "probe command path must send the configured global User-Agent, requests={requests:?}"
+    );
+
+    service.shutdown();
 }

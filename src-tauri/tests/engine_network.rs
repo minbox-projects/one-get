@@ -42,7 +42,7 @@ use cookies::{
 };
 use oneget_lib::engine::http::{build_client_with_timeouts, ProxyConfig};
 use oneget_lib::engine::retry::classify_reqwest_error;
-use oneget_lib::engine::scheduler::{Engine, EngineOptions};
+use oneget_lib::engine::scheduler::{Engine, EngineOptions, NetworkOptions};
 use oneget_lib::engine::state::TaskState;
 use oneget_lib::engine::worker::DownloadSpec;
 use oneget_lib::logging::{LogConfig, LogLevel, Logger};
@@ -2924,4 +2924,568 @@ fn loopback_api_traffic_never_passes_through_the_configured_manual_proxy() {
         "loopback API traffic must not pass through the configured manual proxy, observed {:?}",
         proxy.requests()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Step 3 behavior tests (expected RED): global User-Agent, timeouts, retries.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn network_options_default_contract_is_exact() {
+    let options = NetworkOptions::default();
+    assert_eq!(options.user_agent, None);
+    assert_eq!(options.connect_timeout, Duration::from_secs(15));
+    assert_eq!(options.read_timeout, Duration::from_secs(30));
+    assert_eq!(options.retry_attempts, 5);
+}
+
+#[tokio::test]
+async fn global_user_agent_is_fallback_for_tasks_without_their_own_user_agent() {
+    const GLOBAL_UA: &str = "OneGet-Global/1.0";
+    const TASK_UA: &str = "OneGet-Task/1.0";
+
+    let body_first = non_periodic_bytes(256 * 1024);
+    let hash_first = sha256_hex(&body_first);
+    let fixture_first = RangeServer::start(FixtureConfig {
+        body: body_first.clone(),
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let body_second = non_periodic_bytes(192 * 1024);
+    let hash_second = sha256_hex(&body_second);
+    let fixture_second = RangeServer::start(FixtureConfig {
+        body: body_second.clone(),
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    engine.set_network_options(NetworkOptions {
+        user_agent: Some(GLOBAL_UA.to_string()),
+        ..NetworkOptions::default()
+    });
+
+    let first_id = engine
+        .add_task(make_spec_with_headers(
+            fixture_first.url("/ua/explicit.bin"),
+            "ua-explicit.bin",
+            1,
+            Some(hash_first.clone()),
+            vec![("User-Agent".to_string(), TASK_UA.to_string())],
+        ))
+        .expect("add first task");
+    run_engine_to_terminal(&engine, engine.store(), &first_id).await;
+
+    let second_id = engine
+        .add_task(make_spec(
+            fixture_second.url("/ua/global.bin"),
+            "ua-global.bin",
+            1,
+            Some(hash_second.clone()),
+        ))
+        .expect("add second task");
+    run_engine_to_terminal(&engine, engine.store(), &second_id).await;
+
+    let first_task = engine.store().task(&first_id).expect("load").expect("task");
+    assert_eq!(
+        first_task.state,
+        TaskState::Completed,
+        "explicit-UA task failed with {:?}: {:?}",
+        first_task.error_code,
+        first_task.error_message
+    );
+    let second_task = engine
+        .store()
+        .task(&second_id)
+        .expect("load")
+        .expect("task");
+    assert_eq!(
+        second_task.state,
+        TaskState::Completed,
+        "global-UA task failed with {:?}: {:?}",
+        second_task.error_code,
+        second_task.error_message
+    );
+
+    let first_requests = fixture_first.requests();
+    assert!(
+        !first_requests.is_empty(),
+        "the explicit-UA fixture must observe requests"
+    );
+    for request in &first_requests {
+        assert_eq!(
+            request.headers.get("user-agent").map(String::as_str),
+            Some(TASK_UA),
+            "a task with its own User-Agent must send that value, request={request:?}"
+        );
+    }
+
+    let second_requests = fixture_second.requests();
+    assert!(
+        !second_requests.is_empty(),
+        "the global-UA fixture must observe requests"
+    );
+    for request in &second_requests {
+        assert_eq!(
+            request.headers.get("user-agent").map(String::as_str),
+            Some(GLOBAL_UA),
+            "a task without its own User-Agent must send the global value, request={request:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stalled_download_respects_configured_read_timeout_and_fails_typed() {
+    let fixture = RangeServer::start(FixtureConfig {
+        body: non_periodic_bytes(256 * 1024),
+        stall_before_response: Some(Duration::from_secs(3)),
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    engine.set_network_options(NetworkOptions {
+        read_timeout: Duration::from_millis(150),
+        retry_attempts: 1,
+        ..NetworkOptions::default()
+    });
+
+    let id = engine
+        .add_task(make_spec(
+            fixture.url("/timeout/stall.bin"),
+            "stall-timeout.bin",
+            1,
+            None,
+        ))
+        .expect("add task");
+
+    let started = Instant::now();
+    let ((), observed) = tokio::join!(
+        async {
+            timeout(Duration::from_secs(5), engine.run())
+                .await
+                .expect("engine run must finish within the bounded wall-clock window")
+                .expect("engine run failed");
+        },
+        wait_for_terminal(engine.store(), &id, Duration::from_secs(5)),
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "a 150ms read timeout must fail well within the bounded window, elapsed {elapsed:?}"
+    );
+    assert_eq!(
+        observed,
+        TaskState::Failed,
+        "a stalled task must fail, observed {observed:?}"
+    );
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(
+        task.error_code.as_deref(),
+        Some("TIMEOUT"),
+        "expected typed TIMEOUT, got {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert!(
+        !dest.path().join("stall-timeout.bin").exists(),
+        "a timed-out task must not create a final file"
+    );
+}
+
+#[derive(Clone, Debug)]
+struct RetryBoundRequest {
+    range: Option<String>,
+}
+
+struct RetryBoundServer {
+    url: String,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<RetryBoundRequest>>>,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RetryBoundServer {
+    fn start(body: Vec<u8>) -> Self {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind retry-bound server");
+        let addr = listener.local_addr().expect("addr");
+        listener
+            .set_nonblocking(true)
+            .expect("set nonblocking listener");
+        let requests: Arc<Mutex<Vec<RetryBoundRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let requests_clone = Arc::clone(&requests);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = Arc::clone(&shutdown);
+        let body = Arc::new(body);
+        let data_failures = Arc::new(AtomicUsize::new(0));
+
+        let join = std::thread::spawn(move || loop {
+            if shutdown_clone.load(Ordering::SeqCst) {
+                break;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let body = Arc::clone(&body);
+                    let requests = Arc::clone(&requests_clone);
+                    let failures = Arc::clone(&data_failures);
+                    std::thread::spawn(move || {
+                        stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                        let _ = stream.set_nonblocking(false);
+                        let mut buf = Vec::new();
+                        let mut tmp = [0u8; 4096];
+                        loop {
+                            match stream.read(&mut tmp) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    buf.extend_from_slice(&tmp[..n]);
+                                    if buf.windows(4).any(|w| w == b"\r\n\r\n")
+                                        || buf.len() > 64 * 1024
+                                    {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let req_text = String::from_utf8_lossy(&buf);
+                        let mut range: Option<String> = None;
+                        for line in req_text.split("\r\n").skip(1) {
+                            if line.is_empty() {
+                                break;
+                            }
+                            if let Some((k, v)) = line.split_once(':') {
+                                if k.trim().eq_ignore_ascii_case("range") {
+                                    range = Some(v.trim().to_string());
+                                }
+                            }
+                        }
+                        requests
+                            .lock()
+                            .expect("lock requests")
+                            .push(RetryBoundRequest {
+                                range: range.clone(),
+                            });
+
+                        let total = body.len() as u64;
+                        if range.as_deref() == Some("bytes=0-0") {
+                            let resp = format!(
+                                "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes 0-0/{total}\r\nContent-Length: 1\r\nConnection: close\r\n\r\n"
+                            );
+                            let _ = stream.write_all(resp.as_bytes());
+                            if !body.is_empty() {
+                                let _ = stream.write_all(&body[0..1]);
+                            }
+                            return;
+                        }
+
+                        let is_data_attempt = range.is_some();
+                        if is_data_attempt {
+                            let seen = failures.fetch_add(1, Ordering::SeqCst) + 1;
+                            if seen <= 2 {
+                                let msg = b"temporarily unavailable";
+                                let resp = format!(
+                                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    msg.len()
+                                );
+                                let _ = stream.write_all(resp.as_bytes());
+                                let _ = stream.write_all(msg);
+                                return;
+                            }
+                        }
+
+                        // Serve the requested range (or full body) successfully.
+                        let (start, end) = match range.as_deref() {
+                            Some(r) if r.starts_with("bytes=") => {
+                                let spec = r.trim_start_matches("bytes=");
+                                if let Some((s, e)) = spec.split_once('-') {
+                                    let start: u64 = s.parse().unwrap_or(0);
+                                    let end: u64 = if e.is_empty() {
+                                        total.saturating_sub(1)
+                                    } else {
+                                        e.parse().unwrap_or(total.saturating_sub(1))
+                                    };
+                                    (start, end.min(total.saturating_sub(1)))
+                                } else {
+                                    (0, total.saturating_sub(1))
+                                }
+                            }
+                            _ => (0, total.saturating_sub(1)),
+                        };
+                        let start_usize = start as usize;
+                        let end_usize = (end as usize).min(body.len().saturating_sub(1));
+                        let slice = &body[start_usize..=end_usize];
+                        if range.is_some() {
+                            let resp = format!(
+                                "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                slice.len()
+                            );
+                            let _ = stream.write_all(resp.as_bytes());
+                            let _ = stream.write_all(slice);
+                        } else {
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(resp.as_bytes());
+                            let _ = stream.write_all(body.as_ref());
+                        }
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => {
+                    if shutdown_clone.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        });
+
+        Self {
+            url: format!("http://{}", addr),
+            requests,
+            shutdown,
+            join: Some(join),
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.url, path)
+    }
+
+    fn requests(&self) -> Vec<RetryBoundRequest> {
+        self.requests.lock().expect("lock requests").clone()
+    }
+
+    fn data_attempts_after_probe(&self) -> usize {
+        self.requests()
+            .iter()
+            .filter(|r| r.range.as_deref() != Some("bytes=0-0"))
+            .count()
+    }
+}
+
+impl Drop for RetryBoundServer {
+    fn drop(&mut self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(stream) = std::net::TcpStream::connect(self.url.trim_start_matches("http://")) {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+#[tokio::test]
+async fn retry_attempts_bound_data_requests_and_allow_success_within_budget() {
+    let body = non_periodic_bytes(256 * 1024);
+    let hash = sha256_hex(&body);
+
+    // Budget = 2: probe succeeds, exactly 2 data attempts (both 503) must fail.
+    // Probe is served normally and does not consume the data-attempt budget; the
+    // inline server counts non-probe ranged requests as data attempts.
+    let fail_server = RetryBoundServer::start(body.clone());
+    let fail_dest = tempdir().expect("dest");
+    let fail_store_dir = tempdir().expect("store");
+    let fail_engine = Engine::new(
+        open_store(&fail_store_dir),
+        fail_dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    fail_engine.set_network_options(NetworkOptions {
+        retry_attempts: 2,
+        ..NetworkOptions::default()
+    });
+
+    let fail_id = fail_engine
+        .add_task(make_spec(
+            fail_server.url("/retry-bound/fail.bin"),
+            "retry-fail.bin",
+            1,
+            Some(hash.clone()),
+        ))
+        .expect("add fail task");
+    let (_, fail_state) = tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, fail_engine.run())
+                .await
+                .expect("fail engine timed out")
+                .expect("fail engine run failed");
+        },
+        wait_for_terminal(fail_engine.store(), &fail_id, WAIT_TIMEOUT),
+    );
+    assert_eq!(
+        fail_state,
+        TaskState::Failed,
+        "retry_attempts=2 must fail after bounded 503s"
+    );
+    assert!(
+        !fail_dest.path().join("retry-fail.bin").exists(),
+        "a bounded-retry failure must not produce a final file"
+    );
+    assert_eq!(
+        fail_server.data_attempts_after_probe(),
+        2,
+        "with retry_attempts=2 the server must observe exactly 2 data attempts after the probe, requests={:?}",
+        fail_server.requests()
+    );
+
+    // Budget = 3: first two data attempts fail with 503, third succeeds.
+    let ok_server = RetryBoundServer::start(body.clone());
+    let ok_dest = tempdir().expect("dest");
+    let ok_store_dir = tempdir().expect("store");
+    let ok_engine = Engine::new(
+        open_store(&ok_store_dir),
+        ok_dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    ok_engine.set_network_options(NetworkOptions {
+        retry_attempts: 3,
+        ..NetworkOptions::default()
+    });
+
+    let ok_id = ok_engine
+        .add_task(make_spec(
+            ok_server.url("/retry-bound/ok.bin"),
+            "retry-ok.bin",
+            1,
+            Some(hash.clone()),
+        ))
+        .expect("add ok task");
+    let (_, ok_state) = tokio::join!(
+        async {
+            timeout(WAIT_TIMEOUT, ok_engine.run())
+                .await
+                .expect("ok engine timed out")
+                .expect("ok engine run failed");
+        },
+        wait_for_terminal(ok_engine.store(), &ok_id, WAIT_TIMEOUT),
+    );
+    assert_eq!(
+        ok_state,
+        TaskState::Completed,
+        "retry_attempts=3 must succeed within the configured budget"
+    );
+    let ok_task = ok_engine
+        .store()
+        .task(&ok_id)
+        .expect("load ok task")
+        .expect("ok task exists");
+    assert_eq!(ok_task.actual_sha256.as_deref(), Some(hash.as_str()));
+    assert_eq!(
+        std::fs::read(ok_dest.path().join("retry-ok.bin")).expect("read final"),
+        body,
+        "successful bounded retry must produce the fixture bytes"
+    );
+    assert!(
+        ok_server.data_attempts_after_probe() >= 3,
+        "with retry_attempts=3 the server must observe at least 3 data attempts after the probe, requests={:?}",
+        ok_server.requests()
+    );
+}
+
+#[tokio::test]
+async fn forbidden_and_crlf_headers_remain_rejected_and_unpersisted_with_network_options() {
+    let fixture = RangeServer::start(FixtureConfig {
+        body: non_periodic_bytes(64 * 1024),
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let db_path = store_dir.path().join("tasks.db");
+    let engine = Engine::new(
+        Database::open(&db_path).expect("open store"),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    engine.set_network_options(NetworkOptions {
+        user_agent: Some("OneGet-Global/1.0".to_string()),
+        ..NetworkOptions::default()
+    });
+
+    for (header, value) in [
+        ("Host", "evil.example"),
+        ("Authorization", "Bearer secret"),
+        ("Cookie", "session=secret"),
+        ("Range", "bytes=0-1"),
+        ("Proxy-Authorization", "Basic secret"),
+        ("Content-Length", "42"),
+        ("Connection", "keep-alive"),
+        ("Transfer-Encoding", "chunked"),
+        ("Upgrade", "h2c"),
+        ("TE", "trailers"),
+        ("Trailer", "Expires"),
+        ("Set-Cookie", "a=b"),
+    ] {
+        let error = engine
+            .add_task(make_spec_with_headers(
+                fixture.url("/netopts/forbidden.bin"),
+                "forbidden.bin",
+                1,
+                None,
+                vec![(header.to_string(), value.to_string())],
+            ))
+            .expect_err("forbidden header must be rejected");
+        assert_eq!(error.code(), "INVALID_HEADER", "header {header}");
+    }
+
+    for (name, value) in [
+        ("X-Bad".to_string(), "value\r\nInjected: x".to_string()),
+        ("X-Bad".to_string(), "value\nInjected: x".to_string()),
+        ("X-Bad\r\nInjected".to_string(), "x".to_string()),
+    ] {
+        let error = engine
+            .add_task(make_spec_with_headers(
+                fixture.url("/netopts/crlf.bin"),
+                "crlf.bin",
+                1,
+                None,
+                vec![(name, value)],
+            ))
+            .expect_err("CR/LF must be rejected");
+        assert_eq!(error.code(), "INVALID_HEADER");
+    }
+
+    assert!(
+        fixture.requests().is_empty(),
+        "rejected headers must not produce any request"
+    );
+    assert!(
+        engine.store().list_tasks().expect("list tasks").is_empty(),
+        "rejected headers must not create a task"
+    );
+    let dump = sqlite_text_dump(&db_path);
+    for marker in [
+        "evil.example",
+        "Bearer secret",
+        "session=secret",
+        "Basic secret",
+        "Injected: x",
+        "OneGet-Global/1.0",
+    ] {
+        assert!(
+            !dump.contains(marker),
+            "sensitive or rejected header value {marker:?} must not be persisted"
+        );
+    }
 }

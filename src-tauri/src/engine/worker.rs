@@ -83,12 +83,14 @@ pub struct DownloadSpec {
 
 /// HTTP and pacing configuration shared by one task execution.
 pub(crate) struct NetworkContext {
-    /// Client that applies the configured proxy.
+    /// Client that applies the configured proxy, timeouts, and User-Agent.
     pub client: Client,
     /// Cookies reloaded for this task run, when a cookie file is configured.
     pub cookies: Option<CookieJar>,
     /// Per-task and global rate limiters that pace every streamed chunk.
     pub limiters: Vec<Arc<RateLimiter>>,
+    /// Attempts one request may make before it gives up.
+    pub retry_attempts: usize,
 }
 
 impl NetworkContext {
@@ -98,6 +100,7 @@ impl NetworkContext {
             client: build_client()?,
             cookies: None,
             limiters: Vec::new(),
+            retry_attempts: retry::MAX_ATTEMPTS,
         })
     }
 
@@ -1901,7 +1904,7 @@ async fn stream_request(
             .await
             {
                 Ok((response, _final_url)) => response,
-                Err(error) if error.is_retryable() && send_attempts < retry::MAX_ATTEMPTS => {
+                Err(error) if error.is_retryable() && send_attempts < network.retry_attempts => {
                     tokio::time::sleep(retry::delay_for_attempt(
                         send_attempts,
                         error.retry_after(),
@@ -1931,7 +1934,7 @@ async fn stream_request(
                 }
                 if status != StatusCode::PARTIAL_CONTENT {
                     let error = response_status_error(&response);
-                    if error.is_retryable() && send_attempts < retry::MAX_ATTEMPTS {
+                    if error.is_retryable() && send_attempts < network.retry_attempts {
                         tokio::time::sleep(retry::delay_for_attempt(
                             send_attempts,
                             error.retry_after(),
@@ -1951,7 +1954,7 @@ async fn stream_request(
                 range_total = total;
             } else if status != StatusCode::OK {
                 let error = response_status_error(&response);
-                if error.is_retryable() && send_attempts < retry::MAX_ATTEMPTS {
+                if error.is_retryable() && send_attempts < network.retry_attempts {
                     tokio::time::sleep(retry::delay_for_attempt(
                         send_attempts,
                         error.retry_after(),
@@ -2207,7 +2210,7 @@ async fn check_first_range(
 
         match result {
             Ok(check) => return Ok(check),
-            Err(error) if error.is_retryable() && attempts < PROBE_ATTEMPTS => {
+            Err(error) if error.is_retryable() && attempts < network.retry_attempts => {
                 tokio::time::sleep(retry::delay_for_attempt(attempts, error.retry_after())).await;
             }
             Err(error) => return Err(error),

@@ -26,7 +26,7 @@ use crate::api::pairing_store::PairingStore;
 use crate::api::protocol::API_PORT;
 use crate::api::rate_limit::RateLimitPolicy;
 use crate::api::server::{ApiServerConfig, ApiServerHandle};
-use crate::app_state::{AppState, PairingRuntime};
+use crate::app_state::{network_options, AppState, PairingRuntime};
 use crate::commands::app::{
     AutostartService, KeyringSecretService, NotificationService, PlatformQuitService, QuitService,
     SecretService,
@@ -159,6 +159,7 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         EngineOptions { max_concurrent },
     )?);
     engine.apply_settings(max_concurrent, snapshot.global_rate_limit)?;
+    engine.apply_network_settings(network_options(&snapshot))?;
 
     let secrets: Arc<dyn SecretService> = Arc::new(KeyringSecretService::new());
     let notifications: Arc<dyn NotificationService> =

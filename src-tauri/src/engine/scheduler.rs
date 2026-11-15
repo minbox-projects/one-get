@@ -52,6 +52,30 @@ pub struct EngineOptions {
     pub max_concurrent: usize,
 }
 
+/// Transport settings applied to later engine requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkOptions {
+    /// Fallback User-Agent for requests without a per-task value.
+    pub user_agent: Option<String>,
+    /// Timeout for establishing a connection.
+    pub connect_timeout: Duration,
+    /// Timeout for reading from an established connection.
+    pub read_timeout: Duration,
+    /// Attempts one request may make before it gives up.
+    pub retry_attempts: usize,
+}
+
+impl Default for NetworkOptions {
+    fn default() -> Self {
+        Self {
+            user_agent: None,
+            connect_timeout: Duration::from_secs(15),
+            read_timeout: Duration::from_secs(30),
+            retry_attempts: 5,
+        }
+    }
+}
+
 /// Summary of the store and part-file recovery performed at startup.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RecoveryReport {
@@ -77,6 +101,7 @@ pub struct Engine {
     /// Full in-memory specs, including query-bearing URLs and header values.
     specs: Mutex<HashMap<String, DownloadSpec>>,
     proxy: RwLock<Option<ProxyConfig>>,
+    network_options: RwLock<NetworkOptions>,
     client: Mutex<Option<Client>>,
     cookie_file: Mutex<Option<PathBuf>>,
     global_rate: Mutex<Option<Arc<RateLimiter>>>,
@@ -96,6 +121,7 @@ impl Engine {
             notify: Notify::new(),
             specs: Mutex::new(HashMap::new()),
             proxy: RwLock::new(None),
+            network_options: RwLock::new(NetworkOptions::default()),
             client: Mutex::new(None),
             cookie_file: Mutex::new(None),
             global_rate: Mutex::new(None),
@@ -134,6 +160,24 @@ impl Engine {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         Ok(())
+    }
+
+    /// Replace the User-Agent fallback, timeouts, and retry budget used by
+    /// later engine requests.
+    ///
+    /// The cached client is discarded so a new request rebuilds it with these
+    /// values. A request already in flight keeps the client and options it
+    /// started with.
+    pub fn set_network_options(&self, options: NetworkOptions) {
+        let mut cached = self
+            .client
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *self
+            .network_options
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = options;
+        *cached = None;
     }
 
     /// Load a Netscape cookie file at each task start or resume.
@@ -330,10 +374,12 @@ impl Engine {
     /// Re-probe paused tasks so a changed remote file or missing part is not
     /// resumed silently. Unchanged tasks stay paused for an explicit resume.
     async fn revalidate_paused(&self) -> Result<(), EngineError> {
+        let (client, options) = self.client_and_options()?;
         let network = NetworkContext {
-            client: self.client()?,
+            client,
             cookies: self.load_cookies().ok().flatten(),
             limiters: Vec::new(),
+            retry_attempts: options.retry_attempts,
         };
 
         for task in self.store.tasks_by_kind(TaskKind::Http)? {
@@ -649,13 +695,18 @@ impl Engine {
         }
     }
 
-    fn client(&self) -> Result<Client, EngineError> {
+    fn client_and_options(&self) -> Result<(Client, NetworkOptions), EngineError> {
         let mut cached = self
             .client
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let options = self
+            .network_options
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         if let Some(client) = cached.as_ref() {
-            return Ok(client.clone());
+            return Ok((client.clone(), options));
         }
 
         let proxy = self
@@ -663,9 +714,18 @@ impl Engine {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let client = http::build_client_with_proxy(proxy.as_ref())?;
+        let client = http::build_client_with_network(
+            options.connect_timeout,
+            options.read_timeout,
+            proxy.as_ref(),
+            options.user_agent.as_deref(),
+        )?;
         *cached = Some(client.clone());
-        Ok(client)
+        Ok((client, options))
+    }
+
+    pub(crate) fn client(&self) -> Result<Client, EngineError> {
+        self.client_and_options().map(|(client, _)| client)
     }
 
     fn load_cookies(&self) -> Result<Option<CookieJar>, EngineError> {
@@ -700,7 +760,7 @@ impl Engine {
     }
 
     fn network_for(&self, task_id: &str) -> Result<NetworkContext, EngineError> {
-        let client = self.client()?;
+        let (client, options) = self.client_and_options()?;
         let cookies = self.load_cookies()?;
 
         let mut limiters = Vec::new();
@@ -726,6 +786,7 @@ impl Engine {
             client,
             cookies,
             limiters,
+            retry_attempts: options.retry_attempts,
         })
     }
 

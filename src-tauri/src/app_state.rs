@@ -6,6 +6,7 @@
 //! can take `&AppState` and remain directly testable.
 
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use crate::api::clock::{Clock, SystemClock};
 use crate::api::desktop::PendingPrefill;
@@ -16,6 +17,7 @@ use crate::commands::app::{AutostartService, NotificationService, QuitService, S
 use crate::commands::kernel::KernelRuntime;
 use crate::config::{ProxyMode, Settings, SettingsStore};
 use crate::engine::http::ProxyConfig;
+use crate::engine::scheduler::NetworkOptions;
 use crate::engine::service::EngineService;
 use crate::error::AppError;
 use crate::logging::Logger;
@@ -323,7 +325,18 @@ impl AppState {
             store.settings()
         };
         self.apply_proxy_settings(&saved)?;
+        self.apply_network_settings(&saved)?;
         Ok(saved)
+    }
+
+    /// Apply the saved transport settings to the running engine.
+    pub(crate) fn apply_network_settings(&self, settings: &Settings) -> Result<(), AppError> {
+        if let Some(engine) = &self.engine {
+            engine
+                .apply_network_settings(network_options(settings))
+                .map_err(AppError::from)?;
+        }
+        Ok(())
     }
 
     /// The last stable reason a system proxy could not be used.
@@ -446,6 +459,16 @@ impl AppState {
         self.pairing
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Translate saved settings into the transport options the engine applies.
+pub(crate) fn network_options(settings: &Settings) -> NetworkOptions {
+    NetworkOptions {
+        user_agent: settings.user_agent.clone(),
+        connect_timeout: Duration::from_secs(u64::from(settings.connect_timeout_secs)),
+        read_timeout: Duration::from_secs(u64::from(settings.read_timeout_secs)),
+        retry_attempts: settings.retry_attempts as usize,
     }
 }
 
