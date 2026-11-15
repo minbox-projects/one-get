@@ -40,9 +40,12 @@ use std::time::Duration;
 use cookies::{
     cookie_names, cookie_value, future_expiry, past_expiry, write_cookie_file, NetscapeCookie,
 };
+use oneget_lib::commands::downloads::DownloadSummary;
+use oneget_lib::engine::cookies::{BrowserCookie, CookieSource};
 use oneget_lib::engine::http::{build_client_with_timeouts, ProxyConfig};
 use oneget_lib::engine::retry::classify_reqwest_error;
 use oneget_lib::engine::scheduler::{Engine, EngineOptions, NetworkOptions};
+use oneget_lib::engine::service::{AddDownload, EngineService};
 use oneget_lib::engine::state::TaskState;
 use oneget_lib::engine::worker::DownloadSpec;
 use oneget_lib::logging::{LogConfig, LogLevel, Logger};
@@ -3488,4 +3491,360 @@ async fn forbidden_and_crlf_headers_remain_rejected_and_unpersisted_with_network
             "sensitive or rejected header value {marker:?} must not be persisted"
         );
     }
+}
+
+// --- Cookie sources and provenance ---
+
+fn browser_cookie_value(
+    name: &str,
+    domain: &str,
+    path: &str,
+    secure: bool,
+    expires: u64,
+) -> BrowserCookie {
+    BrowserCookie {
+        name: name.to_string(),
+        value: format!("browser-secret-{name}"),
+        domain: domain.to_string(),
+        path: path.to_string(),
+        secure,
+        expires,
+    }
+}
+
+fn add_request(url: String, filename: &str) -> AddDownload {
+    AddDownload {
+        url,
+        filename: filename.to_string(),
+        destination: None,
+        connections: 1,
+        rate_limit: None,
+        expected_sha256: None,
+        allow_html: false,
+        extra_headers: Vec::new(),
+    }
+}
+
+async fn wait_service_terminal(service: &EngineService, id: &str, deadline: Duration) -> TaskState {
+    let start = Instant::now();
+    loop {
+        let tasks = service.list().expect("list tasks");
+        let task = tasks
+            .into_iter()
+            .find(|task| task.id == id)
+            .expect("task exists");
+        if matches!(
+            task.state,
+            TaskState::Completed | TaskState::Failed | TaskState::Cancelled | TaskState::Paused
+        ) {
+            return task.state;
+        }
+        if start.elapsed() > deadline {
+            panic!(
+                "timed out waiting for service task {id}, state {:?}",
+                task.state
+            );
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
+fn summary_for<'a>(summaries: &'a [DownloadSummary], id: &str) -> &'a DownloadSummary {
+    summaries
+        .iter()
+        .find(|summary| summary.id == id)
+        .expect("summary for task")
+}
+
+#[tokio::test]
+async fn cookie_file_takes_precedence_and_provenance_reports_source_and_count_without_values() {
+    let body = non_periodic_bytes(128 * 1024);
+    let _hash = sha256_hex(&body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let log_dir = tempdir().expect("logs");
+    let cookie_dir = tempdir().expect("cookies");
+    let logger = debug_logger(log_dir.path());
+
+    let file_cookie_name = "file_cookie";
+    let file_cookie_val = "file-cookie-secret-value";
+    let cookie_path = write_cookie_file(
+        cookie_dir.path(),
+        &[NetscapeCookie {
+            domain: "127.0.0.1".to_string(),
+            include_subdomains: false,
+            path: "/".to_string(),
+            secure: false,
+            expires: future_expiry(),
+            name: file_cookie_name.to_string(),
+            value: file_cookie_val.to_string(),
+        }],
+    );
+
+    let service = EngineService::start(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    )
+    .expect("start service");
+    service.set_logger(Arc::clone(&logger));
+
+    let browser = vec![
+        browser_cookie_value("browser_cookie", "127.0.0.1", "/", false, u64::MAX / 2),
+        browser_cookie_value("other_host", "other.example", "/", false, u64::MAX / 2),
+    ];
+    let id = service
+        .add_with_cookies(
+            add_request(
+                fixture.url("/cookies/file-precedence.bin"),
+                "file-precedence.bin",
+            ),
+            CookieSource::File(cookie_path),
+        )
+        .expect("add file-cookie task");
+    let state = wait_service_terminal(&service, &id, WAIT_TIMEOUT).await;
+    assert_eq!(state, TaskState::Completed);
+    logger.flush().expect("flush logs");
+
+    let requests = fixture.requests();
+    assert!(!requests.is_empty());
+    for request in &requests {
+        let names = cookie_names(&request.headers);
+        assert!(names.contains(file_cookie_name));
+        assert!(!names.contains("browser_cookie"));
+        assert!(!names.contains("other_host"));
+    }
+
+    // A browser-cookie task must send only matching in-scope cookies.
+    let fixture_browser = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let browser_task = service
+        .add_with_cookies(
+            add_request(
+                fixture_browser.url("/allowed/browser.bin"),
+                "browser-only.bin",
+            ),
+            CookieSource::Browser(vec![
+                browser_cookie_value("ok_cookie", "127.0.0.1", "/allowed", false, u64::MAX / 2),
+                browser_cookie_value("wrong_path", "127.0.0.1", "/blocked", false, u64::MAX / 2),
+                browser_cookie_value("wrong_host", "localhost", "/", false, u64::MAX / 2),
+                browser_cookie_value("expired", "127.0.0.1", "/", false, 1),
+                browser_cookie_value("secure_only", "127.0.0.1", "/", true, u64::MAX / 2),
+            ]),
+        )
+        .expect("add browser-cookie task");
+    let state = wait_service_terminal(&service, &browser_task, WAIT_TIMEOUT).await;
+    assert_eq!(state, TaskState::Completed);
+
+    let browser_requests = fixture_browser.requests();
+    assert!(!browser_requests.is_empty());
+    for request in &browser_requests {
+        let names = cookie_names(&request.headers);
+        assert_eq!(names, BTreeSet::from(["ok_cookie".to_string()]));
+    }
+
+    let summaries = service.list_summaries().expect("list summaries");
+    let file_summary = summary_for(&summaries, &id);
+    assert_eq!(file_summary.cookie_source.as_deref(), Some("file"));
+    assert_eq!(file_summary.cookie_count, 1);
+    let browser_summary = summary_for(&summaries, &browser_task);
+    assert_eq!(browser_summary.cookie_source.as_deref(), Some("browser"));
+    assert_eq!(browser_summary.cookie_count, 1);
+
+    let dump = sqlite_text_dump(&store_dir.path().join("tasks.db"));
+    let logs = read_log_files(&logger);
+    let file_json = serde_json::to_string(file_summary).expect("serialize summary");
+    let browser_json = serde_json::to_string(browser_summary).expect("serialize summary");
+    for secret in [
+        file_cookie_val,
+        "browser-secret-browser_cookie",
+        "browser-secret-ok_cookie",
+        "browser-secret-wrong_path",
+        "browser-secret-wrong_host",
+        "browser-secret-expired",
+        "browser-secret-secure_only",
+        "browser-secret-other_host",
+    ] {
+        assert!(!dump.contains(secret));
+        assert!(!logs.contains(secret));
+        assert!(!file_json.contains(secret));
+        assert!(!browser_json.contains(secret));
+    }
+
+    drop(service);
+    let _ = browser;
+}
+
+#[tokio::test]
+async fn missing_or_unreadable_cookie_file_fails_and_preserves_part() {
+    let body = non_periodic_bytes(256 * 1024);
+    let fixture = RangeServer::start(FixtureConfig {
+        body,
+        range_mode: RangeMode::HonorRange,
+        stream_delay: Some(Duration::from_millis(10)),
+        stream_chunk_size: 16 * 1024,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let missing = store_dir.path().join("missing-cookies.txt");
+
+    let service = EngineService::start(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    )
+    .expect("start service");
+    let id = service
+        .add_with_cookies(
+            add_request(fixture.url("/cookies/missing.bin"), "missing-cookie.bin"),
+            CookieSource::File(missing),
+        )
+        .expect("add task");
+
+    let state = wait_service_terminal(&service, &id, WAIT_TIMEOUT).await;
+    assert!(
+        matches!(state, TaskState::Failed | TaskState::Paused),
+        "missing cookie file must fail the task, got {state:?}"
+    );
+    let tasks = service.list().expect("list tasks");
+    let task = tasks.into_iter().find(|task| task.id == id).expect("task");
+    assert_eq!(task.error_code.as_deref(), Some("COOKIE_FILE_ERROR"));
+
+    let part = part_path(dest.path(), "missing-cookie.bin");
+    assert!(part.exists(), "part file must be preserved");
+    assert!(
+        !dest.path().join("missing-cookie.bin").exists(),
+        "no final file may be created"
+    );
+}
+
+#[tokio::test]
+async fn captured_cookie_task_after_restart_sends_no_browser_cookies_and_fails_auth_preserving_part(
+) {
+    let body = non_periodic_bytes(256 * 1024);
+    let fixture = RangeServer::start(FixtureConfig {
+        body,
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let log_dir = tempdir().expect("logs");
+    let db_path = store_dir.path().join("tasks.db");
+
+    let browser_secret = "browser-restart-secret";
+    let cookies = vec![BrowserCookie {
+        name: "session".to_string(),
+        value: browser_secret.to_string(),
+        domain: "127.0.0.1".to_string(),
+        path: "/".to_string(),
+        secure: false,
+        expires: u64::MAX / 2,
+    }];
+
+    {
+        let service = EngineService::start(
+            Database::open(&db_path).expect("open store"),
+            dest.path().to_path_buf(),
+            EngineOptions { max_concurrent: 1 },
+        )
+        .expect("start service");
+        let id = service
+            .add_with_cookies(
+                add_request(fixture.url("/restart/ok.bin"), "restart-cookie.bin"),
+                CookieSource::Browser(cookies.clone()),
+            )
+            .expect("add browser-cookie task");
+        let state = wait_service_terminal(&service, &id, WAIT_TIMEOUT).await;
+        assert_eq!(state, TaskState::Completed);
+        service.shutdown();
+    }
+
+    // Second phase: require cookie on restart; task should re-request without browser cookies.
+    let auth_fixture = RangeServer::start(FixtureConfig {
+        body: non_periodic_bytes(256 * 1024),
+        range_mode: RangeMode::HonorRange,
+        status_override: Some(401),
+        ..Default::default()
+    });
+    let logger = debug_logger(log_dir.path());
+    let service = EngineService::start(
+        Database::open(&db_path).expect("reopen store"),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    )
+    .expect("restart service");
+    service.set_logger(Arc::clone(&logger));
+
+    let _id = service
+        .add_with_cookies(
+            add_request(auth_fixture.url("/restart/auth.bin"), "restart-auth.bin"),
+            CookieSource::Browser(cookies),
+        )
+        .expect("add browser-cookie task for restart");
+    // Simulate resume in a new process context: drop and recreate without re-supplying cookies.
+    service.shutdown();
+    drop(service);
+
+    // Create the task record in a state that will be resumed? easier: start new service and retry/resume after failure path.
+    let service = EngineService::start(
+        Database::open(&db_path).expect("reopen store again"),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    )
+    .expect("restart service again");
+    service.set_logger(Arc::clone(&logger));
+    let tasks = service.list().expect("list tasks");
+    let restart_task = tasks
+        .into_iter()
+        .find(|task| task.filename == "restart-auth.bin")
+        .expect("restart-auth task");
+    if matches!(restart_task.state, TaskState::Paused | TaskState::Failed) {
+        let _ = service.resume(&restart_task.id);
+        let _ = service.retry(&restart_task.id);
+    }
+    let state = wait_service_terminal(&service, &restart_task.id, WAIT_TIMEOUT).await;
+    assert_eq!(
+        state,
+        TaskState::Failed,
+        "resume without browser cookies must fail auth"
+    );
+    let tasks = service.list().expect("list tasks");
+    let task = tasks
+        .into_iter()
+        .find(|task| task.id == restart_task.id)
+        .expect("task");
+    assert_eq!(task.error_code.as_deref(), Some("AUTH_REQUIRED"));
+
+    for request in auth_fixture.requests() {
+        let names = cookie_names(&request.headers);
+        assert!(
+            names.is_empty(),
+            "no browser cookies may be sent after restart"
+        );
+    }
+
+    assert!(
+        part_path(dest.path(), "restart-auth.bin").exists(),
+        "part must be preserved"
+    );
+
+    logger.flush().expect("flush logs");
+    let dump = sqlite_text_dump(&db_path);
+    let logs = read_log_files(&logger);
+    let summaries = service.list_summaries().expect("list summaries");
+    let summary = summary_for(&summaries, &restart_task.id);
+    let summary_json = serde_json::to_string(summary).expect("serialize summary");
+    assert!(!dump.contains(browser_secret));
+    assert!(!logs.contains(browser_secret));
+    assert!(!summary_json.contains(browser_secret));
 }

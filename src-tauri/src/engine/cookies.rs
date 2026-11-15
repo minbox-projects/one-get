@@ -5,12 +5,66 @@
 //! expiry, and secure flag match the request URL. Cross-host redirects get the
 //! header for the target host instead of the original host's cookies.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use url::Url;
 
 use super::error::EngineError;
+
+/// One cookie captured from a browser and carried only in memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserCookie {
+    /// Cookie name.
+    pub name: String,
+    /// Cookie value; never persisted, logged, or rendered.
+    pub value: String,
+    /// Cookie domain without a leading dot.
+    pub domain: String,
+    /// Cookie path.
+    pub path: String,
+    /// Whether the cookie is restricted to secure schemes.
+    pub secure: bool,
+    /// Expiry in seconds since the Unix epoch; zero means a session cookie.
+    pub expires: u64,
+}
+
+/// The single cookie source selected for one task.
+///
+/// A task-level file always wins over captured browser cookies, and the two
+/// sources are never merged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CookieSource {
+    /// A Netscape cookie file reloaded from disk at each start or resume.
+    File(PathBuf),
+    /// Captured browser cookies retained only in memory.
+    Browser(Vec<BrowserCookie>),
+}
+
+impl BrowserCookie {
+    /// Whether this cookie applies to `url` at `now`.
+    pub(crate) fn matches(&self, url: &Url, now: u64) -> bool {
+        let Some(host) = url.host_str() else {
+            return false;
+        };
+        if self.secure && url.scheme() != "https" {
+            return false;
+        }
+        if self.expires != 0 && self.expires <= now {
+            return false;
+        }
+        if has_control(&self.name) || has_control(&self.value) {
+            return false;
+        }
+        let domain = normalize_domain(&self.domain);
+        if domain.is_empty() {
+            return false;
+        }
+        let host = host.to_ascii_lowercase();
+        let host_matches = host == domain || host.ends_with(&format!(".{domain}"));
+        host_matches && path_matches(&normalize_path(&self.path), url.path())
+    }
+}
 
 /// One parsed Netscape cookie row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,12 +90,7 @@ impl Cookie {
     }
 
     fn matches_path(&self, request_path: &str) -> bool {
-        if request_path == self.path {
-            return true;
-        }
-        request_path.starts_with(&self.path)
-            && (self.path.ends_with('/')
-                || request_path.as_bytes().get(self.path.len()) == Some(&b'/'))
+        path_matches(&self.path, request_path)
     }
 
     fn is_expired(&self, now: u64) -> bool {
@@ -66,35 +115,65 @@ impl CookieJar {
         })
     }
 
+    /// Build a jar from memory-only captured browser cookies.
+    pub fn from_browser(cookies: Vec<BrowserCookie>) -> Self {
+        Self {
+            cookies: cookies
+                .into_iter()
+                .map(|cookie| Cookie {
+                    domain: normalize_domain(&cookie.domain),
+                    include_subdomains: true,
+                    path: normalize_path(&cookie.path),
+                    secure: cookie.secure,
+                    expires: cookie.expires,
+                    name: cookie.name,
+                    value: cookie.value,
+                })
+                .collect(),
+        }
+    }
+
     /// Build the `Cookie` header for `url`, or `None` when no cookie matches.
     pub fn header_for(&self, url: &Url) -> Option<String> {
-        let host = url.host_str()?.to_ascii_lowercase();
+        let matching = self.matching(url);
+        if matching.is_empty() {
+            None
+        } else {
+            Some(
+                matching
+                    .into_iter()
+                    .map(|cookie| format!("{}={}", cookie.name, cookie.value))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        }
+    }
+
+    /// Count the cookies from this jar that apply to `url`.
+    pub fn matching_count(&self, url: &Url) -> u32 {
+        self.matching(url).len() as u32
+    }
+
+    fn matching(&self, url: &Url) -> Vec<&Cookie> {
+        let Some(host) = url.host_str() else {
+            return Vec::new();
+        };
+        let host = host.to_ascii_lowercase();
         let scheme = url.scheme();
         let path = url.path();
         let now = now_secs();
 
-        let mut pairs = Vec::new();
-        for cookie in &self.cookies {
-            if !cookie.matches_host(&host) || !cookie.matches_path(path) {
-                continue;
-            }
-            if cookie.secure && scheme != "https" {
-                continue;
-            }
-            if cookie.is_expired(now) {
-                continue;
-            }
-            if has_control(&cookie.name) || has_control(&cookie.value) {
-                continue;
-            }
-            pairs.push(format!("{}={}", cookie.name, cookie.value));
-        }
-
-        if pairs.is_empty() {
-            None
-        } else {
-            Some(pairs.join("; "))
-        }
+        self.cookies
+            .iter()
+            .filter(|cookie| {
+                cookie.matches_host(&host)
+                    && cookie.matches_path(path)
+                    && !(cookie.secure && scheme != "https")
+                    && !cookie.is_expired(now)
+                    && !has_control(&cookie.name)
+                    && !has_control(&cookie.value)
+            })
+            .collect()
     }
 }
 
@@ -115,10 +194,7 @@ fn parse(text: &str) -> Vec<Cookie> {
             continue;
         }
 
-        let domain = fields[0]
-            .trim()
-            .trim_start_matches('.')
-            .to_ascii_lowercase();
+        let domain = normalize_domain(fields[0]);
         if domain.is_empty() {
             continue;
         }
@@ -142,6 +218,19 @@ fn parse(text: &str) -> Vec<Cookie> {
         });
     }
     cookies
+}
+
+fn normalize_domain(raw: &str) -> String {
+    raw.trim().trim_start_matches('.').to_ascii_lowercase()
+}
+
+fn path_matches(cookie_path: &str, request_path: &str) -> bool {
+    if request_path == cookie_path {
+        return true;
+    }
+    request_path.starts_with(cookie_path)
+        && (cookie_path.ends_with('/')
+            || request_path.as_bytes().get(cookie_path.len()) == Some(&b'/'))
 }
 
 fn normalize_path(raw: &str) -> String {

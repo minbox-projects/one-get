@@ -20,12 +20,15 @@ use futures_util::future::LocalBoxFuture;
 use reqwest::Client;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use super::cookies::CookieSource;
 use super::error::EngineError;
 use super::http;
 use super::probe::{probe_with_client, ProbeOptions, ProbeOutcome};
 use super::scheduler::{Engine, EngineOptions, HuggingFaceOptions, NetworkOptions};
 use super::state::TaskState;
 use super::worker::DownloadSpec;
+use crate::commands::downloads::DownloadSummary;
+use crate::logging::Logger;
 use crate::store::hf::HfMetadataStore;
 use crate::store::{Database, Segment, Task};
 
@@ -105,6 +108,7 @@ impl EngineService {
                 };
 
                 let engine = Rc::new(Engine::new(store, default_destination, options));
+                engine.set_stop_flag(Arc::clone(&thread_stopped));
                 match engine.recover() {
                     Ok(_) => {
                         if ready_tx.send(Ok(())).is_err() {
@@ -146,6 +150,11 @@ impl EngineService {
         self.call(Command::List, expect_tasks)
     }
 
+    /// Load every stored task as a summary with its cookie provenance.
+    pub fn list_summaries(&self) -> Result<Vec<DownloadSummary>, EngineError> {
+        self.call(Command::ListSummaries, expect_summaries)
+    }
+
     /// Load one task's segment plan.
     pub fn segments(&self, id: &str) -> Result<Vec<Segment>, EngineError> {
         let id = id.to_string();
@@ -159,7 +168,24 @@ impl EngineService {
 
     /// Create a queued download task and return its identifier.
     pub fn add(&self, request: AddDownload) -> Result<String, EngineError> {
-        self.call(move |reply| Command::Add(request, reply), expect_id)
+        self.add_source(request, None)
+    }
+
+    /// Create a queued download task with one in-memory cookie source.
+    pub fn add_with_cookies(
+        &self,
+        request: AddDownload,
+        source: CookieSource,
+    ) -> Result<String, EngineError> {
+        self.add_source(request, Some(source))
+    }
+
+    fn add_source(
+        &self,
+        request: AddDownload,
+        source: Option<CookieSource>,
+    ) -> Result<String, EngineError> {
+        self.call(move |reply| Command::Add(request, source, reply), expect_id)
     }
 
     /// Pause a queued, connecting, or downloading task.
@@ -256,6 +282,11 @@ impl EngineService {
         )
     }
 
+    /// Attach the structured logger used for later task lifecycle events.
+    pub fn set_logger(&self, logger: Arc<Logger>) {
+        let _ = self.sender.send(Command::SetLogger(logger));
+    }
+
     /// The metadata store currently attached to the engine.
     pub fn huggingface_metadata(&self) -> Option<Arc<HfMetadataStore>> {
         self.huggingface_metadata
@@ -305,9 +336,10 @@ impl EngineService {
 
 enum Command {
     List(ReplySender),
+    ListSummaries(ReplySender),
     Segments(String, ReplySender),
     Probe(ProbeRequest, ReplySender),
-    Add(AddDownload, ReplySender),
+    Add(AddDownload, Option<CookieSource>, ReplySender),
     Pause(String, ReplySender),
     Resume(String, ReplySender),
     Cancel(String, ReplySender),
@@ -324,12 +356,14 @@ enum Command {
     SetProxy(Option<http::ProxyConfig>, ReplySender),
     SetNetworkOptions(NetworkOptions, ReplySender),
     SetHuggingFaceOptions(HuggingFaceOptions, ReplySender),
+    SetLogger(Arc<Logger>),
     Shutdown(Sender<Result<(), EngineError>>),
 }
 
 enum Reply {
     Unit,
     Tasks(Vec<Task>),
+    Summaries(Vec<DownloadSummary>),
     Segments(Vec<Segment>),
     Probe(ProbeOutcome),
     Id(String),
@@ -345,6 +379,13 @@ fn expect_unit(reply: Reply) -> Result<(), EngineError> {
 fn expect_tasks(reply: Reply) -> Result<Vec<Task>, EngineError> {
     match reply {
         Reply::Tasks(tasks) => Ok(tasks),
+        _ => Err(unexpected_reply()),
+    }
+}
+
+fn expect_summaries(reply: Reply) -> Result<Vec<DownloadSummary>, EngineError> {
+    match reply {
+        Reply::Summaries(summaries) => Ok(summaries),
         _ => Err(unexpected_reply()),
     }
 }
@@ -427,6 +468,9 @@ async fn handle_command(engine: &Rc<Engine>, run: &mut Option<RunFuture>, comman
         Command::List(reply) => {
             let _ = reply.send(engine.store().list_tasks().map(Reply::Tasks));
         }
+        Command::ListSummaries(reply) => {
+            let _ = reply.send(engine.list_summaries().map(Reply::Summaries));
+        }
         Command::Segments(id, reply) => {
             let result = engine.store().segments_for_task(&id).map(Reply::Segments);
             let _ = reply.send(result);
@@ -448,8 +492,8 @@ async fn handle_command(engine: &Rc<Engine>, run: &mut Option<RunFuture>, comman
                 }
             }
         }
-        Command::Add(request, reply) => {
-            let result = add_request(engine, request);
+        Command::Add(request, source, reply) => {
+            let result = add_request(engine, request, source);
             if result.is_ok() {
                 ensure_run(engine, run);
             }
@@ -510,11 +554,16 @@ async fn handle_command(engine: &Rc<Engine>, run: &mut Option<RunFuture>, comman
             let result = engine.set_huggingface_options(options);
             let _ = reply.send(result.map(|()| Reply::Unit));
         }
+        Command::SetLogger(logger) => engine.set_logger(logger),
         Command::Shutdown(_) => {}
     }
 }
 
-fn add_request(engine: &Engine, request: AddDownload) -> Result<String, EngineError> {
+fn add_request(
+    engine: &Engine,
+    request: AddDownload,
+    source: Option<CookieSource>,
+) -> Result<String, EngineError> {
     let AddDownload {
         url,
         filename,
@@ -544,7 +593,10 @@ fn add_request(engine: &Engine, request: AddDownload) -> Result<String, EngineEr
         extra_headers,
         destination,
     };
-    let id = engine.add_task(spec)?;
+    let id = match source {
+        Some(source) => engine.add_task_with_cookies(spec, source)?,
+        None => engine.add_task(spec)?,
+    };
     if rate_limit.is_some() {
         engine.set_task_rate_limit(&id, rate_limit);
     }

@@ -89,8 +89,13 @@ pub struct DownloadSpec {
 pub(crate) struct NetworkContext {
     /// Client that applies the configured proxy, timeouts, and User-Agent.
     pub client: Client,
-    /// Cookies reloaded for this task run, when a cookie file is configured.
+    /// Cookies reloaded for this task run, when a source is configured.
     pub cookies: Option<CookieJar>,
+    /// A configured cookie file that could not be loaded, raised after the part
+    /// file exists so the failure preserves resumable progress.
+    pub cookie_error: Option<EngineError>,
+    /// The shared service shutdown flag, when the engine owns one.
+    pub stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Per-task and global rate limiters that pace every streamed chunk.
     pub limiters: Vec<Arc<RateLimiter>>,
     /// Attempts one request may make before it gives up.
@@ -109,6 +114,8 @@ impl NetworkContext {
         Ok(Self {
             client: build_client()?,
             cookies: None,
+            cookie_error: None,
+            stop: None,
             limiters: Vec::new(),
             retry_attempts: retry::MAX_ATTEMPTS,
             hf_token: None,
@@ -965,6 +972,21 @@ pub(crate) async fn download_task_with_network(
     if let Some(flow) = requested_flow(control) {
         drop(part);
         return finish_interruption(store, task_id, dest_dir, flow);
+    }
+
+    if network
+        .stop
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    {
+        drop(part);
+        let _ = store.transition_task(task_id, TaskState::Downloading, TaskState::Queued);
+        return Ok(TaskRunOutcome::Paused);
+    }
+
+    if let Some(error) = network.cookie_error.clone() {
+        drop(part);
+        return Err(mark_failed(store, task_id, error));
     }
 
     let hf_state = match hf::parse_hf_url(&spec.url)? {

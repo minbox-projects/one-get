@@ -14,6 +14,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use url::Url;
 
 use crate::app_state::AppState;
+use crate::engine::cookies::{BrowserCookie, CookieSource};
 use crate::engine::service::AddDownload;
 use crate::logging::LogLevel;
 
@@ -24,14 +25,23 @@ use super::protocol::CaptureItem;
 /// Event emitted when a prefill capture is ready for the desktop UI.
 pub const CAPTURE_PREFILL_EVENT: &str = "app://capture-prefill";
 
+/// One captured item's memory-only cookies, keyed back to its URL.
+pub type RetainedCookies = Vec<(String, Vec<BrowserCookie>)>;
+
 /// The single pending prefill waiting to be delivered to a download dialog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingPrefill {
-    /// Accepted captured items, in request order.
+    /// Accepted captured items, in request order, without cookie values.
     pub items: Vec<CaptureItem>,
     /// Epoch-millisecond time the capture arrived.
     pub received_at_ms: i64,
+    /// Number of cookies retained for this prefill.
+    #[serde(default)]
+    pub cookie_count: u32,
+    /// Opaque handle for the retained cookies, never persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_handle: Option<String>,
 }
 
 /// Desktop operations the loopback API may request.
@@ -41,6 +51,9 @@ pub trait DesktopBridge: Send + Sync {
 
     /// Store a pending prefill for the desktop UI.
     fn queue_prefill(&self, prefill: PendingPrefill) -> Result<(), ApiError>;
+
+    /// Retain captured cookies in memory under an opaque prefill handle.
+    fn retain_prefill_cookies(&self, _handle: &str, _cookies: RetainedCookies) {}
 
     /// Bring the main window to the front.
     fn focus_main_window(&self);
@@ -80,18 +93,37 @@ impl DesktopBridge for TauriDesktopBridge {
             .map(|header| (header.name.clone(), header.value.clone()))
             .collect();
 
-        engine
-            .add(AddDownload {
-                url: item.url.clone(),
-                filename: capture_filename(item),
-                destination: None,
-                connections,
-                rate_limit: None,
-                expected_sha256: None,
-                allow_html: false,
-                extra_headers,
-            })
-            .map_err(|_| task_create_failed())
+        let request = AddDownload {
+            url: item.url.clone(),
+            filename: capture_filename(item),
+            destination: None,
+            connections,
+            rate_limit: None,
+            expected_sha256: None,
+            allow_html: false,
+            extra_headers,
+        };
+        let result = if item.cookies.is_empty() {
+            engine.add(request)
+        } else {
+            engine.add_with_cookies(
+                request,
+                CookieSource::Browser(
+                    item.cookies
+                        .iter()
+                        .map(|cookie| BrowserCookie {
+                            name: cookie.name.clone(),
+                            value: cookie.value.clone(),
+                            domain: cookie.domain.clone(),
+                            path: cookie.path.clone(),
+                            secure: cookie.secure,
+                            expires: cookie.expires,
+                        })
+                        .collect(),
+                ),
+            )
+        };
+        result.map_err(|_| task_create_failed())
     }
 
     fn queue_prefill(&self, prefill: PendingPrefill) -> Result<(), ApiError> {
@@ -107,6 +139,12 @@ impl DesktopBridge for TauriDesktopBridge {
             }
         }
         Ok(())
+    }
+
+    fn retain_prefill_cookies(&self, handle: &str, cookies: RetainedCookies) {
+        if let Ok(state) = self.state() {
+            state.retain_prefill_cookies(handle, cookies);
+        }
     }
 
     fn focus_main_window(&self) {

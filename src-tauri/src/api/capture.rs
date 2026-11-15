@@ -12,8 +12,16 @@ use serde_json::{json, Value};
 use super::desktop::PendingPrefill;
 use super::error::{self, ApiError};
 use super::pairing::hash_secret;
-use super::protocol::{self, CaptureIntent, CaptureRequest};
+use super::protocol::{self, CaptureIntent, CaptureItemError, CaptureRequest};
 use super::server::ApiState;
+
+/// A rejected capture request with the per-item reasons that caused it.
+pub(crate) struct CaptureRejection {
+    /// The request-level error to report.
+    pub error: ApiError,
+    /// Per-item rejections, exposed so the peer can explain the failure.
+    pub rejected: Vec<CaptureItemError>,
+}
 
 /// Maximum retained token-and-source duplicate records.
 pub const DEDUPE_CAPACITY: usize = 256;
@@ -65,13 +73,17 @@ pub(crate) fn process(
     request: CaptureRequest,
     token: &str,
     now_ms: i64,
-) -> Result<Value, ApiError> {
-    let validation = protocol::validate_capture_request(&request)?;
+) -> Result<Value, CaptureRejection> {
+    let validation =
+        protocol::validate_capture_request(&request).map_err(|error| CaptureRejection {
+            error,
+            rejected: Vec::new(),
+        })?;
     if validation.accepted.is_empty() {
-        return Err(error::bad_request(
-            "INVALID_CAPTURE_ITEM",
-            "capture contains no usable items",
-        ));
+        return Err(CaptureRejection {
+            error: error::bad_request("INVALID_CAPTURE_ITEM", "capture contains no usable items"),
+            rejected: validation.rejected,
+        });
     }
 
     match request.intent {
@@ -80,7 +92,7 @@ pub(crate) fn process(
                 .accepted
                 .into_iter()
                 .next()
-                .ok_or_else(invalid_capture_item)?;
+                .ok_or_else(|| reject(invalid_capture_item()))?;
             let key = request
                 .source_id
                 .filter(|source_id| !source_id.is_empty())
@@ -99,7 +111,10 @@ pub(crate) fn process(
                 }
             }
 
-            let task_id = state.bridge.create_takeover_task(&item, now_ms)?;
+            let task_id = state
+                .bridge
+                .create_takeover_task(&item, now_ms)
+                .map_err(reject)?;
             if let Some(key) = key {
                 dedupe.remember(key, task_id.clone());
             }
@@ -126,12 +141,44 @@ pub(crate) fn process(
                 .map(|rejection| json!({ "index": rejection.index, "code": rejection.code }))
                 .collect();
             let accepted = validation.accepted.len();
-            let prefill = PendingPrefill {
-                items: validation.accepted,
-                received_at_ms: now_ms,
+            let mut items = validation.accepted;
+
+            let mut retained = Vec::new();
+            let mut cookie_count = 0;
+            for item in &mut items {
+                if item.cookies.is_empty() {
+                    continue;
+                }
+                cookie_count += item.cookies.len();
+                let cookies = std::mem::take(&mut item.cookies)
+                    .into_iter()
+                    .map(|cookie| crate::engine::cookies::BrowserCookie {
+                        name: cookie.name,
+                        value: cookie.value,
+                        domain: cookie.domain,
+                        path: cookie.path,
+                        secure: cookie.secure,
+                        expires: cookie.expires,
+                    })
+                    .collect();
+                retained.push((item.url.clone(), cookies));
+            }
+            let cookie_handle = if retained.is_empty() {
+                None
+            } else {
+                let handle = uuid::Uuid::new_v4().to_string();
+                state.bridge.retain_prefill_cookies(&handle, retained);
+                Some(handle)
             };
 
-            state.bridge.queue_prefill(prefill)?;
+            let prefill = PendingPrefill {
+                items,
+                received_at_ms: now_ms,
+                cookie_count: cookie_count as u32,
+                cookie_handle,
+            };
+
+            state.bridge.queue_prefill(prefill).map_err(reject)?;
             state.bridge.focus_main_window();
             state.bridge.log_event(
                 "capture_accepted",
@@ -161,6 +208,13 @@ fn lock_dedupe(state: &ApiState) -> MutexGuard<'_, CaptureDedupe> {
         .dedupe
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn reject(error: ApiError) -> CaptureRejection {
+    CaptureRejection {
+        error,
+        rejected: Vec::new(),
+    }
 }
 
 fn invalid_capture_item() -> ApiError {

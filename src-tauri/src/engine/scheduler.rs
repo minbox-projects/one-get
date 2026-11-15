@@ -19,6 +19,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use tokio::sync::Notify;
 
+use crate::commands::downloads::DownloadSummary;
 use crate::logging::{LogLevel, Logger};
 use crate::platform::opener::open_target;
 use crate::platform::secrets::SecretValue;
@@ -28,7 +29,7 @@ use crate::store::hf::{HfMetadata, HfMetadataStore};
 use crate::store::types::{Task, TaskKind};
 use crate::store::Database;
 
-use super::cookies::CookieJar;
+use super::cookies::{CookieJar, CookieSource};
 use super::error::EngineError;
 use super::hf;
 use super::http::{self, ProxyConfig};
@@ -125,6 +126,8 @@ pub struct Engine {
     notify: Notify,
     /// Full in-memory specs, including query-bearing URLs and header values.
     specs: Mutex<HashMap<String, DownloadSpec>>,
+    /// Memory-only cookie source per task; captured values are never persisted.
+    task_cookie_sources: Mutex<HashMap<String, CookieSource>>,
     proxy: RwLock<Option<ProxyConfig>>,
     network_options: RwLock<NetworkOptions>,
     huggingface: RwLock<HuggingFaceOptions>,
@@ -134,6 +137,7 @@ pub struct Engine {
     task_rates: Mutex<HashMap<String, Arc<RateLimiter>>>,
     logger: Mutex<Option<Arc<Logger>>>,
     startup_done: AtomicBool,
+    stop: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl Engine {
@@ -146,6 +150,7 @@ impl Engine {
             controls: Mutex::new(HashMap::new()),
             notify: Notify::new(),
             specs: Mutex::new(HashMap::new()),
+            task_cookie_sources: Mutex::new(HashMap::new()),
             proxy: RwLock::new(None),
             network_options: RwLock::new(NetworkOptions::default()),
             huggingface: RwLock::new(HuggingFaceOptions::default()),
@@ -155,7 +160,25 @@ impl Engine {
             task_rates: Mutex::new(HashMap::new()),
             logger: Mutex::new(None),
             startup_done: AtomicBool::new(false),
+            stop: Mutex::new(None),
         }
+    }
+
+    /// Share the service shutdown flag so a stop is not missed by a claim that
+    /// races the request loop.
+    pub(crate) fn set_stop_flag(&self, flag: Arc<AtomicBool>) {
+        *self
+            .stop
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(flag);
+    }
+
+    fn stop_requested(&self) -> bool {
+        self.stop
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
 
     /// The durable store owned by this engine.
@@ -325,6 +348,84 @@ impl Engine {
         Ok(id)
     }
 
+    /// Create a queued task with exactly one memory-only cookie source.
+    ///
+    /// The source is retained for this process only; a captured browser cookie
+    /// list is never written to the store and so cannot survive a restart.
+    pub fn add_task_with_cookies(
+        &self,
+        spec: DownloadSpec,
+        source: CookieSource,
+    ) -> Result<String, EngineError> {
+        let id = self.add_task(spec)?;
+        self.task_cookie_sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.clone(), source);
+        Ok(id)
+    }
+
+    /// Every task as a lightweight summary with its cookie provenance.
+    pub fn list_summaries(&self) -> Result<Vec<DownloadSummary>, EngineError> {
+        let tasks = self.store.list_tasks()?;
+        Ok(tasks
+            .into_iter()
+            .map(|task| {
+                let (cookie_source, cookie_count) = self.cookie_provenance(&task);
+                let mut summary = DownloadSummary::from(task);
+                summary.cookie_source = cookie_source;
+                summary.cookie_count = cookie_count;
+                summary
+            })
+            .collect())
+    }
+
+    /// The active cookie source name and applicable count for one task.
+    fn cookie_provenance(&self, task: &Task) -> (Option<String>, u32) {
+        let source = self
+            .task_cookie_sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&task.id)
+            .cloned();
+
+        let url = url::Url::parse(&task.url).ok();
+        match source {
+            Some(CookieSource::File(path)) => {
+                let count = url
+                    .as_ref()
+                    .and_then(|url| {
+                        CookieJar::load(&path)
+                            .ok()
+                            .map(|jar| jar.matching_count(url))
+                    })
+                    .unwrap_or(0);
+                (Some("file".to_string()), count)
+            }
+            Some(CookieSource::Browser(cookies)) => {
+                let count = url
+                    .as_ref()
+                    .map(|url| CookieJar::from_browser(cookies).matching_count(url))
+                    .unwrap_or(0);
+                (Some("browser".to_string()), count)
+            }
+            None => match self.engine_cookie_file() {
+                Some(path) => {
+                    let count = url
+                        .as_ref()
+                        .and_then(|url| {
+                            CookieJar::load(&path)
+                                .ok()
+                                .map(|jar| jar.matching_count(url))
+                        })
+                        .unwrap_or(0);
+                    (Some("file".to_string()), count)
+                }
+                None => (None, 0),
+            },
+        }
+    }
+
     /// Resolve and validate the requested destination directory.
     ///
     /// The directory must already exist and be writable, so a task can never be
@@ -427,6 +528,8 @@ impl Engine {
         let network = NetworkContext {
             client,
             cookies: self.load_cookies().ok().flatten(),
+            cookie_error: None,
+            stop: None,
             limiters: Vec::new(),
             retry_attempts: options.retry_attempts,
             hf_token: hf.token,
@@ -613,6 +716,7 @@ impl Engine {
         }
         self.store.delete_task(id)?;
         self.forget_hf_metadata(id);
+        self.forget_cookie_source(id);
         Ok(())
     }
 
@@ -652,6 +756,7 @@ impl Engine {
         }
         self.store.delete_task(id)?;
         self.forget_hf_metadata(id);
+        self.forget_cookie_source(id);
         Ok(())
     }
 
@@ -704,6 +809,9 @@ impl Engine {
     }
 
     fn claim_next(&self) -> Result<Option<Task>, EngineError> {
+        if self.stop_requested() {
+            return Ok(None);
+        }
         let limit = self.max_concurrent.load(Ordering::SeqCst);
         let active_count = self.store.active_task_count()? as usize;
         if active_count >= limit {
@@ -784,15 +892,47 @@ impl Engine {
         self.client_and_options().map(|(client, _)| client)
     }
 
-    fn load_cookies(&self) -> Result<Option<CookieJar>, EngineError> {
-        let path = self
-            .cookie_file
+    fn engine_cookie_file(&self) -> Option<PathBuf> {
+        self.cookie_file
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        match path {
+            .clone()
+    }
+
+    fn load_cookies(&self) -> Result<Option<CookieJar>, EngineError> {
+        match self.engine_cookie_file() {
             Some(path) => CookieJar::load(&path).map(Some),
             None => Ok(None),
+        }
+    }
+
+    /// Resolve the single cookie source for one task start or resume.
+    ///
+    /// A task-level file wins, then a legacy engine-wide file, then captured
+    /// browser cookies. Sources are never merged.
+    fn cookies_for_task(&self, task: &Task) -> (Option<CookieJar>, Option<EngineError>) {
+        let source = self
+            .task_cookie_sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&task.id)
+            .cloned();
+
+        if let Some(CookieSource::File(path)) = &source {
+            return match CookieJar::load(path) {
+                Ok(jar) => (Some(jar), None),
+                Err(error) => (None, Some(error)),
+            };
+        }
+        if let Some(path) = self.engine_cookie_file() {
+            return match CookieJar::load(&path) {
+                Ok(jar) => (Some(jar), None),
+                Err(error) => (None, Some(error)),
+            };
+        }
+        match source {
+            Some(CookieSource::Browser(cookies)) => (Some(CookieJar::from_browser(cookies)), None),
+            _ => (None, None),
         }
     }
 
@@ -860,16 +1000,24 @@ impl Engine {
         }
     }
 
-    fn network_for(&self, task_id: &str) -> Result<NetworkContext, EngineError> {
+    /// Remove a deleted task's memory-only cookie source.
+    fn forget_cookie_source(&self, task_id: &str) {
+        self.task_cookie_sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(task_id);
+    }
+
+    fn network_for(&self, task: &Task) -> Result<NetworkContext, EngineError> {
         let (client, options) = self.client_and_options()?;
-        let cookies = self.load_cookies()?;
+        let (cookies, cookie_error) = self.cookies_for_task(task);
 
         let mut limiters = Vec::new();
         if let Some(limiter) = self
             .task_rates
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(task_id)
+            .get(&task.id)
             .cloned()
         {
             limiters.push(limiter);
@@ -887,6 +1035,12 @@ impl Engine {
         Ok(NetworkContext {
             client,
             cookies,
+            cookie_error,
+            stop: self
+                .stop
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
             limiters,
             retry_attempts: options.retry_attempts,
             hf_token: hf.token,
@@ -921,7 +1075,7 @@ impl Engine {
                 let spec = self.spec_for(&task);
                 self.record_hf_metadata(&task_id, &spec);
                 let destination = self.destination_for(&task);
-                match self.network_for(&task_id) {
+                match self.network_for(&task) {
                     Ok(network) => {
                         download_task_with_network(
                             &self.store,

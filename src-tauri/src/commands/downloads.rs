@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::app_state::AppState;
+use crate::app_state::{AppState, PrefillCookieLookup};
+use crate::engine::cookies::CookieSource;
 use crate::engine::service::{AddDownload, EngineService, ProbeRequest};
 use crate::error::AppError;
 use crate::store::hf::HfMetadata;
@@ -36,6 +37,9 @@ pub struct AddDownloadRequest {
     pub allow_html: bool,
     /// Additional request headers.
     pub extra_headers: Vec<(String, String)>,
+    /// Opaque handle for memory-only cookies captured with a prefill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_handle: Option<String>,
 }
 
 /// A request to probe one remote URL.
@@ -124,6 +128,10 @@ pub struct DownloadSummary {
     pub error_code: Option<String>,
     /// User-safe failure message.
     pub error_message: Option<String>,
+    /// Active cookie source for this task: `file` or `browser`.
+    pub cookie_source: Option<String>,
+    /// Cookies from the active source that apply to the task URL.
+    pub cookie_count: u32,
 }
 
 /// One segment row for the task details panel.
@@ -188,6 +196,8 @@ impl From<Task> for DownloadSummary {
             completed_at_ms: task.completed_at_ms,
             error_code: task.error_code,
             error_message: task.error_message,
+            cookie_source: None,
+            cookie_count: 0,
         }
     }
 }
@@ -245,14 +255,13 @@ fn read_f64(metadata: Option<&Value>, record: &Value, key: &str) -> Option<f64> 
 /// List every stored task as a lightweight summary.
 pub fn downloads_list(state: &AppState) -> Result<Vec<DownloadSummary>, AppError> {
     let engine = engine(state)?;
-    let tasks = engine.list().map_err(AppError::from)?;
+    let summaries = engine.list_summaries().map_err(AppError::from)?;
     let metadata = state
         .hf_metadata()
         .or_else(|| engine.huggingface_metadata());
-    Ok(tasks
+    Ok(summaries
         .into_iter()
-        .map(|task| {
-            let mut summary = DownloadSummary::from(task);
+        .map(|mut summary| {
             summary.huggingface = metadata
                 .as_ref()
                 .and_then(|store| store.get(&summary.id).ok().flatten())
@@ -310,23 +319,45 @@ pub fn downloads_probe(
 }
 
 /// Create a queued download task.
+///
+/// A captured-cookie handle is resolved from this application state's in-memory
+/// vault. An unknown, stale, or already-consumed handle fails before task
+/// creation so no task is created without the cookies the user was shown; a
+/// live handle that carried no cookies for this URL creates the task without
+/// captured cookies, matching the prefill that offered none.
 pub fn downloads_add(state: &AppState, request: AddDownloadRequest) -> Result<String, AppError> {
     let engine = engine(state)?;
     if matches!(crate::engine::hf::parse_hf_url(&request.url), Ok(Some(_))) {
         state.ensure_hf_metadata_attached();
     }
-    engine
-        .add(AddDownload {
-            url: request.url,
-            filename: request.filename,
-            destination: request.destination,
-            connections: request.connections,
-            rate_limit: request.rate_limit,
-            expected_sha256: request.expected_sha256,
-            allow_html: request.allow_html,
-            extra_headers: request.extra_headers,
-        })
-        .map_err(AppError::from)
+    let source = match request.cookie_handle.as_deref() {
+        Some(handle) => match state.take_prefill_cookies(handle, &request.url) {
+            PrefillCookieLookup::Matched(cookies) => Some(CookieSource::Browser(cookies)),
+            PrefillCookieLookup::NoMatch => None,
+            PrefillCookieLookup::UnknownHandle => {
+                return Err(AppError::new(
+                    "INVALID_COOKIE_HANDLE",
+                    "the captured cookies are no longer available for this download",
+                ))
+            }
+        },
+        None => None,
+    };
+    let download = AddDownload {
+        url: request.url,
+        filename: request.filename,
+        destination: request.destination,
+        connections: request.connections,
+        rate_limit: request.rate_limit,
+        expected_sha256: request.expected_sha256,
+        allow_html: request.allow_html,
+        extra_headers: request.extra_headers,
+    };
+    match source {
+        Some(source) => engine.add_with_cookies(download, source),
+        None => engine.add(download),
+    }
+    .map_err(AppError::from)
 }
 
 /// Pause a task through the pipeline that owns it.

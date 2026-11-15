@@ -5,17 +5,19 @@
 //! settings store and the last event are behind mutexes so command functions
 //! can take `&AppState` and remain directly testable.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::api::clock::{Clock, SystemClock};
-use crate::api::desktop::PendingPrefill;
+use crate::api::desktop::{PendingPrefill, RetainedCookies};
 use crate::api::error::ApiError;
 use crate::api::pairing_store::{PairedClient, PairingCode, PairingStore};
 use crate::api::server::ApiServerHandle;
 use crate::commands::app::{AutostartService, NotificationService, QuitService, SecretService};
 use crate::commands::kernel::KernelRuntime;
 use crate::config::{ProxyMode, Settings, SettingsStore};
+use crate::engine::cookies::BrowserCookie;
 use crate::engine::http::ProxyConfig;
 use crate::engine::scheduler::{HuggingFaceOptions, NetworkOptions};
 use crate::engine::service::EngineService;
@@ -32,13 +34,16 @@ use crate::video::service::VideoService;
 /// Keyring key that stores the Hugging Face access token.
 const HF_TOKEN_KEY: &str = "huggingface-token";
 
-/// Browser-integration availability, pairing state, and one pending prefill.
+/// Browser-integration availability, pairing state, one pending prefill, and
+/// the memory-only cookies retained for that prefill.
 pub struct PairingRuntime {
     clock: Arc<dyn Clock>,
     store: Option<Arc<Mutex<PairingStore>>>,
     unavailable_reason: Option<String>,
     pending_code: Option<PairingCode>,
     pending_prefill: Option<PendingPrefill>,
+    /// Memory-only captured cookies for the pending prefill's opaque handle.
+    prefill_cookies: HashMap<String, RetainedCookies>,
 }
 
 impl PairingRuntime {
@@ -50,6 +55,7 @@ impl PairingRuntime {
             unavailable_reason: None,
             pending_code: None,
             pending_prefill: None,
+            prefill_cookies: HashMap::new(),
         }
     }
 
@@ -61,6 +67,7 @@ impl PairingRuntime {
             unavailable_reason: Some(reason.into()),
             pending_code: None,
             pending_prefill: None,
+            prefill_cookies: HashMap::new(),
         }
     }
 
@@ -115,15 +122,62 @@ impl PairingRuntime {
         self.store = None;
         self.unavailable_reason = Some(reason.into());
         self.pending_code = None;
+        self.clear_pending_prefill();
     }
 
     pub(crate) fn queue_prefill(&mut self, prefill: PendingPrefill) {
+        // Cookies live only for the prefill that is pending now. Captured
+        // cookies are retained first, so keeping just the incoming handle
+        // drops the replaced prefill's values even after it was delivered.
+        self.prefill_cookies
+            .retain(|handle, _| prefill.cookie_handle.as_deref() == Some(handle.as_str()));
         self.pending_prefill = Some(prefill);
     }
 
     pub(crate) fn take_pending_prefill(&mut self) -> Option<PendingPrefill> {
+        // The handle stays resolvable so the dialog that receives the prefill
+        // can still submit its captured cookies; a replacement or clear drops
+        // it, and consuming the last retained entry removes it.
         self.pending_prefill.take()
     }
+
+    pub(crate) fn clear_pending_prefill(&mut self) {
+        self.pending_prefill = None;
+        self.prefill_cookies.clear();
+    }
+
+    pub(crate) fn retain_prefill_cookies(&mut self, handle: &str, cookies: RetainedCookies) {
+        self.prefill_cookies.insert(handle.to_string(), cookies);
+    }
+
+    fn take_prefill_cookies(&mut self, handle: &str, url: &str) -> PrefillCookieLookup {
+        let Some(entries) = self.prefill_cookies.get_mut(handle) else {
+            return PrefillCookieLookup::UnknownHandle;
+        };
+        let Some(index) = entries
+            .iter()
+            .position(|(entry_url, _)| entry_url == url)
+            .or_else(|| (entries.len() == 1).then_some(0))
+        else {
+            return PrefillCookieLookup::NoMatch;
+        };
+        let (_, cookies) = entries.remove(index);
+        if entries.is_empty() {
+            self.prefill_cookies.remove(handle);
+        }
+        PrefillCookieLookup::Matched(cookies)
+    }
+}
+
+/// Outcome of resolving a captured-cookie handle for one prefill item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefillCookieLookup {
+    /// No entry exists for the handle: it is unknown, stale, or already used.
+    UnknownHandle,
+    /// The live handle has cookies for other items but none for this URL.
+    NoMatch,
+    /// Cookies captured for this URL; the entry is now consumed.
+    Matched(Vec<BrowserCookie>),
 }
 
 /// Runtime state shared by Tauri commands, the tray, and deep-link handlers.
@@ -238,13 +292,40 @@ impl AppState {
     }
 
     /// Store the single pending prefill, replacing any earlier one.
+    ///
+    /// Cookies retained for a replaced prefill are dropped here so only the
+    /// prefill that is actually pending stays retrievable.
     pub fn queue_prefill(&self, prefill: PendingPrefill) {
         self.lock_pairing().queue_prefill(prefill);
     }
 
     /// Take the pending prefill exactly once.
+    ///
+    /// Its retained cookies stay available to the dialog that submits the
+    /// download; replacing or clearing the prefill drops them.
     pub fn take_pending_prefill(&self) -> Option<PendingPrefill> {
         self.lock_pairing().take_pending_prefill()
+    }
+
+    /// Drop the pending prefill and every cookie retained for it together.
+    pub fn clear_pending_prefill(&self) {
+        self.lock_pairing().clear_pending_prefill();
+    }
+
+    /// Retain captured cookies in memory under an opaque prefill handle.
+    ///
+    /// Values are never persisted, logged, or rendered.
+    pub fn retain_prefill_cookies(&self, handle: &str, cookies: RetainedCookies) {
+        self.lock_pairing().retain_prefill_cookies(handle, cookies);
+    }
+
+    /// Consume the cookies retained for one prefill item URL.
+    ///
+    /// An unknown, stale, or already-consumed handle is reported distinctly
+    /// from a live handle that holds no cookies for this URL, so the caller
+    /// never creates a task whose captured cookies already disappeared.
+    pub fn take_prefill_cookies(&self, handle: &str, url: &str) -> PrefillCookieLookup {
+        self.lock_pairing().take_prefill_cookies(handle, url)
     }
 
     pub(crate) fn clear_pending_pairing_code(&self) {
@@ -278,7 +359,11 @@ impl AppState {
     }
 
     /// Stop the loopback API, the video service, then the HTTP engine.
+    ///
+    /// The pending prefill and its memory-only cookies are dropped first so a
+    /// shutdown never leaves captured values behind.
     pub fn shutdown_engine(&self) {
+        self.clear_pending_prefill();
         let handle = self
             .api_server
             .lock()

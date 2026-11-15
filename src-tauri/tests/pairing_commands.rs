@@ -173,6 +173,7 @@ fn capture_item(url: &str, filename: &str) -> CaptureItem {
         size: Some(2_048),
         kind: Some(CaptureKind::File),
         headers: Vec::new(),
+        cookies: Vec::new(),
     }
 }
 
@@ -183,6 +184,8 @@ fn pending_prefill(received_at_ms: i64, urls: &[(&str, &str)]) -> PendingPrefill
             .map(|(url, filename)| capture_item(url, filename))
             .collect(),
         received_at_ms,
+        cookie_count: 0,
+        cookie_handle: None,
     }
 }
 
@@ -234,13 +237,13 @@ fn a_default_state_reports_pairing_unavailable_without_code_or_clients() {
 }
 
 #[test]
-fn an_available_state_reports_protocol_version_one_and_no_clients() {
+fn an_available_state_reports_protocol_version_two_and_no_clients() {
     let harness = available_harness();
 
     let status = pairing_status(&harness.state).expect("pairing status");
     assert!(status.available);
     assert!(status.reason.is_none());
-    assert_eq!(status.protocol_version, 1);
+    assert_eq!(status.protocol_version, 2);
     assert!(status.code.is_none());
     assert!(status.clients.is_empty());
     assert!(pairing_list_clients(&harness.state)
@@ -485,5 +488,5 @@ fn pairing_command_output_never_contains_a_raw_token() {
 fn pairing_status_type_is_exported_with_expected_fields() {
     let harness = available_harness();
     let status: PairingStatus = pairing_status(&harness.state).expect("pairing status");
-    assert_eq!(status.protocol_version, 1);
+    assert_eq!(status.protocol_version, 2);
 }

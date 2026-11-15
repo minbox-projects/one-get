@@ -10,7 +10,10 @@ use url::Url;
 use super::error::{self, ApiError};
 
 /// Capture protocol version understood by this build.
-pub const API_PROTOCOL_VERSION: u32 = 1;
+pub const API_PROTOCOL_VERSION: u32 = 2;
+
+/// Protocol versions this build still accepts from a peer.
+pub const ACCEPTED_PROTOCOL_VERSIONS: [u32; 2] = [1, 2];
 
 /// Loopback host the service binds to.
 pub const API_HOST: &str = "127.0.0.1";
@@ -38,6 +41,12 @@ pub const MAX_HEADER_VALUE_BYTES: usize = 2_048;
 
 /// Maximum accepted capture filename length.
 pub const MAX_FILENAME_BYTES: usize = 255;
+
+/// Maximum cookies one capture item may carry.
+pub const MAX_CAPTURE_COOKIES: usize = 100;
+
+/// Maximum combined cookie name and value bytes one item may carry.
+pub const MAX_CAPTURE_COOKIE_BYTES: usize = 8 * 1_024;
 
 /// Header names a capture may carry, normalized to lowercase.
 pub const SAFE_CAPTURE_HEADERS: [&str; 4] = ["referer", "user-agent", "accept", "accept-language"];
@@ -95,6 +104,27 @@ pub struct CaptureItem {
     /// Safe request headers to replay with the download.
     #[serde(default)]
     pub headers: Vec<CaptureHeader>,
+    /// Captured cookies; protocol version 1 items omit this list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cookies: Vec<CaptureCookie>,
+}
+
+/// One browser cookie forwarded with a protocol version 2 capture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureCookie {
+    /// Cookie name.
+    pub name: String,
+    /// Cookie value.
+    pub value: String,
+    /// Cookie domain without a leading dot.
+    pub domain: String,
+    /// Cookie path.
+    pub path: String,
+    /// Whether the cookie is restricted to secure schemes.
+    pub secure: bool,
+    /// Expiry in seconds since the Unix epoch; zero means a session cookie.
+    pub expires: u64,
 }
 
 /// A safe request header forwarded with a capture.
@@ -147,7 +177,7 @@ pub struct CaptureValidation {
 /// return an [`ApiError`]; problems with individual items are reported in
 /// [`CaptureValidation`] so the remaining items can still be used.
 pub fn validate_capture_request(request: &CaptureRequest) -> Result<CaptureValidation, ApiError> {
-    if request.protocol_version != API_PROTOCOL_VERSION {
+    if !ACCEPTED_PROTOCOL_VERSIONS.contains(&request.protocol_version) {
         return Err(error::conflict("PROTOCOL_MISMATCH"));
     }
     if request.items.is_empty() {
@@ -240,6 +270,7 @@ fn validate_item(item: &CaptureItem) -> Result<(), &'static str> {
         }
     }
     validate_headers(&item.headers)?;
+    validate_cookies(&item.cookies, &item.url)?;
     match item.kind {
         None | Some(CaptureKind::File) => Ok(()),
         Some(CaptureKind::Hls | CaptureKind::Dash | CaptureKind::VideoPlatform) => {
@@ -275,6 +306,42 @@ fn validate_filename(filename: &str) -> Result<(), &'static str> {
         || filename.chars().any(char::is_control)
     {
         return Err("UNSAFE_FILENAME");
+    }
+    Ok(())
+}
+
+fn validate_cookies(cookies: &[CaptureCookie], url: &str) -> Result<(), &'static str> {
+    if cookies.len() > MAX_CAPTURE_COOKIES {
+        return Err("COOKIE_LIMIT");
+    }
+    let combined: usize = cookies
+        .iter()
+        .map(|cookie| cookie.name.len() + cookie.value.len())
+        .sum();
+    if combined > MAX_CAPTURE_COOKIE_BYTES {
+        return Err("COOKIE_LIMIT");
+    }
+    if cookies.is_empty() {
+        return Ok(());
+    }
+
+    let parsed = Url::parse(url).map_err(|_| "INVALID_URL")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    for cookie in cookies {
+        let browser = crate::engine::cookies::BrowserCookie {
+            name: cookie.name.clone(),
+            value: cookie.value.clone(),
+            domain: cookie.domain.clone(),
+            path: cookie.path.clone(),
+            secure: cookie.secure,
+            expires: cookie.expires,
+        };
+        if !browser.matches(&parsed, now) {
+            return Err("COOKIE_SCOPE");
+        }
     }
     Ok(())
 }

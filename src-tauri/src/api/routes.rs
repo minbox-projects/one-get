@@ -7,8 +7,9 @@
 use std::sync::MutexGuard;
 
 use axum::extract::{Request, State};
-use axum::http::HeaderMap;
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -17,7 +18,9 @@ use super::capture;
 use super::error::{self, ApiError};
 use super::pairing::hash_secret;
 use super::pairing_store::{PairResult, PairedClient, PairingStore};
-use super::protocol::{CaptureRequest, API_PROTOCOL_VERSION, MAX_BODY_BYTES};
+use super::protocol::{
+    CaptureRequest, ACCEPTED_PROTOCOL_VERSIONS, API_PROTOCOL_VERSION, MAX_BODY_BYTES,
+};
 use super::rate_limit::RateLimiter;
 use super::server::ApiState;
 
@@ -78,7 +81,7 @@ pub(crate) async fn pair(State(state): State<ApiState>, request: Request) -> Res
             )
         }
     };
-    if parsed.protocol_version != API_PROTOCOL_VERSION {
+    if !ACCEPTED_PROTOCOL_VERSIONS.contains(&parsed.protocol_version) {
         return auth::error_response(error::conflict("PROTOCOL_MISMATCH"), None);
     }
 
@@ -158,7 +161,27 @@ pub(crate) async fn capture(State(state): State<ApiState>, request: Request) -> 
 
     match capture::process(&state, parsed, &token, now_ms) {
         Ok(value) => auth::json_ok(value),
-        Err(rejection) => auth::error_response(rejection, None),
+        Err(rejection) if rejection.rejected.is_empty() => {
+            auth::error_response(rejection.error, None)
+        }
+        Err(rejection) => {
+            let rejected: Vec<Value> = rejection
+                .rejected
+                .iter()
+                .map(|item| json!({ "index": item.index, "code": item.code }))
+                .collect();
+            let status = StatusCode::from_u16(rejection.error.status)
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (
+                status,
+                Json(json!({
+                    "code": rejection.error.code,
+                    "message": rejection.error.message,
+                    "rejected": rejected,
+                })),
+            )
+                .into_response()
+        }
     }
 }
 
