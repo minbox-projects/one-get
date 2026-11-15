@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::app_state::AppState;
 use crate::engine::service::{AddDownload, EngineService, ProbeRequest};
 use crate::error::AppError;
+use crate::store::hf::HfMetadata;
 use crate::store::{Segment, Task, TaskKind};
 use crate::video::service::VideoService;
 
@@ -67,6 +68,24 @@ pub struct VideoSummary {
     pub audio_only: bool,
 }
 
+/// Persisted Hugging Face metadata exposed alongside an HTTP task summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HuggingFaceSummary {
+    /// Repository identifier without the family prefix.
+    pub repo_id: String,
+    /// File path within the repository.
+    pub file_path: String,
+    /// Revision, branch, or tag.
+    pub revision: String,
+    /// Connections actually used by the task.
+    pub effective_connections: u32,
+    /// Metadata refresh count.
+    pub refresh_count: u32,
+    /// Whether the transfer fell back to a downgraded connection count.
+    pub downgraded: bool,
+}
+
 /// A lightweight task row for the polled download list.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +96,8 @@ pub struct DownloadSummary {
     pub kind: String,
     /// Structured video metadata for a video task.
     pub video: Option<VideoSummary>,
+    /// Structured Hugging Face metadata for a resolver-host task.
+    pub huggingface: Option<HuggingFaceSummary>,
     /// Stored, redacted remote URL.
     pub url: String,
     /// Final URL after redirects, redacted before storage.
@@ -153,6 +174,7 @@ impl From<Task> for DownloadSummary {
             id: task.id,
             kind,
             video,
+            huggingface: None,
             url: task.url,
             final_url: task.final_url,
             filename: task.filename,
@@ -222,8 +244,34 @@ fn read_f64(metadata: Option<&Value>, record: &Value, key: &str) -> Option<f64> 
 
 /// List every stored task as a lightweight summary.
 pub fn downloads_list(state: &AppState) -> Result<Vec<DownloadSummary>, AppError> {
-    let tasks = engine(state)?.list().map_err(AppError::from)?;
-    Ok(tasks.into_iter().map(DownloadSummary::from).collect())
+    let engine = engine(state)?;
+    let tasks = engine.list().map_err(AppError::from)?;
+    let metadata = state
+        .hf_metadata()
+        .or_else(|| engine.huggingface_metadata());
+    Ok(tasks
+        .into_iter()
+        .map(|task| {
+            let mut summary = DownloadSummary::from(task);
+            summary.huggingface = metadata
+                .as_ref()
+                .and_then(|store| store.get(&summary.id).ok().flatten())
+                .as_ref()
+                .map(huggingface_summary);
+            summary
+        })
+        .collect())
+}
+
+fn huggingface_summary(metadata: &HfMetadata) -> HuggingFaceSummary {
+    HuggingFaceSummary {
+        repo_id: metadata.repo_id.clone(),
+        file_path: metadata.file_path.clone(),
+        revision: metadata.revision.clone(),
+        effective_connections: metadata.effective_connections,
+        refresh_count: metadata.refresh_count,
+        downgraded: metadata.downgraded,
+    }
 }
 
 /// Load one task's segment plan; a video task has no byte segments.
@@ -263,7 +311,11 @@ pub fn downloads_probe(
 
 /// Create a queued download task.
 pub fn downloads_add(state: &AppState, request: AddDownloadRequest) -> Result<String, AppError> {
-    engine(state)?
+    let engine = engine(state)?;
+    if matches!(crate::engine::hf::parse_hf_url(&request.url), Ok(Some(_))) {
+        state.ensure_hf_metadata_attached();
+    }
+    engine
         .add(AddDownload {
             url: request.url,
             filename: request.filename,

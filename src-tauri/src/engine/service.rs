@@ -23,9 +23,10 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use super::error::EngineError;
 use super::http;
 use super::probe::{probe_with_client, ProbeOptions, ProbeOutcome};
-use super::scheduler::{Engine, EngineOptions, NetworkOptions};
+use super::scheduler::{Engine, EngineOptions, HuggingFaceOptions, NetworkOptions};
 use super::state::TaskState;
 use super::worker::DownloadSpec;
+use crate::store::hf::HfMetadataStore;
 use crate::store::{Database, Segment, Task};
 
 type RunFuture = LocalBoxFuture<'static, Result<(), EngineError>>;
@@ -68,6 +69,7 @@ pub struct EngineService {
     sender: tokio::sync::mpsc::UnboundedSender<Command>,
     stopped: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    huggingface_metadata: Arc<Mutex<Option<Arc<HfMetadataStore>>>>,
 }
 
 impl EngineService {
@@ -129,6 +131,7 @@ impl EngineService {
                 sender,
                 stopped,
                 thread: Mutex::new(Some(handle)),
+                huggingface_metadata: Arc::new(Mutex::new(None)),
             }),
             Ok(Err(error)) => Err(error),
             Err(_) => Err(EngineError::new(
@@ -237,6 +240,30 @@ impl EngineService {
         )
     }
 
+    /// Apply the Hugging Face token, connection cap, and metadata store to the
+    /// live engine.
+    pub fn apply_huggingface_options(
+        &self,
+        options: HuggingFaceOptions,
+    ) -> Result<(), EngineError> {
+        *self
+            .huggingface_metadata
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = options.metadata.clone();
+        self.call(
+            move |reply| Command::SetHuggingFaceOptions(options, reply),
+            expect_unit,
+        )
+    }
+
+    /// The metadata store currently attached to the engine.
+    pub fn huggingface_metadata(&self) -> Option<Arc<HfMetadataStore>> {
+        self.huggingface_metadata
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     /// Pause active downloads, stop the request loop, and refuse later work.
     pub fn shutdown(&self) {
         if self.stopped.swap(true, Ordering::SeqCst) {
@@ -296,6 +323,7 @@ enum Command {
     },
     SetProxy(Option<http::ProxyConfig>, ReplySender),
     SetNetworkOptions(NetworkOptions, ReplySender),
+    SetHuggingFaceOptions(HuggingFaceOptions, ReplySender),
     Shutdown(Sender<Result<(), EngineError>>),
 }
 
@@ -477,6 +505,10 @@ async fn handle_command(engine: &Rc<Engine>, run: &mut Option<RunFuture>, comman
         Command::SetNetworkOptions(options, reply) => {
             engine.set_network_options(options);
             let _ = reply.send(Ok(Reply::Unit));
+        }
+        Command::SetHuggingFaceOptions(options, reply) => {
+            let result = engine.set_huggingface_options(options);
+            let _ = reply.send(result.map(|()| Reply::Unit));
         }
         Command::Shutdown(_) => {}
     }

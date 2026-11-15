@@ -4,6 +4,7 @@
 
 pub mod cookies;
 pub mod error;
+pub mod hf;
 pub mod http;
 pub mod part_file;
 pub mod planner;

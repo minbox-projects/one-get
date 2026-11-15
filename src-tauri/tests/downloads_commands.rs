@@ -1446,3 +1446,144 @@ async fn delete_file_on_read_only_destination_keeps_record_and_file() {
     );
     service.shutdown();
 }
+
+// --- Hugging Face command-surface behavior (RED) ---
+
+#[path = "support/hf_server.rs"]
+mod hf_server;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn downloads_list_exposes_huggingface_summary_and_delete_removes_hf_row() {
+    use hf_server::{HfFixtureConfig, HfFixtureServer, ResolverBehavior};
+    use oneget_lib::commands::downloads::downloads_delete_record;
+    use oneget_lib::engine::scheduler::HuggingFaceOptions;
+    use oneget_lib::store::hf::HfMetadataStore;
+    use sha2::{Digest, Sha256};
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    let body = b"hf command summary fixture bytes".to_vec();
+    let expected_hash = sha256_hex(&body);
+    let cdn_url = "http://cdn-lfs.huggingface.co/repos/fixture/summary.bin";
+    let server = HfFixtureServer::start(HfFixtureConfig {
+        resolver_behavior: ResolverBehavior::RedirectToCdn(cdn_url.to_string()),
+        cdn_body: body.clone(),
+        ..Default::default()
+    });
+
+    let store_dir = tempdir().expect("store tempdir");
+    let dest = tempdir().expect("dest tempdir");
+    let meta_dir = tempdir().expect("meta tempdir");
+    let hf_store = HfMetadataStore::open(meta_dir.path().join("hf.db")).expect("open hf store");
+    let hf_store_for_engine =
+        HfMetadataStore::open(meta_dir.path().join("hf.db")).expect("open hf store handle");
+
+    let store = Database::open(store_dir.path().join("tasks.db")).expect("open store");
+    let service = Arc::new(
+        EngineService::start(
+            store,
+            dest.path().to_path_buf(),
+            EngineOptions { max_concurrent: 2 },
+        )
+        .expect("start service"),
+    );
+
+    // Route resolver/CDN traffic through the loopback forward proxy and enable HF.
+    service
+        .set_proxy(Some(oneget_lib::engine::http::ProxyConfig {
+            url: server.proxy_url(),
+            username: None,
+            password: None,
+        }))
+        .expect("set proxy");
+    service
+        .apply_huggingface_options(HuggingFaceOptions {
+            token: None,
+            connection_cap: 4,
+            metadata: Some(Arc::new(hf_store_for_engine)),
+        })
+        .expect("apply hf options");
+
+    let harness = build_state(Some(Arc::clone(&service)));
+
+    let id = service
+        .add(add_download(
+            "http://huggingface.co/gpt2/resolve/main/summary.bin".to_string(),
+            "summary.bin",
+            8,
+        ))
+        .expect("add hf download");
+    wait_for_state(&service, &id, TaskState::Completed).await;
+
+    let final_bytes = std::fs::read(dest.path().join("summary.bin")).expect("read final file");
+    assert_eq!(sha256_hex(&final_bytes), expected_hash);
+
+    let summaries = summary_values(&harness.state);
+    let summary = summaries
+        .iter()
+        .find(|summary| summary.get("id") == Some(&json!(id)))
+        .expect("completed hf task must be summarized");
+    let object = summary.as_object().expect("summary must be an object");
+    assert!(
+        object.contains_key("huggingface"),
+        "DownloadSummary must expose a huggingface field (camelCase), got keys: {:?}",
+        object.keys().collect::<Vec<_>>()
+    );
+    let hf = summary
+        .get("huggingface")
+        .and_then(Value::as_object)
+        .expect("huggingface must be an object for an HF task");
+    for key in [
+        "repoId",
+        "filePath",
+        "revision",
+        "effectiveConnections",
+        "refreshCount",
+        "downgraded",
+    ] {
+        assert!(
+            hf.contains_key(key),
+            "huggingface summary must expose {key}, got {:?}",
+            hf.keys().collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(hf.get("repoId").and_then(Value::as_str), Some("gpt2"));
+    assert_eq!(
+        hf.get("filePath").and_then(Value::as_str),
+        Some("summary.bin")
+    );
+    assert_eq!(hf.get("revision").and_then(Value::as_str), Some("main"));
+    assert_eq!(
+        hf.get("effectiveConnections").and_then(Value::as_u64),
+        Some(4),
+        "effective connections must reflect hfConnectionCap"
+    );
+    assert_eq!(hf.get("refreshCount").and_then(Value::as_u64), Some(0));
+    assert_eq!(hf.get("downgraded").and_then(Value::as_bool), Some(false));
+
+    let rendered = serde_json::to_string(summary).expect("render summary");
+    assert!(
+        !rendered.contains("hf_test")
+            && !rendered.contains("Bearer")
+            && !rendered.contains("token"),
+        "summary must never expose tokens or signed URLs: {rendered}"
+    );
+
+    // Deleting the record through the existing command must remove the HF row.
+    downloads_delete_record(&harness.state, &id).expect("delete record via command");
+    let after = hf_store.get(&id).expect("get hf metadata after delete");
+    assert!(
+        after.is_none(),
+        "downloads_delete_record must remove the HuggingFace metadata row"
+    );
+
+    service.shutdown();
+}

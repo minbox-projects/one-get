@@ -12,19 +12,21 @@ use std::sync::{Arc, Mutex};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{stream, StreamExt};
 use reqwest::header::{
-    HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, CONTENT_RANGE, CONTENT_TYPE, ETAG,
-    LAST_MODIFIED, RANGE,
+    HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_RANGE,
+    CONTENT_TYPE, ETAG, LAST_MODIFIED, RANGE,
 };
 use reqwest::{Client, StatusCode};
 use sha2::{Digest, Sha256};
 
 use crate::platform::files::CapDir;
+use crate::platform::secrets::SecretValue;
 use crate::platform::PlatformError;
 use crate::store::types::{Segment, SegmentInput, SegmentProgressInput, Task};
 use crate::store::Database;
 
 use super::cookies::CookieJar;
 use super::error::EngineError;
+use super::hf;
 use super::http::{build_client, get_following_redirects_with_cookies, storage_url};
 use super::part_file::PartFile;
 use super::planner::{plan_segments, SegmentPlan, MIN_SEGMENT_BYTES};
@@ -91,6 +93,8 @@ pub(crate) struct NetworkContext {
     pub limiters: Vec<Arc<RateLimiter>>,
     /// Attempts one request may make before it gives up.
     pub retry_attempts: usize,
+    /// Hugging Face token applied only to resolver-host requests.
+    pub hf_token: Option<SecretValue>,
 }
 
 impl NetworkContext {
@@ -101,6 +105,7 @@ impl NetworkContext {
             cookies: None,
             limiters: Vec::new(),
             retry_attempts: retry::MAX_ATTEMPTS,
+            hf_token: None,
         })
     }
 
@@ -254,8 +259,14 @@ pub(crate) async fn remote_metadata(
     spec: &DownloadSpec,
     start: u64,
 ) -> Result<RemoteMetadata, EngineError> {
-    let (metadata, _) =
-        probe_for_download(&network.client, network.cookies.as_ref(), spec, start).await?;
+    let (metadata, _) = probe_for_download(
+        &network.client,
+        network.cookies.as_ref(),
+        network.hf_token.as_ref(),
+        spec,
+        start,
+    )
+    .await?;
     Ok(RemoteMetadata {
         total_bytes: metadata.total_bytes,
         etag: metadata.etag,
@@ -678,6 +689,7 @@ pub async fn download_once(
                 match probe_zero_length(
                     &network.client,
                     network.cookies.as_ref(),
+                    network.hf_token.as_ref(),
                     &spec.url,
                     &options,
                 )
@@ -963,7 +975,14 @@ pub(crate) async fn download_task_with_network(
     let mut probe_attempts = 0;
     let (metadata, probe_bytes) = loop {
         probe_attempts += 1;
-        match probe_for_download(&network.client, network.cookies.as_ref(), spec, probe_start).await
+        match probe_for_download(
+            &network.client,
+            network.cookies.as_ref(),
+            network.hf_token.as_ref(),
+            spec,
+            probe_start,
+        )
+        .await
         {
             // A range probe that receives a non-range response is retried a
             // bounded number of times: a transient server or proxy error can
@@ -1894,7 +1913,8 @@ async fn stream_request(
                 return Ok((position, flow, range_total));
             }
             send_attempts += 1;
-            let headers = request_headers(spec, current.range_header())?;
+            let mut headers = request_headers(spec, current.range_header())?;
+            apply_huggingface_authorization(&mut headers, spec, network.hf_token.as_ref());
             let response = match get_following_redirects_with_cookies(
                 &network.client,
                 &spec.url,
@@ -1933,7 +1953,7 @@ async fn stream_request(
                     ));
                 }
                 if status != StatusCode::PARTIAL_CONTENT {
-                    let error = response_status_error(&response);
+                    let error = response_status_error(&response, hf::is_resolver_url(&spec.url));
                     if error.is_retryable() && send_attempts < network.retry_attempts {
                         tokio::time::sleep(retry::delay_for_attempt(
                             send_attempts,
@@ -1953,7 +1973,7 @@ async fn stream_request(
                 }
                 range_total = total;
             } else if status != StatusCode::OK {
-                let error = response_status_error(&response);
+                let error = response_status_error(&response, hf::is_resolver_url(&spec.url));
                 if error.is_retryable() && send_attempts < network.retry_attempts {
                     tokio::time::sleep(retry::delay_for_attempt(
                         send_attempts,
@@ -2130,6 +2150,23 @@ async fn stream_request(
     }
 }
 
+/// Attach a Hugging Face bearer token only for resolver-host requests.
+fn apply_huggingface_authorization(
+    headers: &mut HeaderMap,
+    spec: &DownloadSpec,
+    token: Option<&SecretValue>,
+) {
+    let Some(token) = token else {
+        return;
+    };
+    if !hf::is_resolver_url(&spec.url) {
+        return;
+    }
+    if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", token.expose_secret())) {
+        headers.insert(AUTHORIZATION, value);
+    }
+}
+
 fn request_headers(spec: &DownloadSpec, range: Option<String>) -> Result<HeaderMap, EngineError> {
     let mut headers = HeaderMap::new();
     for (name, value) in &spec.extra_headers {
@@ -2178,10 +2215,11 @@ async fn check_first_range(
     let mut attempts = 0usize;
     loop {
         attempts += 1;
-        let headers = request_headers(
+        let mut headers = request_headers(
             spec,
             Some(format!("bytes={start}-{}", request_end.saturating_sub(1))),
         )?;
+        apply_huggingface_authorization(&mut headers, spec, network.hf_token.as_ref());
         let result = match get_following_redirects_with_cookies(
             &network.client,
             &spec.url,
@@ -2203,7 +2241,10 @@ async fn check_first_range(
                     }
                 }
                 StatusCode::OK => Ok(RangeCheck::Ignored),
-                _ => Err(response_status_error(&response)),
+                _ => Err(response_status_error(
+                    &response,
+                    hf::is_resolver_url(&spec.url),
+                )),
             },
             Err(error) => Err(error),
         };
@@ -2303,10 +2344,13 @@ fn segment_inputs(plan: &SegmentPlan, total: Option<u64>) -> Vec<SegmentInput> {
 async fn probe_for_download(
     client: &Client,
     cookies: Option<&CookieJar>,
+    hf_token: Option<&SecretValue>,
     spec: &DownloadSpec,
     start: u64,
 ) -> Result<(DownloadMetadata, Option<Vec<u8>>), EngineError> {
-    let headers = request_headers(spec, Some(format!("bytes={start}-{start}")))?;
+    let mut headers = request_headers(spec, Some(format!("bytes={start}-{start}")))?;
+    apply_huggingface_authorization(&mut headers, spec, hf_token);
+    let is_hf = hf::is_resolver_url(&spec.url);
     let (response, final_url) =
         get_following_redirects_with_cookies(client, &spec.url, headers, cookies).await?;
     let final_url = final_url.as_str().to_string();
@@ -2375,7 +2419,7 @@ async fn probe_for_download(
             },
             None,
         )),
-        _ => Err(response_status_error(&response)),
+        _ => Err(response_status_error(&response, is_hf)),
     }
 }
 
@@ -2400,6 +2444,7 @@ fn parse_unsatisfied_total(response: &reqwest::Response) -> Result<u64, EngineEr
 async fn probe_zero_length(
     client: &Client,
     cookies: Option<&CookieJar>,
+    hf_token: Option<&SecretValue>,
     url: &str,
     options: &ProbeOptions,
 ) -> Result<DownloadMetadata, EngineError> {
@@ -2413,6 +2458,13 @@ async fn probe_zero_length(
         headers.insert(name, value);
     }
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+    if let Some(token) = hf_token {
+        if hf::is_resolver_url(url) {
+            if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", token.expose_secret())) {
+                headers.insert(AUTHORIZATION, value);
+            }
+        }
+    }
 
     let (response, final_url) =
         get_following_redirects_with_cookies(client, url, headers, cookies).await?;
@@ -2462,8 +2514,16 @@ fn status_error(status: StatusCode) -> EngineError {
     }
 }
 
-fn response_status_error(response: &reqwest::Response) -> EngineError {
-    let mut error = status_error(response.status());
+fn response_status_error(response: &reqwest::Response, is_hf: bool) -> EngineError {
+    let mut error = if is_hf
+        && matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+        hf::auth_error()
+    } else {
+        status_error(response.status())
+    };
     if let Some(delay) = retry::retry_after(response.headers()) {
         error = error.with_retry_after(delay);
     }

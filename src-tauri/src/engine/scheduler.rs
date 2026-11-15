@@ -21,13 +21,16 @@ use tokio::sync::Notify;
 
 use crate::logging::{LogLevel, Logger};
 use crate::platform::opener::open_target;
+use crate::platform::secrets::SecretValue;
 use crate::platform::PlatformError;
 use crate::platform::{current_target, sanitize_filename, CapDir};
+use crate::store::hf::{HfMetadata, HfMetadataStore};
 use crate::store::types::{Task, TaskKind};
 use crate::store::Database;
 
 use super::cookies::CookieJar;
 use super::error::EngineError;
+use super::hf;
 use super::http::{self, ProxyConfig};
 use super::rate_limit::RateLimiter;
 use super::state::TaskState;
@@ -76,6 +79,28 @@ impl Default for NetworkOptions {
     }
 }
 
+/// Hugging Face token, connection cap, and metadata store applied to later
+/// task starts.
+#[derive(Clone)]
+pub struct HuggingFaceOptions {
+    /// Access token sent only to resolver-host requests.
+    pub token: Option<SecretValue>,
+    /// Maximum connections one Hugging Face task may use.
+    pub connection_cap: u32,
+    /// Optional durable metadata store.
+    pub metadata: Option<Arc<HfMetadataStore>>,
+}
+
+impl Default for HuggingFaceOptions {
+    fn default() -> Self {
+        Self {
+            token: None,
+            connection_cap: 8,
+            metadata: None,
+        }
+    }
+}
+
 /// Summary of the store and part-file recovery performed at startup.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RecoveryReport {
@@ -102,6 +127,7 @@ pub struct Engine {
     specs: Mutex<HashMap<String, DownloadSpec>>,
     proxy: RwLock<Option<ProxyConfig>>,
     network_options: RwLock<NetworkOptions>,
+    huggingface: RwLock<HuggingFaceOptions>,
     client: Mutex<Option<Client>>,
     cookie_file: Mutex<Option<PathBuf>>,
     global_rate: Mutex<Option<Arc<RateLimiter>>>,
@@ -122,6 +148,7 @@ impl Engine {
             specs: Mutex::new(HashMap::new()),
             proxy: RwLock::new(None),
             network_options: RwLock::new(NetworkOptions::default()),
+            huggingface: RwLock::new(HuggingFaceOptions::default()),
             client: Mutex::new(None),
             cookie_file: Mutex::new(None),
             global_rate: Mutex::new(None),
@@ -178,6 +205,26 @@ impl Engine {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = options;
         *cached = None;
+    }
+
+    /// Replace the Hugging Face token, connection cap, and metadata store used
+    /// by task starts after this call.
+    ///
+    /// A task already running keeps the effective connection count captured
+    /// when it started.
+    pub fn set_huggingface_options(&self, options: HuggingFaceOptions) -> Result<(), EngineError> {
+        if !(1..=64).contains(&options.connection_cap) {
+            return Err(EngineError::new(
+                "INVALID_CONNECTIONS",
+                "the Hugging Face connection cap must be between 1 and 64",
+            ));
+        }
+        *self
+            .huggingface
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = options;
+        self.notify.notify_one();
+        Ok(())
     }
 
     /// Load a Netscape cookie file at each task start or resume.
@@ -239,6 +286,7 @@ impl Engine {
     pub fn add_task(&self, spec: DownloadSpec) -> Result<String, EngineError> {
         http::validate_extra_headers(&spec.extra_headers)?;
         let mut spec = spec;
+        spec.url = http::validate_url(&spec.url)?;
         spec.filename = sanitize_filename(&spec.filename, current_target());
         let destination = self.resolve_destination(spec.destination.as_deref())?;
         let stored_destination = destination
@@ -380,6 +428,7 @@ impl Engine {
             cookies: self.load_cookies().ok().flatten(),
             limiters: Vec::new(),
             retry_attempts: options.retry_attempts,
+            hf_token: self.hf_options().token,
         };
 
         for task in self.store.tasks_by_kind(TaskKind::Http)? {
@@ -559,7 +608,9 @@ impl Engine {
             Err(error) if error.code == "not_found" => {}
             Err(error) => return Err(platform_error(error)),
         }
-        self.store.delete_task(id)
+        self.store.delete_task(id)?;
+        self.forget_hf_metadata(id);
+        Ok(())
     }
 
     /// Delete a completed task's final file and then its record.
@@ -596,7 +647,9 @@ impl Engine {
             }
             Err(error) => return Err(platform_error(error)),
         }
-        self.store.delete_task(id)
+        self.store.delete_task(id)?;
+        self.forget_hf_metadata(id);
+        Ok(())
     }
 
     /// Open a completed task's final file with the platform handler.
@@ -754,9 +807,54 @@ impl Engine {
         // available only from the in-memory spec.
         spec.filename = task.filename.clone();
         spec.connections = task.connections.max(1);
+        if hf::is_resolver_url(&spec.url) {
+            let cap = self
+                .huggingface
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .connection_cap
+                .max(1);
+            spec.connections = spec.connections.min(cap);
+        }
         spec.expected_sha256 = task.expected_sha256.clone();
         spec.destination = Some(self.destination_for(task));
         spec
+    }
+
+    fn hf_options(&self) -> HuggingFaceOptions {
+        self.huggingface
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Record Hugging Face metadata when a download starts.
+    fn record_hf_metadata(&self, task_id: &str, spec: &DownloadSpec) {
+        let Ok(Some(parsed)) = hf::parse_hf_url(&spec.url) else {
+            return;
+        };
+        let options = self.hf_options();
+        let Some(store) = options.metadata else {
+            return;
+        };
+        let metadata = HfMetadata {
+            task_id: task_id.to_string(),
+            repo_id: parsed.repo_id,
+            file_path: parsed.file_path,
+            revision: parsed.revision,
+            connection_cap: options.connection_cap,
+            effective_connections: spec.connections,
+            refresh_count: 0,
+            downgraded: false,
+        };
+        let _ = store.record(&metadata);
+    }
+
+    /// Remove a deleted task's Hugging Face metadata when a store is attached.
+    fn forget_hf_metadata(&self, task_id: &str) {
+        if let Some(store) = self.hf_options().metadata {
+            let _ = store.delete(task_id);
+        }
     }
 
     fn network_for(&self, task_id: &str) -> Result<NetworkContext, EngineError> {
@@ -787,6 +885,7 @@ impl Engine {
             cookies,
             limiters,
             retry_attempts: options.retry_attempts,
+            hf_token: self.hf_options().token,
         })
     }
 
@@ -814,6 +913,7 @@ impl Engine {
                     serde_json::json!({ "task_id": task_id }),
                 );
                 let spec = self.spec_for(&task);
+                self.record_hf_metadata(&task_id, &spec);
                 let destination = self.destination_for(&task);
                 match self.network_for(&task_id) {
                     Ok(network) => {

@@ -1727,3 +1727,122 @@ fn http_claims_and_conflicts_ignore_video_tasks() {
         "the video task stays queued while HTTP claims run"
     );
 }
+
+// --- Hugging Face metadata store (intended public interface, RED) ---
+
+use oneget_lib::store::hf::{HfMetadata, HfMetadataStore, HF_SCHEMA_VERSION};
+
+fn sample_hf_metadata(task_id: &str) -> HfMetadata {
+    HfMetadata {
+        task_id: task_id.to_string(),
+        repo_id: "org/model".to_string(),
+        file_path: "weights/model.bin".to_string(),
+        revision: "main".to_string(),
+        connection_cap: 8,
+        effective_connections: 4,
+        refresh_count: 1,
+        downgraded: true,
+    }
+}
+
+#[test]
+fn hf_metadata_store_record_get_delete_round_trip_preserves_rows_and_schema_version() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("hf.db");
+
+    {
+        let store = HfMetadataStore::open(&db_path).expect("open new hf metadata store");
+        assert_eq!(
+            HF_SCHEMA_VERSION, 1,
+            "HF metadata schema constant must be version 1"
+        );
+
+        let metadata = sample_hf_metadata("task-a");
+        store.record(&metadata).expect("record hf metadata");
+        let loaded = store
+            .get("task-a")
+            .expect("get hf metadata")
+            .expect("recorded row must exist");
+        assert_eq!(loaded.task_id, "task-a");
+        assert_eq!(loaded.repo_id, "org/model");
+        assert_eq!(loaded.file_path, "weights/model.bin");
+        assert_eq!(loaded.revision, "main");
+        assert_eq!(loaded.connection_cap, 8);
+        assert_eq!(loaded.effective_connections, 4);
+        assert_eq!(loaded.refresh_count, 1);
+        assert!(loaded.downgraded, "downgraded state must round-trip");
+
+        store.delete("task-a").expect("delete hf metadata");
+        let after_delete = store.get("task-a").expect("get after delete");
+        assert!(
+            after_delete.is_none(),
+            "deleted hf metadata row must be gone"
+        );
+    }
+
+    // Reopening the same path must preserve rows recorded before close.
+    let store = HfMetadataStore::open(&db_path).expect("reopen hf metadata store");
+    let metadata_b = sample_hf_metadata("task-b");
+    store.record(&metadata_b).expect("record task-b");
+    drop(store);
+
+    let reopened = HfMetadataStore::open(&db_path).expect("reopen again");
+    let persisted = reopened
+        .get("task-b")
+        .expect("get persisted row")
+        .expect("row must survive reopen");
+    assert_eq!(persisted.task_id, "task-b");
+    assert_eq!(persisted.repo_id, "org/model");
+    assert_eq!(persisted.file_path, "weights/model.bin");
+    assert_eq!(persisted.revision, "main");
+    assert_eq!(persisted.connection_cap, 8);
+    assert_eq!(persisted.effective_connections, 4);
+    assert_eq!(persisted.refresh_count, 1);
+    assert!(persisted.downgraded);
+
+    // A record update for the same task should be readable (idempotent upsert-like
+    // behavior expected for progress/refresh updates); at minimum get returns the
+    // latest recorded values.
+    let mut updated = sample_hf_metadata("task-b");
+    updated.refresh_count = 3;
+    updated.effective_connections = 2;
+    updated.downgraded = false;
+    reopened
+        .record(&updated)
+        .expect("record updated hf metadata");
+    let latest = reopened
+        .get("task-b")
+        .expect("get updated row")
+        .expect("updated row must exist");
+    assert_eq!(latest.refresh_count, 3);
+    assert_eq!(latest.effective_connections, 2);
+    assert!(!latest.downgraded);
+}
+
+#[test]
+fn hf_metadata_store_with_newer_schema_is_refused_with_typed_error() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("hf.db");
+
+    {
+        let conn = Connection::open(&db_path).expect("create raw sqlite db");
+        conn.execute_batch(
+            "CREATE TABLE schema_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+             INSERT INTO schema_meta (key, value) VALUES ('schema_version', '999');",
+        )
+        .expect("seed newer schema marker");
+    }
+
+    let err = match HfMetadataStore::open(&db_path) {
+        Ok(_) => panic!("opening an hf metadata store with a newer schema must fail"),
+        Err(err) => err,
+    };
+    // Typed refusal: engine/store errors carry a stable code string.
+    assert_eq!(
+        err.code(),
+        "SCHEMA_TOO_NEW",
+        "a newer HF metadata schema must be refused with SCHEMA_TOO_NEW, got {}: {}",
+        err.code(),
+        err
+    );
+}

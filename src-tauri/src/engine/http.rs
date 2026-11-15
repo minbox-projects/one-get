@@ -82,7 +82,7 @@ pub fn validate_url(input: &str) -> Result<String, EngineError> {
         ));
     }
 
-    Ok(url.as_str().to_string())
+    super::hf::normalize_download_url(url.as_str())
 }
 
 /// Parse and validate a proxy URL that must not embed credentials.

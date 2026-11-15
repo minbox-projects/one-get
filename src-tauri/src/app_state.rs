@@ -17,7 +17,7 @@ use crate::commands::app::{AutostartService, NotificationService, QuitService, S
 use crate::commands::kernel::KernelRuntime;
 use crate::config::{ProxyMode, Settings, SettingsStore};
 use crate::engine::http::ProxyConfig;
-use crate::engine::scheduler::NetworkOptions;
+use crate::engine::scheduler::{HuggingFaceOptions, NetworkOptions};
 use crate::engine::service::EngineService;
 use crate::error::AppError;
 use crate::logging::Logger;
@@ -26,7 +26,11 @@ use crate::platform::paths::AppPaths;
 use crate::platform::proxy::{
     resolve_proxy, PlatformSystemProxySource, ProxyResolution, SystemProxySource,
 };
+use crate::store::hf::HfMetadataStore;
 use crate::video::service::VideoService;
+
+/// Keyring key that stores the Hugging Face access token.
+const HF_TOKEN_KEY: &str = "huggingface-token";
 
 /// Browser-integration availability, pairing state, and one pending prefill.
 pub struct PairingRuntime {
@@ -132,6 +136,7 @@ pub struct AppState {
     autostart: Arc<dyn AutostartService>,
     quit: Arc<dyn QuitService>,
     engine: Option<Arc<EngineService>>,
+    hf_metadata: Mutex<Option<Arc<HfMetadataStore>>>,
     kernel: Option<Arc<KernelRuntime>>,
     video: Option<Arc<VideoService>>,
     system_proxy: Arc<dyn SystemProxySource>,
@@ -161,6 +166,7 @@ impl AppState {
             autostart,
             quit,
             engine: None,
+            hf_metadata: Mutex::new(None),
             kernel: None,
             video: None,
             system_proxy: Arc::new(PlatformSystemProxySource),
@@ -178,6 +184,23 @@ impl AppState {
     pub fn with_engine(mut self, engine: Arc<EngineService>) -> Self {
         self.engine = Some(engine);
         self
+    }
+
+    /// Attach a Hugging Face metadata store opened by the caller.
+    pub fn with_hf_metadata(self, metadata: Arc<HfMetadataStore>) -> Self {
+        *self
+            .hf_metadata
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(metadata);
+        self
+    }
+
+    /// The Hugging Face metadata store, when one is available.
+    pub fn hf_metadata(&self) -> Option<Arc<HfMetadataStore>> {
+        self.hf_metadata
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Attach the runtime component kernel.
@@ -326,7 +349,66 @@ impl AppState {
         };
         self.apply_proxy_settings(&saved)?;
         self.apply_network_settings(&saved)?;
+        self.apply_huggingface_settings(&saved)?;
         Ok(saved)
+    }
+
+    /// Apply the saved Hugging Face connection cap and stored token.
+    ///
+    /// Opening the metadata store is best effort, so a missing or corrupt file
+    /// never prevents settings from saving or the engine from starting.
+    pub(crate) fn apply_huggingface_settings(&self, settings: &Settings) -> Result<(), AppError> {
+        if let Some(engine) = &self.engine {
+            let token = self.secrets().get_secret(HF_TOKEN_KEY).ok().flatten();
+            let metadata = self.ensure_hf_metadata();
+            engine
+                .apply_huggingface_options(HuggingFaceOptions {
+                    token,
+                    connection_cap: settings.hf_connection_cap,
+                    metadata,
+                })
+                .map_err(AppError::from)?;
+        }
+        Ok(())
+    }
+
+    /// Attach a metadata store only when the engine has none yet.
+    ///
+    /// This lets a later Hugging Face task recover from a store that was
+    /// unavailable at startup without changing an already configured cap.
+    pub(crate) fn ensure_hf_metadata_attached(&self) {
+        if self.hf_metadata().is_some() {
+            return;
+        }
+        if self
+            .engine
+            .as_ref()
+            .is_some_and(|engine| engine.huggingface_metadata().is_some())
+        {
+            return;
+        }
+        let _ = self.apply_huggingface_settings(&self.settings());
+    }
+
+    fn ensure_hf_metadata(&self) -> Option<Arc<HfMetadataStore>> {
+        let mut slot = self
+            .hf_metadata
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = self
+            .engine
+            .as_ref()
+            .and_then(|engine| engine.huggingface_metadata())
+        {
+            *slot = Some(Arc::clone(&existing));
+            return Some(existing);
+        }
+        if slot.is_none() {
+            if let Ok(store) = HfMetadataStore::open(self.paths.data.join("hf.db")) {
+                *slot = Some(Arc::new(store));
+            }
+        }
+        slot.clone()
     }
 
     /// Apply the saved transport settings to the running engine.
