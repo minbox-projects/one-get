@@ -5,9 +5,31 @@
 //! `HF_NOT_A_FILE`; CDN and unrelated hosts are returned as ordinary URLs so
 //! the engine never attaches a Hugging Face token to them.
 
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, RwLock};
+
+use reqwest::header::{
+    HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, AUTHORIZATION, COOKIE, LOCATION,
+};
+use reqwest::{Client, StatusCode};
 use url::Url;
 
+use crate::platform::secrets::SecretValue;
+use crate::store::hf::{HfMetadata, HfMetadataStore};
+
+use super::cookies::CookieJar;
 use super::error::EngineError;
+use super::http::{check_redirect, validate_url};
+use super::retry::classify_reqwest_error;
+
+/// Resolver contacts one task may make, including the initial resolution.
+///
+/// The first contact resolves the signed URL and each following contact is one
+/// signature refresh, so this bound also limits the persisted refresh count.
+const MAX_RESOLVER_CONTACTS: u32 = 3;
+
+/// Maximum resolver redirects followed while resolving a signed URL.
+const MAX_RESOLVER_REDIRECTS: usize = 10;
 
 /// The repository family a resolver file URL belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +89,298 @@ pub(crate) fn auth_error() -> EngineError {
         "HF_AUTH",
         "the Hugging Face file requires a valid access token",
     )
+}
+
+/// The signed CDN URL kept failing after every permitted refresh.
+pub(crate) fn signature_error() -> EngineError {
+    EngineError::new(
+        "HF_SIGNATURE",
+        "the Hugging Face download signature expired and could not be refreshed",
+    )
+}
+
+/// A resolved signed CDN URL plus the refresh bookkeeping for one task.
+pub(crate) struct HfDownload {
+    resolver_url: String,
+    signed_url: RwLock<String>,
+    resolver_contacts: AtomicU32,
+    refresh_count: AtomicU32,
+    downgraded: AtomicBool,
+    reduced: AtomicBool,
+    token: Option<SecretValue>,
+    base: HfMetadata,
+    metadata: Option<Arc<HfMetadataStore>>,
+    refresh_lock: tokio::sync::Mutex<()>,
+}
+
+impl HfDownload {
+    /// Resolve the initial signed URL and remember the task's metadata.
+    pub(crate) async fn initial(
+        resolver_url: &str,
+        client: &Client,
+        token: Option<SecretValue>,
+        cookies: Option<&CookieJar>,
+        extra_headers: &[(String, String)],
+        base: HfMetadata,
+        metadata: Option<Arc<HfMetadataStore>>,
+    ) -> Result<Self, EngineError> {
+        let (signed_url, contacts) =
+            resolve_with_auth_refresh(client, resolver_url, token.as_ref(), cookies, extra_headers)
+                .await?;
+        Ok(Self {
+            resolver_url: resolver_url.to_string(),
+            signed_url: RwLock::new(signed_url),
+            resolver_contacts: AtomicU32::new(contacts),
+            refresh_count: AtomicU32::new(0),
+            downgraded: AtomicBool::new(false),
+            reduced: AtomicBool::new(false),
+            token,
+            base,
+            metadata,
+            refresh_lock: tokio::sync::Mutex::new(()),
+        })
+    }
+
+    /// The signed CDN URL every worker should currently request.
+    pub(crate) fn current_url(&self) -> String {
+        self.signed_url
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Whether the task already dropped to a single connection.
+    pub(crate) fn is_reduced(&self) -> bool {
+        self.reduced.load(Ordering::SeqCst)
+    }
+
+    /// Record that the task must continue with one connection.
+    pub(crate) fn mark_reduced(&self) {
+        if !self.reduced.swap(true, Ordering::SeqCst) {
+            self.persist();
+        }
+    }
+
+    /// Record that the transfer fell back because Range is unsupported.
+    pub(crate) fn mark_downgraded(&self) {
+        if !self.downgraded.swap(true, Ordering::SeqCst) {
+            self.persist();
+        }
+    }
+
+    /// Re-resolve after a CDN rejection and atomically publish the fresh URL.
+    ///
+    /// A worker that observed an already-replaced URL does no extra network
+    /// work, so concurrent rejections consume one refresh between them.
+    pub(crate) async fn refresh(
+        &self,
+        observed_url: &str,
+        client: &Client,
+        cookies: Option<&CookieJar>,
+        extra_headers: &[(String, String)],
+    ) -> Result<(), EngineError> {
+        let _guard = self.refresh_lock.lock().await;
+        if self.current_url() != observed_url {
+            return Ok(());
+        }
+        if self.resolver_contacts.load(Ordering::SeqCst) >= MAX_RESOLVER_CONTACTS {
+            return Err(signature_error());
+        }
+        let signed_url = match resolve_signed_url(
+            client,
+            &self.resolver_url,
+            self.token.as_ref(),
+            cookies,
+            extra_headers,
+        )
+        .await
+        {
+            Ok(url) => url,
+            Err(error) if error.code() == "HF_AUTH" => return Err(auth_error()),
+            Err(error) => return Err(error),
+        };
+        self.resolver_contacts.fetch_add(1, Ordering::SeqCst);
+        self.refresh_count.fetch_add(1, Ordering::SeqCst);
+        *self
+            .signed_url
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = signed_url;
+        self.persist();
+        Ok(())
+    }
+
+    fn persist(&self) {
+        let Some(store) = self.metadata.as_ref() else {
+            return;
+        };
+        let downgraded = self.downgraded.load(Ordering::SeqCst);
+        let reduced = self.reduced.load(Ordering::SeqCst);
+        let metadata = HfMetadata {
+            task_id: self.base.task_id.clone(),
+            repo_id: self.base.repo_id.clone(),
+            file_path: self.base.file_path.clone(),
+            revision: self.base.revision.clone(),
+            connection_cap: self.base.connection_cap,
+            effective_connections: if downgraded || reduced {
+                1
+            } else {
+                self.base.effective_connections
+            },
+            refresh_count: self.refresh_count.load(Ordering::SeqCst),
+            downgraded,
+        };
+        let _ = store.record(&metadata);
+    }
+}
+
+/// Resolve once and retry a single time when the resolver reports unauthorized.
+async fn resolve_with_auth_refresh(
+    client: &Client,
+    resolver_url: &str,
+    token: Option<&SecretValue>,
+    cookies: Option<&CookieJar>,
+    extra_headers: &[(String, String)],
+) -> Result<(String, u32), EngineError> {
+    match resolve_signed_url(client, resolver_url, token, cookies, extra_headers).await {
+        Ok(url) => Ok((url, 1)),
+        Err(error) if error.code() == "HF_AUTH" => {
+            match resolve_signed_url(client, resolver_url, token, cookies, extra_headers).await {
+                Ok(url) => Ok((url, 2)),
+                Err(error) if error.code() == "HF_AUTH" => Err(auth_error()),
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Ask the resolver for the current signed CDN URL.
+///
+/// The resolver may redirect among its own hosts; the first redirect that
+/// leaves the resolver hosts is the signed CDN URL and is returned without
+/// contacting the CDN. The token is therefore only ever sent to resolver hosts.
+async fn resolve_signed_url(
+    client: &Client,
+    resolver_url: &str,
+    token: Option<&SecretValue>,
+    cookies: Option<&CookieJar>,
+    extra_headers: &[(String, String)],
+) -> Result<String, EngineError> {
+    let mut current = Url::parse(&validate_url(resolver_url)?)
+        .map_err(|_| EngineError::new("INVALID_URL", "the resolver URL is not well formed"))?;
+    let mut hops = 0usize;
+
+    loop {
+        let mut headers = resolver_headers(extra_headers, token)?;
+        headers.remove(COOKIE);
+        if let Some(jar) = cookies {
+            if let Some(cookie) = jar.header_for(&current) {
+                if let Ok(value) = HeaderValue::from_str(&cookie) {
+                    headers.insert(COOKIE, value);
+                }
+            }
+        }
+
+        let response = client
+            .get(current.clone())
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+        let status = response.status();
+
+        if status.is_redirection() {
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    EngineError::new(
+                        "INVALID_RESPONSE",
+                        "a resolver redirect did not include a usable location",
+                    )
+                })?;
+            let resolved = current.join(location).map_err(|_| {
+                EngineError::new(
+                    "INVALID_URL",
+                    "a resolver redirect target is not a valid URL",
+                )
+            })?;
+            let target = validate_url(resolved.as_str())?;
+            check_redirect(current.as_str(), &target)?;
+            if !is_resolver_url(&target) {
+                return Ok(target);
+            }
+            if hops >= MAX_RESOLVER_REDIRECTS {
+                return Err(EngineError::new(
+                    "TOO_MANY_REDIRECTS",
+                    "the resolver redirect chain exceeded the allowed number of hops",
+                ));
+            }
+            hops += 1;
+            current = Url::parse(&target).map_err(|_| {
+                EngineError::new(
+                    "INVALID_URL",
+                    "a resolver redirect target is not a valid URL",
+                )
+            })?;
+            continue;
+        }
+
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Err(auth_error());
+        }
+        if status == StatusCode::OK {
+            return Ok(current.to_string());
+        }
+        return Err(resolver_status_error(status));
+    }
+}
+
+fn resolver_headers(
+    extra_headers: &[(String, String)],
+    token: Option<&SecretValue>,
+) -> Result<HeaderMap, EngineError> {
+    let mut headers = HeaderMap::new();
+    for (name, value) in extra_headers {
+        let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            EngineError::new("INVALID_HEADER", "an extra request header is not valid")
+        })?;
+        let value = HeaderValue::from_str(value).map_err(|_| {
+            EngineError::new(
+                "INVALID_HEADER",
+                "an extra request header value is not valid",
+            )
+        })?;
+        headers.insert(name, value);
+    }
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+    if let Some(token) = token {
+        let value =
+            HeaderValue::from_str(&format!("Bearer {}", token.expose_secret())).map_err(|_| {
+                EngineError::new(
+                    "INVALID_HEADER",
+                    "the Hugging Face token is not a valid header",
+                )
+            })?;
+        headers.insert(AUTHORIZATION, value);
+    }
+    Ok(headers)
+}
+
+fn resolver_status_error(status: StatusCode) -> EngineError {
+    match status.as_u16() {
+        404 => EngineError::new("NOT_FOUND", "the remote file was not found"),
+        408 => EngineError::retryable("TIMEOUT", "the server reported a request timeout"),
+        429 => EngineError::retryable("RATE_LIMITED", "the server asked the client to slow down"),
+        _ if status.is_server_error() => {
+            EngineError::retryable("SERVER_ERROR", "the server failed to serve the file")
+        }
+        _ => EngineError::new(
+            "INVALID_RESPONSE",
+            "the resolver returned an unusable response",
+        ),
+    }
 }
 
 /// Parse a resolver file URL.

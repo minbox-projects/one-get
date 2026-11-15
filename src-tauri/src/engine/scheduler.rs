@@ -423,12 +423,15 @@ impl Engine {
     /// resumed silently. Unchanged tasks stay paused for an explicit resume.
     async fn revalidate_paused(&self) -> Result<(), EngineError> {
         let (client, options) = self.client_and_options()?;
+        let hf = self.hf_options();
         let network = NetworkContext {
             client,
             cookies: self.load_cookies().ok().flatten(),
             limiters: Vec::new(),
             retry_attempts: options.retry_attempts,
-            hf_token: self.hf_options().token,
+            hf_token: hf.token,
+            hf_metadata: hf.metadata,
+            hf_connection_cap: hf.connection_cap,
         };
 
         for task in self.store.tasks_by_kind(TaskKind::Http)? {
@@ -880,12 +883,15 @@ impl Engine {
             limiters.push(limiter);
         }
 
+        let hf = self.hf_options();
         Ok(NetworkContext {
             client,
             cookies,
             limiters,
             retry_attempts: options.retry_attempts,
-            hf_token: self.hf_options().token,
+            hf_token: hf.token,
+            hf_metadata: hf.metadata,
+            hf_connection_cap: hf.connection_cap,
         })
     }
 

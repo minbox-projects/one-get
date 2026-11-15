@@ -1587,3 +1587,83 @@ async fn downloads_list_exposes_huggingface_summary_and_delete_removes_hf_row() 
 
     service.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn downloads_list_reports_null_huggingface_when_metadata_unavailable() {
+    use hf_server::{HfFixtureConfig, HfFixtureServer, ResolverBehavior};
+    use oneget_lib::engine::scheduler::HuggingFaceOptions;
+    use sha2::{Digest, Sha256};
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    let body = b"hf missing metadata fixture bytes".to_vec();
+    let expected_hash = sha256_hex(&body);
+    let cdn_url = "http://cdn-lfs.huggingface.co/repos/fixture/nullhf.bin";
+    let server = HfFixtureServer::start(HfFixtureConfig {
+        resolver_behavior: ResolverBehavior::RedirectToCdn(cdn_url.to_string()),
+        cdn_body: body.clone(),
+        ..Default::default()
+    });
+
+    let store_dir = tempdir().expect("store tempdir");
+    let dest = tempdir().expect("dest tempdir");
+    let store = Database::open(store_dir.path().join("tasks.db")).expect("open store");
+    let service = Arc::new(
+        EngineService::start(
+            store,
+            dest.path().to_path_buf(),
+            EngineOptions { max_concurrent: 1 },
+        )
+        .expect("start service"),
+    );
+    service
+        .set_proxy(Some(oneget_lib::engine::http::ProxyConfig {
+            url: server.proxy_url(),
+            username: None,
+            password: None,
+        }))
+        .expect("set proxy");
+    // Deliberately do not attach HF metadata store/options metadata: listing must
+    // remain usable and report huggingface as null/unavailable.
+    service
+        .apply_huggingface_options(HuggingFaceOptions {
+            token: None,
+            connection_cap: 4,
+            metadata: None,
+        })
+        .expect("apply hf options without metadata store");
+
+    let harness = build_state(Some(Arc::clone(&service)));
+    let id = service
+        .add(add_download(
+            "http://huggingface.co/gpt2/resolve/main/nullhf.bin".to_string(),
+            "nullhf.bin",
+            4,
+        ))
+        .expect("add hf download");
+    wait_for_state(&service, &id, TaskState::Completed).await;
+
+    let final_bytes = std::fs::read(dest.path().join("nullhf.bin")).expect("read final file");
+    assert_eq!(sha256_hex(&final_bytes), expected_hash);
+
+    let summaries = summary_values(&harness.state);
+    let summary = summaries
+        .iter()
+        .find(|summary| summary.get("id") == Some(&json!(id)))
+        .expect("completed hf task must be summarized");
+    assert!(
+        summary.get("huggingface").is_some() && summary.get("huggingface").unwrap().is_null()
+            || summary.get("huggingface").is_none(),
+        "when hf metadata store is unavailable, huggingface details must be null/unavailable, got: {summary}"
+    );
+
+    service.shutdown();
+}

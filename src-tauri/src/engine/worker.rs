@@ -8,6 +8,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::{stream, StreamExt};
@@ -21,6 +22,7 @@ use sha2::{Digest, Sha256};
 use crate::platform::files::CapDir;
 use crate::platform::secrets::SecretValue;
 use crate::platform::PlatformError;
+use crate::store::hf::{HfMetadata, HfMetadataStore};
 use crate::store::types::{Segment, SegmentInput, SegmentProgressInput, Task};
 use crate::store::Database;
 
@@ -95,6 +97,10 @@ pub(crate) struct NetworkContext {
     pub retry_attempts: usize,
     /// Hugging Face token applied only to resolver-host requests.
     pub hf_token: Option<SecretValue>,
+    /// Durable Hugging Face metadata store when one is attached.
+    pub hf_metadata: Option<Arc<HfMetadataStore>>,
+    /// Hugging Face connection cap applied when the task started.
+    pub hf_connection_cap: u32,
 }
 
 impl NetworkContext {
@@ -106,6 +112,8 @@ impl NetworkContext {
             limiters: Vec::new(),
             retry_attempts: retry::MAX_ATTEMPTS,
             hf_token: None,
+            hf_metadata: None,
+            hf_connection_cap: 8,
         })
     }
 
@@ -187,6 +195,9 @@ enum WorkerFlow {
     /// A ranged request received a full response before any task bytes were
     /// committed, so the task must restart as one plain connection.
     RangeFallback,
+    /// A CDN response asked the task to slow down; the pool continues later
+    /// with one connection.
+    RateLimited(Duration),
 }
 
 fn requested_flow(control: &TaskControl) -> Option<WorkerFlow> {
@@ -259,14 +270,7 @@ pub(crate) async fn remote_metadata(
     spec: &DownloadSpec,
     start: u64,
 ) -> Result<RemoteMetadata, EngineError> {
-    let (metadata, _) = probe_for_download(
-        &network.client,
-        network.cookies.as_ref(),
-        network.hf_token.as_ref(),
-        spec,
-        start,
-    )
-    .await?;
+    let (metadata, _) = probe_for_download(network, spec, None, start).await?;
     Ok(RemoteMetadata {
         total_bytes: metadata.total_bytes,
         etag: metadata.etag,
@@ -403,6 +407,7 @@ enum PoolOutcome {
     Completed,
     Interrupted(WorkerFlow),
     Fallback,
+    RateLimited(Duration),
 }
 
 fn lock_registry(
@@ -760,7 +765,7 @@ pub async fn download_once(
         if let SegmentPlan::Ranged(segments) = &plan {
             if let Some(first) = segments.first() {
                 if first.end > first.start {
-                    match check_first_range(&network, spec, first.start, first.end).await? {
+                    match check_first_range(&network, spec, None, first.start, first.end).await? {
                         RangeCheck::Accepted => {}
                         RangeCheck::Ignored => {
                             range_supported = false;
@@ -962,6 +967,39 @@ pub(crate) async fn download_task_with_network(
         return finish_interruption(store, task_id, dest_dir, flow);
     }
 
+    let hf_state = match hf::parse_hf_url(&spec.url)? {
+        Some(parsed) => {
+            let base = HfMetadata {
+                task_id: task_id.to_string(),
+                repo_id: parsed.repo_id,
+                file_path: parsed.file_path,
+                revision: parsed.revision,
+                connection_cap: network.hf_connection_cap,
+                effective_connections: spec.connections,
+                refresh_count: 0,
+                downgraded: false,
+            };
+            match hf::HfDownload::initial(
+                &spec.url,
+                &network.client,
+                network.hf_token.clone(),
+                network.cookies.as_ref(),
+                &spec.extra_headers,
+                base,
+                network.hf_metadata.clone(),
+            )
+            .await
+            {
+                Ok(state) => Some(state),
+                Err(error) => {
+                    drop(part);
+                    return Err(mark_failed(store, task_id, error));
+                }
+            }
+        }
+        None => None,
+    };
+
     let probe_start = persisted
         .iter()
         .find(|segment| segment.state != SegmentState::Done)
@@ -975,15 +1013,7 @@ pub(crate) async fn download_task_with_network(
     let mut probe_attempts = 0;
     let (metadata, probe_bytes) = loop {
         probe_attempts += 1;
-        match probe_for_download(
-            &network.client,
-            network.cookies.as_ref(),
-            network.hf_token.as_ref(),
-            spec,
-            probe_start,
-        )
-        .await
-        {
+        match probe_for_download(network, spec, hf_state.as_ref(), probe_start).await {
             // A range probe that receives a non-range response is retried a
             // bounded number of times: a transient server or proxy error can
             // look like a server that ignores ranges, and a genuine non-range
@@ -1093,7 +1123,9 @@ pub(crate) async fn download_task_with_network(
                     let downloaded = rows.first().map(|row| row.downloaded).unwrap_or(0);
                     let start = first.start.saturating_add(downloaded);
                     if start < first.end {
-                        match check_first_range(network, spec, start, first.end).await? {
+                        match check_first_range(network, spec, hf_state.as_ref(), start, first.end)
+                            .await?
+                        {
                             RangeCheck::Accepted => {}
                             RangeCheck::Ignored => {
                                 range_supported = false;
@@ -1107,7 +1139,32 @@ pub(crate) async fn download_task_with_network(
             }
         }
 
+        if !range_supported && metadata.total_bytes != Some(0) {
+            if let Some(state) = hf_state.as_ref() {
+                state.mark_downgraded();
+            }
+        }
+
         store.replace_segments(task_id, &rows)?;
+
+        // Persist the probe's single byte before any worker runs so a Hugging
+        // Face mid-flight failure still reports the progress that reached the
+        // part. Other downloads keep the original write after plan setup.
+        if hf_state.is_some() {
+            if let Some((bytes, offset)) = first_byte_write.as_ref() {
+                part.write_at(*offset, bytes)?;
+                let inputs: Vec<SegmentProgressInput> = rows
+                    .iter()
+                    .map(|row| SegmentProgressInput {
+                        segment_id: row.index,
+                        downloaded_bytes: row.downloaded,
+                    })
+                    .collect();
+                let total: u64 = rows.iter().map(|row| row.downloaded).sum();
+                store.persist_progress(task_id, &inputs, total)?;
+                first_byte_write = None;
+            }
+        }
     }
 
     if let Some(flow) = requested_flow(control) {
@@ -1120,17 +1177,45 @@ pub(crate) async fn download_task_with_network(
     }
 
     let mut plain = !range_supported;
-    let mut attempt = 0usize;
+    let mut reduced = hf_state.as_ref().is_some_and(hf::HfDownload::is_reduced);
+    let mut fallbacks = 0usize;
     loop {
-        attempt += 1;
-        match run_pool(network, store, task_id, &part, spec, control, plain).await {
+        let concurrency = if reduced {
+            1
+        } else {
+            (spec.connections as usize).max(1)
+        };
+        match run_pool(
+            network,
+            store,
+            task_id,
+            &part,
+            spec,
+            control,
+            plain,
+            concurrency,
+            hf_state.as_ref(),
+        )
+        .await
+        {
             Ok(PoolOutcome::Completed) => break,
             Ok(PoolOutcome::Interrupted(flow)) => {
                 drop(part);
                 return finish_interruption(store, task_id, dest_dir, flow);
             }
+            Ok(PoolOutcome::RateLimited(delay)) => {
+                // A CDN rate limit reduces the task to one connection for the
+                // remainder; the delay is honored before the single-connection
+                // pool starts and the original concurrency is never restored.
+                reduced = true;
+                if let Some(state) = hf_state.as_ref() {
+                    state.mark_reduced();
+                }
+                tokio::time::sleep(delay).await;
+            }
             Ok(PoolOutcome::Fallback) => {
-                if attempt > 1 {
+                fallbacks += 1;
+                if fallbacks > 1 {
                     return Err(mark_failed(
                         store,
                         task_id,
@@ -1309,12 +1394,15 @@ fn finish_interruption(
             Ok(TaskRunOutcome::Cancelled)
         }
         // `Complete` is never passed here: callers only forward a requested or
-        // interrupted flow. `RangeFallback` is resolved by the pool before an
-        // interruption is reported, so both arms are defensive only.
-        WorkerFlow::Complete | WorkerFlow::RangeFallback => Err(EngineError::new(
-            "INTERNAL_ERROR",
-            "an interruption flow was reported with a non-interruption outcome",
-        )),
+        // interrupted flow. `RangeFallback` and `RateLimited` are resolved by
+        // the pool before an interruption is reported, so all arms are
+        // defensive only.
+        WorkerFlow::Complete | WorkerFlow::RangeFallback | WorkerFlow::RateLimited(_) => {
+            Err(EngineError::new(
+                "INTERNAL_ERROR",
+                "an interruption flow was reported with a non-interruption outcome",
+            ))
+        }
     }
 }
 
@@ -1544,6 +1632,7 @@ async fn run_worker(
         task_id,
         part,
         spec,
+        None,
         control,
         request,
         segment_start,
@@ -1588,6 +1677,7 @@ type PoolFuture<'a> = std::pin::Pin<
 >;
 
 /// Run one registry-backed worker pool until every segment is done.
+#[allow(clippy::too_many_arguments)]
 async fn run_pool(
     network: &NetworkContext,
     store: &Database,
@@ -1596,6 +1686,8 @@ async fn run_pool(
     spec: &DownloadSpec,
     control: &TaskControl,
     plain: bool,
+    concurrency: usize,
+    hf: Option<&hf::HfDownload>,
 ) -> Result<PoolOutcome, EngineError> {
     let segments = store.segments_for_task(task_id)?;
     for segment in &segments {
@@ -1607,7 +1699,7 @@ async fn run_pool(
     }
     let segments = store.segments_for_task(task_id)?;
     let registry = Mutex::new(SegmentRegistry::from_segments(&segments));
-    let concurrency = (spec.connections as usize).max(1);
+    let concurrency = concurrency.max(1);
     let mut active: FuturesUnordered<PoolFuture<'_>> = FuturesUnordered::new();
 
     loop {
@@ -1628,6 +1720,7 @@ async fn run_pool(
             &registry,
             segment_index,
             plain,
+            hf,
         )));
     }
 
@@ -1638,6 +1731,10 @@ async fn run_pool(
             Ok((_, WorkerFlow::RangeFallback)) => {
                 drop(active);
                 return Ok(PoolOutcome::Fallback);
+            }
+            Ok((_, WorkerFlow::RateLimited(delay))) => {
+                drop(active);
+                return Ok(PoolOutcome::RateLimited(delay));
             }
             Ok((_, flow)) => {
                 interrupted = Some(flow);
@@ -1680,6 +1777,7 @@ async fn run_pool(
                     &registry,
                     segment_index,
                     plain,
+                    hf,
                 )));
                 continue;
             }
@@ -1690,7 +1788,7 @@ async fn run_pool(
                 break;
             };
             active.push(Box::pin(run_dynamic_worker(
-                network, store, task_id, part, spec, control, &registry, tail_index, plain,
+                network, store, task_id, part, spec, control, &registry, tail_index, plain, hf,
             )));
         }
     }
@@ -1713,6 +1811,7 @@ async fn run_dynamic_worker(
     registry: &Mutex<SegmentRegistry>,
     segment_index: u32,
     plain: bool,
+    hf: Option<&hf::HfDownload>,
 ) -> Result<(u32, WorkerFlow), EngineError> {
     if let Some(flow) = requested_flow(control) {
         return Ok((segment_index, flow));
@@ -1775,6 +1874,7 @@ async fn run_dynamic_worker(
         task_id,
         part,
         spec,
+        hf,
         control,
         request,
         segment_start,
@@ -1827,6 +1927,7 @@ async fn stream_request(
     task_id: &str,
     part: &PartFile,
     spec: &DownloadSpec,
+    hf: Option<&hf::HfDownload>,
     control: &TaskControl,
     request: RequestShape,
     segment_start: u64,
@@ -1913,11 +2014,17 @@ async fn stream_request(
                 return Ok((position, flow, range_total));
             }
             send_attempts += 1;
+            let request_url = match hf {
+                Some(state) => state.current_url(),
+                None => spec.url.clone(),
+            };
             let mut headers = request_headers(spec, current.range_header())?;
-            apply_huggingface_authorization(&mut headers, spec, network.hf_token.as_ref());
+            if hf.is_none() {
+                apply_huggingface_authorization(&mut headers, spec, network.hf_token.as_ref());
+            }
             let response = match get_following_redirects_with_cookies(
                 &network.client,
-                &spec.url,
+                &request_url,
                 headers,
                 network.cookies.as_ref(),
             )
@@ -1935,6 +2042,25 @@ async fn stream_request(
                 Err(error) => return Err(error),
             };
             let status = response.status();
+            if let Some(state) = hf {
+                if status == StatusCode::FORBIDDEN {
+                    state
+                        .refresh(
+                            &request_url,
+                            &network.client,
+                            network.cookies.as_ref(),
+                            &spec.extra_headers,
+                        )
+                        .await?;
+                    continue;
+                }
+                if status == StatusCode::TOO_MANY_REQUESTS && !state.is_reduced() {
+                    let delay = retry::retry_after(response.headers())
+                        .unwrap_or(Duration::from_millis(200));
+                    state.mark_reduced();
+                    return Ok((position, WorkerFlow::RateLimited(delay), range_total));
+                }
+            }
             if current.expects_partial() {
                 if status == StatusCode::OK {
                     // A full response to a ranged request is never written at
@@ -2203,6 +2329,7 @@ enum RangeCheck {
 async fn check_first_range(
     network: &NetworkContext,
     spec: &DownloadSpec,
+    hf: Option<&hf::HfDownload>,
     start: u64,
     end: u64,
 ) -> Result<RangeCheck, EngineError> {
@@ -2215,14 +2342,20 @@ async fn check_first_range(
     let mut attempts = 0usize;
     loop {
         attempts += 1;
+        let request_url = match hf {
+            Some(state) => state.current_url(),
+            None => spec.url.clone(),
+        };
         let mut headers = request_headers(
             spec,
             Some(format!("bytes={start}-{}", request_end.saturating_sub(1))),
         )?;
-        apply_huggingface_authorization(&mut headers, spec, network.hf_token.as_ref());
+        if hf.is_none() {
+            apply_huggingface_authorization(&mut headers, spec, network.hf_token.as_ref());
+        }
         let result = match get_following_redirects_with_cookies(
             &network.client,
-            &spec.url,
+            &request_url,
             headers,
             network.cookies.as_ref(),
         )
@@ -2237,10 +2370,34 @@ async fn check_first_range(
                             "the server returned a different range than requested",
                         ))
                     } else {
+                        if hf.is_some() {
+                            // Complete the revalidation request so the server
+                            // records the successful range before the pool.
+                            drain_prefix(response).await;
+                        }
                         Ok(RangeCheck::Accepted)
                     }
                 }
                 StatusCode::OK => Ok(RangeCheck::Ignored),
+                StatusCode::FORBIDDEN if hf.is_some() => {
+                    if let Some(state) = hf {
+                        state
+                            .refresh(
+                                &request_url,
+                                &network.client,
+                                network.cookies.as_ref(),
+                                &spec.extra_headers,
+                            )
+                            .await?;
+                    }
+                    continue;
+                }
+                StatusCode::TOO_MANY_REQUESTS if hf.is_some() => {
+                    if let Some(state) = hf {
+                        state.mark_reduced();
+                    }
+                    Err(response_status_error(&response, false))
+                }
                 _ => Err(response_status_error(
                     &response,
                     hf::is_resolver_url(&spec.url),
@@ -2255,6 +2412,23 @@ async fn check_first_range(
                 tokio::time::sleep(retry::delay_for_attempt(attempts, error.retry_after())).await;
             }
             Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Read and discard a revalidation prefix so the server completes the request.
+async fn drain_prefix(response: reqwest::Response) {
+    let mut body = response.bytes_stream();
+    let mut drained = 0u64;
+    while let Some(chunk) = body.next().await {
+        match chunk {
+            Ok(chunk) => {
+                drained = drained.saturating_add(chunk.len() as u64);
+                if drained > REVALIDATION_PREFIX_BYTES {
+                    break;
+                }
+            }
+            Err(_) => break,
         }
     }
 }
@@ -2342,84 +2516,115 @@ fn segment_inputs(plan: &SegmentPlan, total: Option<u64>) -> Vec<SegmentInput> {
 /// offset without re-requesting byte zero. A 200 response is classified as a
 /// non-range download and its body is not consumed.
 async fn probe_for_download(
-    client: &Client,
-    cookies: Option<&CookieJar>,
-    hf_token: Option<&SecretValue>,
+    network: &NetworkContext,
     spec: &DownloadSpec,
+    hf: Option<&hf::HfDownload>,
     start: u64,
 ) -> Result<(DownloadMetadata, Option<Vec<u8>>), EngineError> {
-    let mut headers = request_headers(spec, Some(format!("bytes={start}-{start}")))?;
-    apply_huggingface_authorization(&mut headers, spec, hf_token);
-    let is_hf = hf::is_resolver_url(&spec.url);
-    let (response, final_url) =
-        get_following_redirects_with_cookies(client, &spec.url, headers, cookies).await?;
-    let final_url = final_url.as_str().to_string();
+    loop {
+        let request_url = match hf {
+            Some(state) => state.current_url(),
+            None => spec.url.clone(),
+        };
+        let mut headers = request_headers(spec, Some(format!("bytes={start}-{start}")))?;
+        if hf.is_none() {
+            apply_huggingface_authorization(&mut headers, spec, network.hf_token.as_ref());
+        }
+        let is_hf = hf.is_some() || hf::is_resolver_url(&spec.url);
+        let (response, final_url) = get_following_redirects_with_cookies(
+            &network.client,
+            &request_url,
+            headers,
+            network.cookies.as_ref(),
+        )
+        .await?;
+        let final_url = final_url.as_str().to_string();
+        let status = response.status();
 
-    let content_type = header_text(&response, CONTENT_TYPE);
-    if !spec.allow_html && content_type.as_deref().is_some_and(is_html) {
-        return Err(EngineError::new(
-            "HTML_RESPONSE",
-            "the server returned an HTML page instead of a downloadable file",
-        ));
-    }
-
-    let etag = header_text(&response, ETAG);
-    let last_modified = header_text(&response, LAST_MODIFIED);
-    match response.status() {
-        StatusCode::PARTIAL_CONTENT => {
-            let (range_start, total) = parse_content_range(&response)?;
-            if range_start != start {
-                return Err(EngineError::new(
-                    "RANGE_MISMATCH",
-                    "the server returned a different range than requested",
-                ));
+        if let Some(state) = hf {
+            if status == StatusCode::FORBIDDEN {
+                state
+                    .refresh(
+                        &request_url,
+                        &network.client,
+                        network.cookies.as_ref(),
+                        &spec.extra_headers,
+                    )
+                    .await?;
+                continue;
             }
-            // The probe asks for exactly one byte. Read at most one byte from
-            // the stream so an overlong or mislabelled body cannot contribute
-            // extra bytes to the persisted prefix.
-            let mut body = response.bytes_stream();
-            let first_byte = match body.next().await {
-                Some(Ok(chunk)) => Some(chunk[..chunk.len().min(1)].to_vec()),
-                Some(Err(_)) => {
-                    return Err(EngineError::retryable(
-                        "NETWORK_INTERRUPTED",
-                        "the probe response body was interrupted",
-                    ))
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                state.mark_reduced();
+                return Err(response_status_error(&response, false));
+            }
+        }
+
+        let content_type = header_text(&response, CONTENT_TYPE);
+        if !spec.allow_html && content_type.as_deref().is_some_and(is_html) {
+            return Err(EngineError::new(
+                "HTML_RESPONSE",
+                "the server returned an HTML page instead of a downloadable file",
+            ));
+        }
+
+        let etag = header_text(&response, ETAG);
+        let last_modified = header_text(&response, LAST_MODIFIED);
+        return match status {
+            StatusCode::PARTIAL_CONTENT => {
+                let (range_start, total) = parse_content_range(&response)?;
+                if range_start != start {
+                    return Err(EngineError::new(
+                        "RANGE_MISMATCH",
+                        "the server returned a different range than requested",
+                    ));
                 }
-                None => None,
-            };
-            Ok((
+                // The probe asks for exactly one byte. Read at most one byte
+                // from the stream so an overlong or mislabelled body cannot
+                // contribute extra bytes to the persisted prefix.
+                let mut body = response.bytes_stream();
+                let first_byte = match body.next().await {
+                    Some(Ok(chunk)) => Some(chunk[..chunk.len().min(1)].to_vec()),
+                    Some(Err(_)) => {
+                        return Err(EngineError::retryable(
+                            "NETWORK_INTERRUPTED",
+                            "the probe response body was interrupted",
+                        ))
+                    }
+                    None => None,
+                };
+                Ok((
+                    DownloadMetadata {
+                        total_bytes: total,
+                        range_supported: true,
+                        etag,
+                        last_modified,
+                        final_url: Some(final_url),
+                    },
+                    first_byte,
+                ))
+            }
+            StatusCode::OK => Ok((
                 DownloadMetadata {
-                    total_bytes: total,
-                    range_supported: true,
+                    total_bytes: response.content_length(),
+                    range_supported: false,
                     etag,
                     last_modified,
                     final_url: Some(final_url),
                 },
-                first_byte,
-            ))
-        }
-        StatusCode::OK => Ok((
-            DownloadMetadata {
-                total_bytes: response.content_length(),
-                range_supported: false,
-                etag,
-                last_modified,
-                final_url: Some(final_url),
-            },
-            None,
-        )),
-        StatusCode::RANGE_NOT_SATISFIABLE => Ok((
-            DownloadMetadata {
-                total_bytes: Some(parse_unsatisfied_total(&response)?),
-                range_supported: false,
-                etag,
-                last_modified,
-                final_url: Some(final_url),
-            },
-            None,
-        )),
-        _ => Err(response_status_error(&response, is_hf)),
+                None,
+            )),
+            StatusCode::RANGE_NOT_SATISFIABLE => Ok((
+                DownloadMetadata {
+                    total_bytes: Some(parse_unsatisfied_total(&response)?),
+                    range_supported: false,
+                    etag,
+                    last_modified,
+                    final_url: Some(final_url),
+                },
+                None,
+            )),
+            _ => Err(response_status_error(&response, is_hf)),
+        };
     }
 }
 
