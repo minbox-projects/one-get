@@ -198,6 +198,7 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 default_destination: destination.clone(),
                 timeouts: TimeoutPolicy::default(),
                 progress_persist_interval: std::time::Duration::from_millis(250),
+                proxy: None,
             })
             .ok()
         })

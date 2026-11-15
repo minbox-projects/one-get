@@ -142,6 +142,7 @@ impl Harness {
             default_destination: self.destination.clone(),
             timeouts,
             progress_persist_interval: Duration::from_millis(10),
+            proxy: None,
         }
     }
 

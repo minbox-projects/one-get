@@ -222,6 +222,11 @@ impl EngineService {
         )
     }
 
+    /// Replace the proxy used by later engine requests.
+    pub fn set_proxy(&self, proxy: Option<http::ProxyConfig>) -> Result<(), EngineError> {
+        self.call(move |reply| Command::SetProxy(proxy, reply), expect_unit)
+    }
+
     /// Pause active downloads, stop the request loop, and refuse later work.
     pub fn shutdown(&self) {
         if self.stopped.swap(true, Ordering::SeqCst) {
@@ -279,6 +284,7 @@ enum Command {
         global_rate_limit: Option<u64>,
         reply: ReplySender,
     },
+    SetProxy(Option<http::ProxyConfig>, ReplySender),
     Shutdown(Sender<Result<(), EngineError>>),
 }
 
@@ -443,6 +449,10 @@ async fn handle_command(engine: &Rc<Engine>, run: &mut Option<RunFuture>, comman
         } => {
             let result = engine.set_max_concurrent(max_concurrent);
             engine.set_global_rate_limit(global_rate_limit);
+            let _ = reply.send(result.map(|()| Reply::Unit));
+        }
+        Command::SetProxy(proxy, reply) => {
+            let result = engine.set_proxy(proxy);
             let _ = reply.send(result.map(|()| Reply::Unit));
         }
         Command::Shutdown(_) => {}

@@ -14,12 +14,16 @@ use crate::api::pairing_store::{PairedClient, PairingCode, PairingStore};
 use crate::api::server::ApiServerHandle;
 use crate::commands::app::{AutostartService, NotificationService, QuitService, SecretService};
 use crate::commands::kernel::KernelRuntime;
-use crate::config::{Settings, SettingsStore};
+use crate::config::{ProxyMode, Settings, SettingsStore};
+use crate::engine::http::ProxyConfig;
 use crate::engine::service::EngineService;
 use crate::error::AppError;
 use crate::logging::Logger;
 use crate::platform::deeplink::DeepLinkEvent;
 use crate::platform::paths::AppPaths;
+use crate::platform::proxy::{
+    resolve_proxy, PlatformSystemProxySource, ProxyResolution, SystemProxySource,
+};
 use crate::video::service::VideoService;
 
 /// Browser-integration availability, pairing state, and one pending prefill.
@@ -128,6 +132,8 @@ pub struct AppState {
     engine: Option<Arc<EngineService>>,
     kernel: Option<Arc<KernelRuntime>>,
     video: Option<Arc<VideoService>>,
+    system_proxy: Arc<dyn SystemProxySource>,
+    proxy_unavailable_reason: Mutex<Option<String>>,
     pairing: Mutex<PairingRuntime>,
     api_server: Mutex<Option<ApiServerHandle>>,
     last_event: Mutex<DeepLinkEvent>,
@@ -155,6 +161,8 @@ impl AppState {
             engine: None,
             kernel: None,
             video: None,
+            system_proxy: Arc::new(PlatformSystemProxySource),
+            proxy_unavailable_reason: Mutex::new(None),
             pairing: Mutex::new(PairingRuntime::unavailable("PAIRING_UNAVAILABLE")),
             api_server: Mutex::new(None),
             last_event: Mutex::new(DeepLinkEvent::rejected(
@@ -179,6 +187,12 @@ impl AppState {
     /// Attach the long-lived video download service.
     pub fn with_video(mut self, video: Arc<VideoService>) -> Self {
         self.video = Some(video);
+        self
+    }
+
+    /// Replace the system-proxy source; tests use this to inject a fixture.
+    pub fn with_system_proxy_source(mut self, source: Arc<dyn SystemProxySource>) -> Self {
+        self.system_proxy = source;
         self
     }
 
@@ -301,11 +315,109 @@ impl AppState {
         self.lock_settings().is_recovered()
     }
 
-    /// Persist settings and return the store's resulting snapshot.
+    /// Persist settings, then apply the effective proxy and credential state.
     pub fn save_settings(&self, settings: Settings) -> Result<Settings, AppError> {
-        let mut store = self.lock_settings();
-        store.save(settings)?;
-        Ok(store.settings())
+        let saved = {
+            let mut store = self.lock_settings();
+            store.save(settings)?;
+            store.settings()
+        };
+        self.apply_proxy_settings(&saved)?;
+        Ok(saved)
+    }
+
+    /// The last stable reason a system proxy could not be used.
+    pub fn proxy_unavailable_reason(&self) -> Option<String> {
+        self.proxy_unavailable_reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Resolve the saved proxy configuration and apply it to the live engine.
+    ///
+    /// Direct and system modes delete stored proxy credentials because those
+    /// modes never attach authentication. An unavailable system proxy connects
+    /// directly and records only a stable reason code.
+    fn apply_proxy_settings(&self, settings: &Settings) -> Result<(), AppError> {
+        let credentials = self.proxy_credentials()?;
+        let resolution = resolve_proxy(
+            settings,
+            credentials
+                .as_ref()
+                .map(|(username, password)| (username.as_str(), password.as_str())),
+            self.system_proxy.as_ref(),
+        );
+
+        let effective = match &resolution {
+            ProxyResolution::Proxy(resolved) => {
+                self.set_proxy_unavailable_reason(None);
+                Some(ProxyConfig {
+                    url: resolved.url.clone(),
+                    username: resolved.username.clone(),
+                    password: resolved.password.clone(),
+                })
+            }
+            ProxyResolution::Direct => {
+                self.set_proxy_unavailable_reason(None);
+                None
+            }
+            ProxyResolution::Unavailable { reason } => {
+                self.set_proxy_unavailable_reason(Some(reason.clone()));
+                None
+            }
+        };
+
+        if let Some(engine) = &self.engine {
+            engine.set_proxy(effective.clone())?;
+        }
+        if let Some(kernel) = &self.kernel {
+            kernel.set_proxy(effective.clone());
+        }
+        if let Some(video) = &self.video {
+            video
+                .set_proxy(effective)
+                .map_err(|error| AppError::new(error.code(), error.message()))?;
+        }
+
+        if matches!(settings.proxy_mode, ProxyMode::Direct | ProxyMode::System) {
+            let secrets = self.secrets();
+            // A credentials store that is unavailable must not make an
+            // otherwise valid settings save fail; there is simply nothing to
+            // attach in these modes.
+            let _ = secrets.delete_secret(crate::commands::app::PROXY_USERNAME_KEY);
+            let _ = secrets.delete_secret(crate::commands::app::PROXY_PASSWORD_KEY);
+        }
+        Ok(())
+    }
+
+    fn proxy_credentials(&self) -> Result<Option<(String, String)>, AppError> {
+        let secrets = self.secrets();
+        let Some(username) = secrets
+            .get_secret(crate::commands::app::PROXY_USERNAME_KEY)
+            .ok()
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        let Some(password) = secrets
+            .get_secret(crate::commands::app::PROXY_PASSWORD_KEY)
+            .ok()
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        Ok(Some((
+            username.expose_secret().to_string(),
+            password.expose_secret().to_string(),
+        )))
+    }
+
+    fn set_proxy_unavailable_reason(&self, reason: Option<String>) {
+        *self
+            .proxy_unavailable_reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = reason;
     }
 
     /// The most recently handled deep-link event.

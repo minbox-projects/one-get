@@ -130,6 +130,7 @@ impl Harness {
             default_destination: self.destination.clone(),
             timeouts: TimeoutPolicy::default(),
             progress_persist_interval: Duration::from_millis(10),
+            proxy: None,
         }
     }
 

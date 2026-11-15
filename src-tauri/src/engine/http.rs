@@ -22,10 +22,10 @@ const MAX_URL_BYTES: usize = 8 * 1024;
 /// Maximum number of redirects followed before the chain fails.
 const MAX_REDIRECTS: usize = 10;
 
-/// An in-memory HTTP proxy configuration.
+/// An in-memory HTTP, HTTPS, or SOCKS5 proxy configuration.
 ///
 /// The URL must not embed credentials; the optional username and password are
-/// applied as basic authentication and are never persisted or logged.
+/// applied as proxy authentication and are never persisted or logged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProxyConfig {
     /// Proxy URL without embedded userinfo.
@@ -86,6 +86,9 @@ pub fn validate_url(input: &str) -> Result<String, EngineError> {
 }
 
 /// Parse and validate a proxy URL that must not embed credentials.
+///
+/// HTTP, HTTPS, and SOCKS5 proxies are accepted. Credentials are supplied
+/// separately through [`ProxyConfig`] so they never enter the URL.
 pub fn validate_proxy_url(input: &str) -> Result<String, EngineError> {
     if input.is_empty() || input.len() > MAX_URL_BYTES {
         return Err(invalid_proxy("the proxy URL is empty or too long"));
@@ -95,8 +98,10 @@ pub fn validate_proxy_url(input: &str) -> Result<String, EngineError> {
     }
 
     let url = Url::parse(input).map_err(|_| invalid_proxy("the proxy URL is not well formed"))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(invalid_proxy("only HTTP and HTTPS proxies are supported"));
+    if !matches!(url.scheme(), "http" | "https" | "socks5") {
+        return Err(invalid_proxy(
+            "only HTTP, HTTPS, and SOCKS5 proxies are supported",
+        ));
     }
     if url.host_str().map(str::is_empty).unwrap_or(true) {
         return Err(invalid_proxy("the proxy URL does not contain a host"));

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+use oneget_lib::engine::http::ProxyConfig;
 use oneget_lib::engine::state::TaskState;
 use oneget_lib::kernel::catalog::Target;
 use oneget_lib::kernel::store::{ComponentInstall, ComponentStore, InstalledFile};
@@ -149,6 +150,7 @@ impl Harness {
             default_destination: self.destination.clone(),
             timeouts,
             progress_persist_interval: Duration::from_millis(10),
+            proxy: None,
         }
     }
 
@@ -702,6 +704,159 @@ fn download_js_runtime_failure_is_typed() {
     assert!(
         output_files(&harness.destination).is_empty(),
         "a JavaScript-runtime failure must create no final file"
+    );
+
+    service.shutdown().expect("shutdown succeeds");
+}
+
+// ---------------------------------------------------------------------------
+// Global proxy delivery to the yt-dlp child: environment variables only.
+// ---------------------------------------------------------------------------
+
+const RECORDING_PROXY_URL: &str = "http://127.0.0.1:18931";
+const RECORDING_PROXY_AUTHORITY: &str = "127.0.0.1:18931";
+const RECORDING_PROXY_USER: &str = "oneget-download-proxy-user";
+const RECORDING_PROXY_PASSWORD: &str = "oneget-download-proxy-password-secret";
+
+impl Harness {
+    /// Install a recording mock as the yt-dlp component: the mock writes its
+    /// argv and environment to files under the returned directory, then exits
+    /// with a deterministic failure so the task fails VIDEO_PROCESS_FAILED.
+    fn install_recording_mock(&self) -> PathBuf {
+        let record_dir = self.destination.join(".recording");
+        fs::create_dir_all(&record_dir).expect("record dir creates");
+        let yt_dir = self.kernel_root.join("yt-dlp/1-test");
+        let ffmpeg_dir = self.kernel_root.join("ffmpeg/2-test");
+        fs::create_dir_all(&yt_dir).expect("yt-dlp version dir creates");
+        fs::create_dir_all(&ffmpeg_dir).expect("ffmpeg version dir creates");
+
+        let yt_path = write_recording_script(&yt_dir, &record_dir);
+        let ffmpeg_path = copy_fixture(&self.fixture, &ffmpeg_dir, "ffmpeg");
+        let ffprobe_path = copy_fixture(&self.fixture, &ffmpeg_dir, "ffprobe");
+
+        let yt_files = vec![installed_file("yt-dlp", file_name(&yt_path), &yt_path)];
+        let ffmpeg_files = vec![
+            installed_file("ffmpeg", file_name(&ffmpeg_path), &ffmpeg_path),
+            installed_file("ffprobe", file_name(&ffprobe_path), &ffprobe_path),
+        ];
+        self.record("yt-dlp", "test", 1, yt_files);
+        self.record("ffmpeg", "test", 2, ffmpeg_files);
+        record_dir
+    }
+}
+
+#[cfg(unix)]
+fn write_recording_script(dir: &Path, record_dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let quote = |path: &Path| {
+        format!(
+            "'{}'",
+            path.to_str()
+                .expect("record path is UTF-8")
+                .replace('\'', "'\\''")
+        )
+    };
+    let argv = quote(&record_dir.join("argv.txt"));
+    let env = quote(&record_dir.join("env.txt"));
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > {argv}\nenv > {env}\necho \"mock recording failure\" >&2\nexit 3\n"
+    );
+    let path = dir.join("yt-dlp-proxy-env");
+    fs::write(&path, script).expect("recording script writes");
+    let mut permissions = fs::metadata(&path).expect("script metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).expect("script becomes executable");
+    path
+}
+
+#[cfg(windows)]
+fn write_recording_script(dir: &Path, record_dir: &Path) -> PathBuf {
+    let quote = |path: &Path| {
+        format!(
+            "\"{}\"",
+            path.to_str()
+                .expect("record path is UTF-8")
+                .replace('"', "\"\"")
+        )
+    };
+    let argv = quote(&record_dir.join("argv.txt"));
+    let env = quote(&record_dir.join("env.txt"));
+    let script = format!(
+        "@echo off\r\n(for %%A in (%*) do @echo %%A)>{argv}\r\nset>{env}\r\necho mock recording failure 1>&2\r\nexit /b 3\r\n"
+    );
+    let path = dir.join("yt-dlp-proxy-env.cmd");
+    fs::write(&path, script).expect("recording script writes");
+    path
+}
+
+#[test]
+fn global_proxy_is_delivered_to_the_child_via_environment_only() {
+    let harness = Harness::new();
+    let record_dir = harness.install_recording_mock();
+    let mut config = harness.config(harness.store(), TimeoutPolicy::default());
+    config.proxy = Some(ProxyConfig {
+        url: RECORDING_PROXY_URL.to_string(),
+        username: Some(RECORDING_PROXY_USER.to_string()),
+        password: Some(RECORDING_PROXY_PASSWORD.to_string()),
+    });
+    let service = VideoService::start(config).expect("video service starts");
+    let id = service
+        .add(request(&harness, "proxy-env.mp4", true))
+        .expect("video task is added");
+    let reader = harness.store();
+
+    let task = wait_for_state(&reader, &id, TaskState::Failed);
+    assert_eq!(
+        task.error_code.as_deref(),
+        Some("VIDEO_PROCESS_FAILED"),
+        "the recording mock exits with a deterministic failure"
+    );
+
+    let env = fs::read_to_string(record_dir.join("env.txt"))
+        .expect("the child must record its environment");
+    for variable in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        let lines: Vec<&str> = env
+            .lines()
+            .filter(|line| line.starts_with(&format!("{variable}=")))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "{variable} must be set exactly once for the child"
+        );
+        let line = lines[0];
+        assert!(
+            line.contains(RECORDING_PROXY_AUTHORITY),
+            "{variable} must carry the proxy authority: {line}"
+        );
+        assert!(
+            line.contains(RECORDING_PROXY_USER),
+            "{variable} must carry the proxy username"
+        );
+        assert!(
+            line.contains(RECORDING_PROXY_PASSWORD),
+            "{variable} must carry the proxy password"
+        );
+    }
+
+    let argv =
+        fs::read_to_string(record_dir.join("argv.txt")).expect("the child must record its argv");
+    assert!(
+        !argv.contains(RECORDING_PROXY_USER),
+        "the child argv must not carry the proxy username"
+    );
+    assert!(
+        !argv.contains(RECORDING_PROXY_PASSWORD),
+        "the child argv must not carry the proxy password"
+    );
+    assert!(
+        !argv.contains(RECORDING_PROXY_AUTHORITY),
+        "the child argv must not carry the proxy authority"
+    );
+    assert!(
+        !argv.lines().any(|argument| argument == "--proxy"),
+        "the child argv must not carry a --proxy argument"
     );
 
     service.shutdown().expect("shutdown succeeds");

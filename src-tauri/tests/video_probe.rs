@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use oneget_lib::engine::http::ProxyConfig;
 use oneget_lib::video::error::VideoError;
 use oneget_lib::video::metadata::{VideoFormat, VideoMetadata};
 use oneget_lib::video::probe::{probe_video, ProbeOptions};
@@ -26,6 +27,7 @@ fn probe_options(program: PathBuf, timeout: Duration) -> ProbeOptions {
         deno: None,
         cookies_file: None,
         proxy_url: None,
+        proxy: None,
         timeout,
     }
 }
@@ -670,4 +672,239 @@ async fn quality_model_selector_requests_merge_for_video_only() {
         !audio_model.audio[0].format_selector.contains('+'),
         "an audio-only selector must not request a merge"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Proxy delivery to the yt-dlp child: environment variables only, never argv.
+// ---------------------------------------------------------------------------
+
+const GLOBAL_PROXY_URL: &str = "http://127.0.0.1:18923";
+const GLOBAL_PROXY_AUTHORITY: &str = "127.0.0.1:18923";
+const GLOBAL_PROXY_USER: &str = "oneget-probe-proxy-user";
+const GLOBAL_PROXY_PASSWORD: &str = "oneget-probe-proxy-password-secret";
+const PER_VIDEO_PROXY_URL: &str = "http://127.0.0.1:18924";
+const PER_VIDEO_PROXY_AUTHORITY: &str = "127.0.0.1:18924";
+
+const RECORDED_PAYLOAD: &str = r#"{
+    "id": "fixture-proxy",
+    "title": "Proxy Fixture",
+    "duration": 42.0,
+    "uploader": "Fixture",
+    "is_live": false,
+    "formats": [
+        {
+            "format_id": "137",
+            "height": 1080,
+            "filesize": 1024,
+            "vcodec": "avc1.640028",
+            "ext": "mp4"
+        }
+    ]
+}"#;
+
+/// A generated mock yt-dlp that records its argv and environment to files
+/// under a temp dir, then executes the deterministic fixture in emit mode so
+/// the probe succeeds.
+struct RecordingProbe {
+    _dir: TempDir,
+    program: PathBuf,
+    argv_path: PathBuf,
+    env_path: PathBuf,
+}
+
+impl RecordingProbe {
+    fn emit(body: &str) -> Self {
+        let dir = tempfile::tempdir().expect("probe temp dir");
+        let payload = dir.path().join("probe.json");
+        std::fs::write(&payload, body).expect("probe payload writes");
+        let argv_path = dir.path().join("argv.txt");
+        let env_path = dir.path().join("env.txt");
+        let program = recording_program(dir.path(), &argv_path, &env_path, &payload);
+        Self {
+            _dir: dir,
+            program,
+            argv_path,
+            env_path,
+        }
+    }
+
+    fn options(&self, timeout: Duration) -> ProbeOptions {
+        probe_options(self.program.clone(), timeout)
+    }
+
+    fn recorded_argv(&self) -> String {
+        std::fs::read_to_string(&self.argv_path).expect("argv record must exist")
+    }
+
+    fn recorded_env(&self) -> String {
+        std::fs::read_to_string(&self.env_path).expect("environment record must exist")
+    }
+}
+
+#[cfg(unix)]
+fn recording_program(dir: &Path, argv_path: &Path, env_path: &Path, payload: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = shell_quote(env!("CARGO_BIN_EXE_video_fixture"));
+    let argv = shell_quote(argv_path.to_str().expect("argv path is UTF-8"));
+    let env = shell_quote(env_path.to_str().expect("env path is UTF-8"));
+    let payload = shell_quote(payload.to_str().expect("payload path is UTF-8"));
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > {argv}\nenv > {env}\nexec {fixture} emit --path {payload}\n"
+    );
+    let path = dir.join("mock-yt-dlp-record");
+    std::fs::write(&path, script).expect("mock script writes");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("mock script metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path, permissions).expect("mock script becomes executable");
+    path
+}
+
+#[cfg(windows)]
+fn recording_program(dir: &Path, argv_path: &Path, env_path: &Path, payload: &Path) -> PathBuf {
+    let quote = |argument: &str| format!("\"{}\"", argument.replace('"', "\"\""));
+    let fixture = quote(env!("CARGO_BIN_EXE_video_fixture"));
+    let argv = quote(argv_path.to_str().expect("argv path is UTF-8"));
+    let env = quote(env_path.to_str().expect("env path is UTF-8"));
+    let payload = quote(payload.to_str().expect("payload path is UTF-8"));
+    let script = format!(
+        "@echo off\r\n(for %%A in (%*) do @echo %%A)>{argv}\r\nset>{env}\r\n{fixture} emit --path {payload}\r\n"
+    );
+    let path = dir.join("mock-yt-dlp-record.cmd");
+    std::fs::write(&path, script).expect("mock script writes");
+    path
+}
+
+fn proxy_env_lines<'a>(env: &'a str, variable: &str) -> Vec<&'a str> {
+    env.lines()
+        .filter(|line| line.starts_with(&format!("{variable}=")))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_global_proxy_credentials_arrive_via_environment_only() {
+    let mock = RecordingProbe::emit(RECORDED_PAYLOAD);
+    let mut options = mock.options(Duration::from_secs(10));
+    options.proxy = Some(ProxyConfig {
+        url: GLOBAL_PROXY_URL.to_string(),
+        username: Some(GLOBAL_PROXY_USER.to_string()),
+        password: Some(GLOBAL_PROXY_PASSWORD.to_string()),
+    });
+
+    let metadata = probe_video("https://example.com/watch?v=fixture", &options)
+        .await
+        .expect("the probe must succeed while recording the proxy environment");
+    assert_eq!(metadata.title, "Proxy Fixture");
+
+    let env = mock.recorded_env();
+    for variable in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        let lines = proxy_env_lines(&env, variable);
+        assert_eq!(
+            lines.len(),
+            1,
+            "{variable} must be set exactly once for the child"
+        );
+        let line = lines[0];
+        assert!(
+            line.contains(GLOBAL_PROXY_AUTHORITY),
+            "{variable} must carry the proxy authority: {line}"
+        );
+        assert!(
+            line.contains(GLOBAL_PROXY_USER),
+            "{variable} must carry the proxy username"
+        );
+        assert!(
+            line.contains(GLOBAL_PROXY_PASSWORD),
+            "{variable} must carry the proxy password"
+        );
+    }
+
+    let argv = mock.recorded_argv();
+    assert!(
+        !argv.contains(GLOBAL_PROXY_USER),
+        "the child argv must not carry the proxy username"
+    );
+    assert!(
+        !argv.contains(GLOBAL_PROXY_PASSWORD),
+        "the child argv must not carry the proxy password"
+    );
+    assert!(
+        !argv.contains(GLOBAL_PROXY_AUTHORITY),
+        "the child argv must not carry the proxy authority"
+    );
+    assert!(
+        !argv.lines().any(|argument| argument == "--proxy"),
+        "the child argv must not carry a --proxy argument"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_per_video_proxy_url_overrides_the_global_proxy() {
+    let mock = RecordingProbe::emit(RECORDED_PAYLOAD);
+    let mut options = mock.options(Duration::from_secs(10));
+    options.proxy = Some(ProxyConfig {
+        url: GLOBAL_PROXY_URL.to_string(),
+        username: Some(GLOBAL_PROXY_USER.to_string()),
+        password: Some(GLOBAL_PROXY_PASSWORD.to_string()),
+    });
+    options.proxy_url = Some(PER_VIDEO_PROXY_URL.to_string());
+
+    let metadata = probe_video("https://example.com/watch?v=fixture", &options)
+        .await
+        .expect("the probe must succeed with the per-video override");
+    assert_eq!(metadata.title, "Proxy Fixture");
+
+    let env = mock.recorded_env();
+    for variable in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        let lines = proxy_env_lines(&env, variable);
+        assert_eq!(
+            lines.len(),
+            1,
+            "{variable} must be set exactly once for the child"
+        );
+        let line = lines[0];
+        assert!(
+            line.contains(PER_VIDEO_PROXY_AUTHORITY),
+            "{variable} must carry the per-video proxy authority: {line}"
+        );
+        assert!(
+            !line.contains(GLOBAL_PROXY_AUTHORITY),
+            "{variable} must not carry the global proxy authority: {line}"
+        );
+    }
+    assert!(
+        !env.contains(GLOBAL_PROXY_USER) && !env.contains(GLOBAL_PROXY_PASSWORD),
+        "the global proxy credentials must not reach the child when a per-video proxy is set"
+    );
+
+    let argv = mock.recorded_argv();
+    assert!(!argv.contains(GLOBAL_PROXY_USER));
+    assert!(!argv.contains(GLOBAL_PROXY_PASSWORD));
+    assert!(!argv.contains(GLOBAL_PROXY_AUTHORITY));
+    assert!(!argv.contains(PER_VIDEO_PROXY_AUTHORITY));
+    assert!(!argv.lines().any(|argument| argument == "--proxy"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_without_proxy_injects_no_proxy_variables() {
+    let mock = RecordingProbe::emit(RECORDED_PAYLOAD);
+    let options = mock.options(Duration::from_secs(10));
+
+    let metadata = probe_video("https://example.com/watch?v=fixture", &options)
+        .await
+        .expect("the probe must succeed without a proxy");
+    assert_eq!(metadata.title, "Proxy Fixture");
+
+    let env = mock.recorded_env();
+    for variable in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        assert!(
+            proxy_env_lines(&env, variable).is_empty(),
+            "{variable} must not be injected when no proxy is configured: {env}"
+        );
+    }
+
+    let argv = mock.recorded_argv();
+    assert!(!argv.lines().any(|argument| argument == "--proxy"));
 }

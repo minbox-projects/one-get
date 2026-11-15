@@ -2133,3 +2133,795 @@ async fn safe_header_reaches_the_fixture_but_is_not_persisted_for_replay() {
         "reopening the store must not reveal a persisted header value"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Step 2 behavior slice: proxy resolution, authenticated transport, system
+// proxy injection, and credential clearing.
+//
+// These tests exercise the public boundary only:
+// `oneget_lib::platform::proxy` (system source discovery and
+// `resolve_proxy`), `oneget_lib::engine::http::{validate_proxy_url,
+// ProxyConfig}`, the engine scheduler, the loopback API server, and the
+// settings/secret commands. The HTTP fixture proxy cases already present in
+// this file cover the manual HTTP proxy behavior; HTTP-407 and SOCKS5 cases
+// are extended here.
+// ---------------------------------------------------------------------------
+
+#[path = "support/socks5_server.rs"]
+mod socks5_server;
+
+use oneget_lib::api::clock::SystemClock;
+use oneget_lib::api::desktop::{DesktopBridge, PendingPrefill};
+use oneget_lib::api::error::ApiError;
+use oneget_lib::api::pairing_store::PairingStore;
+use oneget_lib::api::protocol::CaptureItem;
+use oneget_lib::api::rate_limit::RateLimitPolicy;
+use oneget_lib::api::server::{ApiServerConfig, ApiServerHandle};
+use oneget_lib::app_state::AppState;
+use oneget_lib::commands::app::{
+    proxy_credentials_save, proxy_credentials_status, settings_save, AutostartService,
+    NotificationSendResult, NotificationService, NotificationStatus, QuitService,
+    SecretRoundTripResult, SecretService, SecretStatus,
+};
+use oneget_lib::config::{ProxyMode, ProxyType, Settings, SettingsStore};
+use oneget_lib::platform::paths::AppPaths;
+use oneget_lib::platform::secrets::{MemorySecretStore, SecretError, SecretStore, SecretValue};
+use serde_json::{json, Value};
+use socks5_server::{Socks5Credentials, Socks5Server};
+
+fn manual_proxy_settings(proxy_type: ProxyType, host: &str, port: u16) -> Settings {
+    Settings {
+        proxy_mode: ProxyMode::Manual,
+        proxy_type,
+        proxy_host: Some(host.to_string()),
+        proxy_port: Some(port),
+        ..Settings::default()
+    }
+}
+
+#[tokio::test]
+async fn socks5_proxy_with_correct_credentials_completes_and_records_the_tunnel() {
+    const SOCKS_USER: &str = "oneget-socks-user";
+    const SOCKS_PASSWORD: &str = "oneget-socks-password-secret";
+    let body = non_periodic_bytes(256 * 1024);
+    let hash = sha256_hex(&body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        ..Default::default()
+    });
+    let proxy = Socks5Server::start(Some(Socks5Credentials {
+        username: SOCKS_USER.to_string(),
+        password: SOCKS_PASSWORD.to_string(),
+    }));
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    engine
+        .set_proxy(Some(ProxyConfig {
+            url: proxy.url(),
+            username: Some(SOCKS_USER.to_string()),
+            password: Some(SOCKS_PASSWORD.to_string()),
+        }))
+        .expect("configure the authenticated SOCKS5 proxy");
+
+    let id = engine
+        .add_task(make_spec(
+            fixture.url("/socks5/payload.bin"),
+            "socks5-payload.bin",
+            2,
+            Some(hash.clone()),
+        ))
+        .expect("add task");
+
+    run_engine_to_terminal(&engine, engine.store(), &id).await;
+
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(
+        task.state,
+        TaskState::Completed,
+        "the SOCKS5 download must complete, observed {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+    assert_eq!(
+        std::fs::read(dest.path().join("socks5-payload.bin")).expect("read final"),
+        body,
+        "the SOCKS5 download must deliver the fixture bytes"
+    );
+
+    let origin_authority = fixture
+        .url("")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    let tunnels = proxy.tunnels();
+    assert!(
+        tunnels.iter().any(|tunnel| tunnel.authenticated
+            && tunnel.username.as_deref() == Some(SOCKS_USER)
+            && tunnel.target.as_deref() == Some(origin_authority.as_str())),
+        "the fixture must record an authenticated tunnel to {origin_authority} with the configured username, got {tunnels:?}"
+    );
+    for request in fixture.requests() {
+        assert_eq!(
+            request
+                .headers
+                .keys()
+                .filter(|name| name.eq_ignore_ascii_case("proxy-authorization"))
+                .count(),
+            0,
+            "the origin must never see the SOCKS5 credential"
+        );
+    }
+}
+
+#[tokio::test]
+async fn socks5_proxy_with_wrong_password_fails_with_a_typed_error_and_no_final_file() {
+    const SOCKS_USER: &str = "oneget-socks-user";
+    const GOOD_PASSWORD: &str = "oneget-socks-good-secret";
+    const WRONG_PASSWORD: &str = "oneget-socks-wrong-secret";
+    let body = non_periodic_bytes(128 * 1024);
+    let fixture = RangeServer::start(FixtureConfig {
+        body,
+        ..Default::default()
+    });
+    let proxy = Socks5Server::start(Some(Socks5Credentials {
+        username: SOCKS_USER.to_string(),
+        password: GOOD_PASSWORD.to_string(),
+    }));
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    engine
+        .set_proxy(Some(ProxyConfig {
+            url: proxy.url(),
+            username: Some(SOCKS_USER.to_string()),
+            password: Some(WRONG_PASSWORD.to_string()),
+        }))
+        .expect("configure the SOCKS5 proxy with a wrong password");
+
+    let id = engine
+        .add_task(make_spec(
+            fixture.url("/socks5/wrong-password.bin"),
+            "socks5-wrong-password.bin",
+            1,
+            None,
+        ))
+        .expect("add task");
+
+    run_engine_to_terminal(&engine, engine.store(), &id).await;
+
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(
+        task.state,
+        TaskState::Failed,
+        "a rejected SOCKS5 authentication must fail the task, observed {:?}",
+        task.state
+    );
+    let code = task
+        .error_code
+        .clone()
+        .expect("a failed SOCKS5 authentication must carry a typed error code");
+    assert!(!code.is_empty(), "the typed error code must not be empty");
+    assert!(
+        !dest.path().join("socks5-wrong-password.bin").exists(),
+        "a rejected SOCKS5 authentication must not create a final file"
+    );
+
+    let tunnels = proxy.tunnels();
+    assert!(
+        tunnels.iter().any(|tunnel| !tunnel.authenticated),
+        "the fixture must record the rejected authentication attempt, got {tunnels:?}"
+    );
+    assert!(
+        fixture.requests().is_empty(),
+        "the origin must not receive a request rejected by the SOCKS5 fixture"
+    );
+}
+
+#[test]
+fn validate_proxy_url_accepts_socks5_and_still_rejects_embedded_userinfo() {
+    let accepted = oneget_lib::engine::http::validate_proxy_url("socks5://127.0.0.1:1080");
+    assert!(
+        accepted.is_ok(),
+        "socks5 proxies must be accepted, got {accepted:?}"
+    );
+    for input in [
+        "socks5://user:pass@127.0.0.1:1080",
+        "http://user:pass@127.0.0.1:8080",
+    ] {
+        let error = oneget_lib::engine::http::validate_proxy_url(input)
+            .expect_err("a proxy URL with embedded userinfo must be rejected");
+        assert_eq!(
+            error.code(),
+            "INVALID_PROXY_URL",
+            "expected INVALID_PROXY_URL for {input}, got {}",
+            error.code()
+        );
+    }
+}
+
+/// Seed data for the fake system proxy source. The fixture rebuilds a fresh
+/// `SystemProxyDiscovery` on every call, so the fake never depends on any
+/// trait bound of the real discovery enum.
+#[derive(Clone)]
+enum FakeDiscovery {
+    Proxy {
+        http: Option<String>,
+        https: Option<String>,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+struct FakeSystemProxy {
+    discovery: FakeDiscovery,
+}
+
+impl oneget_lib::platform::proxy::SystemProxySource for FakeSystemProxy {
+    fn discover(&self) -> oneget_lib::platform::proxy::SystemProxyDiscovery {
+        match &self.discovery {
+            FakeDiscovery::Proxy { http, https } => {
+                oneget_lib::platform::proxy::SystemProxyDiscovery::Proxy {
+                    http: http.clone(),
+                    https: https.clone(),
+                }
+            }
+            FakeDiscovery::Unavailable { reason } => {
+                oneget_lib::platform::proxy::SystemProxyDiscovery::Unavailable {
+                    reason: reason.clone(),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn direct_mode_resolves_direct_even_when_a_system_proxy_exists_and_credentials_are_present() {
+    let settings = Settings::default(); // proxy mode: direct
+    let source = FakeSystemProxy {
+        discovery: FakeDiscovery::Proxy {
+            http: Some("http://127.0.0.1:18080".to_string()),
+            https: Some("https://127.0.0.1:18443".to_string()),
+        },
+    };
+    let resolution = oneget_lib::platform::proxy::resolve_proxy(
+        &settings,
+        Some(("oneget-user", "oneget-pass")),
+        &source,
+    );
+    assert_eq!(
+        resolution,
+        oneget_lib::platform::proxy::ProxyResolution::Direct,
+        "direct mode must resolve to Direct and ignore the system proxy"
+    );
+}
+
+#[test]
+fn manual_mode_resolves_host_port_and_credentials_for_each_protocol() {
+    for (proxy_type, scheme) in [
+        (ProxyType::Http, "http"),
+        (ProxyType::Https, "https"),
+        (ProxyType::Socks5, "socks5"),
+    ] {
+        let settings = manual_proxy_settings(proxy_type, "127.0.0.1", 1080);
+        let source = FakeSystemProxy {
+            discovery: FakeDiscovery::Unavailable {
+                reason: "unused-in-manual-mode".to_string(),
+            },
+        };
+        let resolution = oneget_lib::platform::proxy::resolve_proxy(
+            &settings,
+            Some(("oneget-proxy-user", "oneget-proxy-pass")),
+            &source,
+        );
+        assert_eq!(
+            resolution,
+            oneget_lib::platform::proxy::ProxyResolution::Proxy(
+                oneget_lib::platform::proxy::ResolvedProxy {
+                    url: format!("{scheme}://127.0.0.1:1080"),
+                    username: Some("oneget-proxy-user".to_string()),
+                    password: Some("oneget-proxy-pass".to_string()),
+                }
+            ),
+            "manual {scheme} mode must resolve host, port, and credentials"
+        );
+    }
+}
+
+#[test]
+fn system_mode_prefers_the_https_value_else_the_http_value_and_never_attaches_credentials() {
+    let settings = Settings {
+        proxy_mode: ProxyMode::System,
+        ..Settings::default()
+    };
+
+    let http_only = FakeSystemProxy {
+        discovery: FakeDiscovery::Proxy {
+            http: Some("http://127.0.0.1:18080".to_string()),
+            https: None,
+        },
+    };
+    let resolution = oneget_lib::platform::proxy::resolve_proxy(
+        &settings,
+        Some(("oneget-user", "oneget-pass")),
+        &http_only,
+    );
+    assert_eq!(
+        resolution,
+        oneget_lib::platform::proxy::ProxyResolution::Proxy(
+            oneget_lib::platform::proxy::ResolvedProxy {
+                url: "http://127.0.0.1:18080".to_string(),
+                username: None,
+                password: None,
+            }
+        ),
+        "a system proxy without an HTTPS value must fall back to the HTTP value and carry no credentials"
+    );
+
+    let both = FakeSystemProxy {
+        discovery: FakeDiscovery::Proxy {
+            http: Some("http://127.0.0.1:18080".to_string()),
+            https: Some("https://127.0.0.1:18443".to_string()),
+        },
+    };
+    let resolution = oneget_lib::platform::proxy::resolve_proxy(
+        &settings,
+        Some(("oneget-user", "oneget-pass")),
+        &both,
+    );
+    assert_eq!(
+        resolution,
+        oneget_lib::platform::proxy::ProxyResolution::Proxy(
+            oneget_lib::platform::proxy::ResolvedProxy {
+                url: "https://127.0.0.1:18443".to_string(),
+                username: None,
+                password: None,
+            }
+        ),
+        "a system proxy with an HTTPS value must prefer it and carry no credentials"
+    );
+}
+
+#[test]
+fn system_mode_unavailable_reports_the_reason_and_is_never_direct_or_a_proxy() {
+    let settings = Settings {
+        proxy_mode: ProxyMode::System,
+        ..Settings::default()
+    };
+    let source = FakeSystemProxy {
+        discovery: FakeDiscovery::Unavailable {
+            reason: "pac_only".to_string(),
+        },
+    };
+    let resolution = oneget_lib::platform::proxy::resolve_proxy(&settings, None, &source);
+    assert_eq!(
+        resolution,
+        oneget_lib::platform::proxy::ProxyResolution::Unavailable {
+            reason: "pac_only".to_string()
+        },
+        "a PAC-only configuration must report Unavailable with the source reason"
+    );
+    assert!(
+        !matches!(
+            resolution,
+            oneget_lib::platform::proxy::ProxyResolution::Direct
+        ),
+        "an unavailable system proxy must never silently resolve Direct"
+    );
+}
+
+#[tokio::test]
+async fn a_resolved_system_proxy_completes_the_download_through_the_fixture() {
+    let body = non_periodic_bytes(192 * 1024);
+    let hash = sha256_hex(&body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body: body.clone(),
+        ..Default::default()
+    });
+    let proxy = ProxyServer::start(None);
+    let settings = Settings {
+        proxy_mode: ProxyMode::System,
+        ..Settings::default()
+    };
+    let source = FakeSystemProxy {
+        discovery: FakeDiscovery::Proxy {
+            http: Some(proxy.url()),
+            https: None,
+        },
+    };
+    let resolution = oneget_lib::platform::proxy::resolve_proxy(&settings, None, &source);
+    let resolved = match resolution {
+        oneget_lib::platform::proxy::ProxyResolution::Proxy(resolved) => resolved,
+        other => panic!("a configured system proxy must resolve to a proxy, got {other:?}"),
+    };
+    assert_eq!(
+        resolved.username, None,
+        "a system proxy carries no credentials"
+    );
+    assert_eq!(
+        resolved.password, None,
+        "a system proxy carries no credentials"
+    );
+
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    engine
+        .set_proxy(Some(ProxyConfig {
+            url: resolved.url,
+            username: resolved.username,
+            password: resolved.password,
+        }))
+        .expect("apply the resolved system proxy");
+
+    let id = engine
+        .add_task(make_spec(
+            fixture.url("/system/payload.bin"),
+            "system-payload.bin",
+            2,
+            Some(hash.clone()),
+        ))
+        .expect("add task");
+
+    run_engine_to_terminal(&engine, engine.store(), &id).await;
+
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(
+        task.state,
+        TaskState::Completed,
+        "a download through the resolved system proxy must complete, observed {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+
+    let origin_prefix = fixture.url("");
+    let requests = proxy.requests();
+    assert!(
+        !requests.is_empty(),
+        "the system proxy fixture must observe the download"
+    );
+    for request in &requests {
+        assert!(
+            request.target.starts_with(&origin_prefix),
+            "the system proxy forwarded to an unexpected destination: {}",
+            request.target
+        );
+    }
+}
+
+#[tokio::test]
+async fn direct_mode_sends_no_proxy_request() {
+    let body = non_periodic_bytes(128 * 1024);
+    let hash = sha256_hex(&body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body,
+        ..Default::default()
+    });
+    let proxy = ProxyServer::start(None);
+    let settings = Settings::default(); // proxy mode: direct
+    let source = FakeSystemProxy {
+        discovery: FakeDiscovery::Proxy {
+            http: Some(proxy.url()),
+            https: None,
+        },
+    };
+    let resolution = oneget_lib::platform::proxy::resolve_proxy(&settings, None, &source);
+    assert_eq!(
+        resolution,
+        oneget_lib::platform::proxy::ProxyResolution::Direct,
+        "direct mode must resolve Direct and must not produce a proxy configuration"
+    );
+
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+    // Direct resolution means no proxy is applied to the engine.
+    let id = engine
+        .add_task(make_spec(
+            fixture.url("/direct/payload.bin"),
+            "direct-payload.bin",
+            1,
+            Some(hash),
+        ))
+        .expect("add task");
+
+    run_engine_to_terminal(&engine, engine.store(), &id).await;
+
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(
+        task.state,
+        TaskState::Completed,
+        "a direct download must complete, observed {:?}",
+        task.error_code
+    );
+    assert!(
+        proxy.requests().is_empty(),
+        "a direct task must not issue a request through any proxy"
+    );
+}
+
+// --- Credential clearing through settings_save ---
+
+struct MemorySecrets {
+    inner: MemorySecretStore,
+}
+
+impl MemorySecrets {
+    fn new() -> Self {
+        Self {
+            inner: MemorySecretStore::new(),
+        }
+    }
+}
+
+impl SecretService for MemorySecrets {
+    fn roundtrip(
+        &self,
+        _secret: &str,
+    ) -> Result<SecretRoundTripResult, oneget_lib::error::AppError> {
+        Ok(SecretRoundTripResult { success: true })
+    }
+
+    fn get_secret(&self, key: &str) -> Result<Option<SecretValue>, oneget_lib::error::AppError> {
+        self.inner.get(key).map_err(map_secret_error)
+    }
+
+    fn set_secret(
+        &self,
+        key: &str,
+        value: &SecretValue,
+    ) -> Result<(), oneget_lib::error::AppError> {
+        self.inner.set(key, value).map_err(map_secret_error)
+    }
+
+    fn delete_secret(&self, key: &str) -> Result<(), oneget_lib::error::AppError> {
+        self.inner.delete(key).map_err(map_secret_error)
+    }
+}
+
+fn map_secret_error(error: SecretError) -> oneget_lib::error::AppError {
+    oneget_lib::error::AppError::new(error.code, error.message)
+}
+
+#[derive(Clone, Copy)]
+struct NoopNotifications;
+
+impl NotificationService for NoopNotifications {
+    fn status(&self) -> Result<NotificationStatus, oneget_lib::error::AppError> {
+        Ok(NotificationStatus {
+            permission: "granted".to_string(),
+        })
+    }
+
+    fn send_test(&self) -> Result<NotificationSendResult, oneget_lib::error::AppError> {
+        Ok(NotificationSendResult { sent: true })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NoopAutostart;
+
+impl AutostartService for NoopAutostart {
+    fn is_enabled(&self) -> Result<bool, oneget_lib::error::AppError> {
+        Ok(false)
+    }
+
+    fn set_enabled(&self, enabled: bool) -> Result<bool, oneget_lib::error::AppError> {
+        Ok(enabled)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NoopQuit;
+
+impl QuitService for NoopQuit {
+    fn request_quit(&self) -> Result<(), oneget_lib::error::AppError> {
+        Ok(())
+    }
+}
+
+struct StateHarness {
+    _temp: tempfile::TempDir,
+    state: AppState,
+}
+
+fn build_harness() -> StateHarness {
+    let temp = tempdir().expect("tempdir");
+    let paths = AppPaths::with_root(temp.path().join("app")).expect("app paths");
+    let settings_path = paths.data.join("settings.json");
+    let settings = SettingsStore::load(&settings_path).expect("settings store");
+    let logger = Logger::new(LogConfig::with_defaults(paths.logs.clone())).expect("logger");
+    let state = AppState::new(
+        paths,
+        settings,
+        logger,
+        std::sync::Arc::new(MemorySecrets::new()),
+        std::sync::Arc::new(NoopNotifications),
+        std::sync::Arc::new(NoopAutostart),
+        std::sync::Arc::new(NoopQuit),
+    );
+    StateHarness { _temp: temp, state }
+}
+
+fn assert_single_boolean_status(status: SecretStatus, configured: bool) {
+    assert_eq!(status.configured, configured);
+    let serialized = serde_json::to_value(status).expect("status must serialize");
+    let object = serialized
+        .as_object()
+        .expect("status must serialize as an object");
+    assert_eq!(
+        object.len(),
+        1,
+        "the secret status must expose exactly one key, got {object:?}"
+    );
+    assert_eq!(object.get("configured"), Some(&json!(configured)));
+}
+
+fn save_proxy_credentials(harness: &StateHarness) {
+    let saved = proxy_credentials_save(
+        &harness.state,
+        "oneget-proxy-user".to_string(),
+        "oneget-proxy-pass-secret".to_string(),
+    )
+    .expect("save proxy credentials");
+    assert_single_boolean_status(saved, true);
+    let status = proxy_credentials_status(&harness.state).expect("status after save");
+    assert_single_boolean_status(status, true);
+}
+
+#[test]
+fn saving_direct_mode_deletes_the_stored_proxy_credentials() {
+    let harness = build_harness();
+
+    assert_single_boolean_status(
+        proxy_credentials_status(&harness.state).expect("initial status"),
+        false,
+    );
+    save_proxy_credentials(&harness);
+
+    let settings = Settings {
+        proxy_mode: ProxyMode::Direct,
+        ..harness.state.settings()
+    };
+    settings_save(&harness.state, settings).expect("save direct mode");
+
+    assert_single_boolean_status(
+        proxy_credentials_status(&harness.state).expect("status after direct save"),
+        false,
+    );
+}
+
+#[test]
+fn saving_system_mode_deletes_the_stored_proxy_credentials() {
+    let harness = build_harness();
+
+    assert_single_boolean_status(
+        proxy_credentials_status(&harness.state).expect("initial status"),
+        false,
+    );
+    save_proxy_credentials(&harness);
+
+    let settings = Settings {
+        proxy_mode: ProxyMode::System,
+        ..harness.state.settings()
+    };
+    settings_save(&harness.state, settings).expect("save system mode");
+
+    assert_single_boolean_status(
+        proxy_credentials_status(&harness.state).expect("status after system save"),
+        false,
+    );
+}
+
+#[test]
+fn saving_manual_mode_preserves_the_stored_proxy_credentials() {
+    let harness = build_harness();
+
+    save_proxy_credentials(&harness);
+
+    let settings = manual_proxy_settings(ProxyType::Http, "127.0.0.1", 8080);
+    settings_save(&harness.state, settings).expect("save manual mode");
+
+    assert_single_boolean_status(
+        proxy_credentials_status(&harness.state).expect("status after manual save"),
+        true,
+    );
+}
+
+// --- Loopback API never uses the configured manual proxy ---
+
+struct FakeBridge;
+
+impl DesktopBridge for FakeBridge {
+    fn create_takeover_task(&self, _item: &CaptureItem, _now_ms: i64) -> Result<String, ApiError> {
+        Ok("task-fixture".to_string())
+    }
+
+    fn queue_prefill(&self, _prefill: PendingPrefill) -> Result<(), ApiError> {
+        Ok(())
+    }
+
+    fn focus_main_window(&self) {}
+
+    fn log_event(&self, _event: &str, _fields: Value) {}
+}
+
+fn raw_loopback_http(port: u16, request: &str) -> String {
+    use std::io::{Read, Write};
+
+    let mut stream =
+        std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to the loopback API");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    stream.write_all(request.as_bytes()).expect("write request");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("read response");
+    response
+}
+
+#[test]
+fn loopback_api_traffic_never_passes_through_the_configured_manual_proxy() {
+    let proxy = ProxyServer::start(None);
+    let harness = build_harness();
+    let proxy_port: u16 = proxy
+        .url()
+        .rsplit(':')
+        .next()
+        .expect("proxy port")
+        .parse()
+        .expect("proxy port number");
+    let settings = manual_proxy_settings(ProxyType::Http, "127.0.0.1", proxy_port);
+    settings_save(&harness.state, settings).expect("save manual proxy settings");
+
+    let pairing_temp = tempdir().expect("pairing tempdir");
+    let store = std::sync::Arc::new(std::sync::Mutex::new(
+        PairingStore::open(pairing_temp.path().join("pairing.db")).expect("open pairing store"),
+    ));
+    let mut handle = ApiServerHandle::start(ApiServerConfig {
+        port: 0,
+        app_version: "oneget-test".to_string(),
+        pairing_store: store,
+        bridge: std::sync::Arc::new(FakeBridge),
+        clock: std::sync::Arc::new(SystemClock::default()),
+        pair_origin_policy: RateLimitPolicy::new(10, 60_000),
+        token_policy: RateLimitPolicy::new(10, 60_000),
+    })
+    .expect("start the loopback API on an ephemeral port");
+
+    let port = handle.port();
+    let response = raw_loopback_http(
+        port,
+        &format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"),
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "the loopback API must answer /health directly, got: {response}"
+    );
+
+    handle.shutdown();
+    assert!(
+        proxy.requests().is_empty(),
+        "loopback API traffic must not pass through the configured manual proxy, observed {:?}",
+        proxy.requests()
+    );
+}

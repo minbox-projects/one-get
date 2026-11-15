@@ -15,10 +15,11 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::app_state::AppState;
+use crate::engine::http::ProxyConfig;
 use crate::error::AppError;
 use crate::kernel::catalog::{ComponentCatalog, Target};
 use crate::kernel::install::Installer;
-use crate::kernel::source::{fetch_catalog, manifest_url_override, CatalogCache};
+use crate::kernel::source::{fetch_catalog_with_proxy, manifest_url_override, CatalogCache};
 use crate::kernel::status::{
     component_statuses, ComponentState, ComponentStatus, OperationRegistry, OperationState,
 };
@@ -45,6 +46,7 @@ pub struct KernelRuntime {
     manifest_url: Option<String>,
     target: Target,
     allow_loopback_http: bool,
+    proxy: Mutex<Option<ProxyConfig>>,
     operations: Arc<OperationRegistry>,
     busy: Arc<Mutex<HashSet<String>>>,
     last_errors: Arc<Mutex<HashMap<String, KernelError>>>,
@@ -70,6 +72,7 @@ impl KernelRuntime {
             manifest_url,
             target,
             allow_loopback_http,
+            proxy: Mutex::new(None),
             operations: Arc::new(OperationRegistry::new()),
             busy: Arc::new(Mutex::new(HashSet::new())),
             last_errors: Arc::new(Mutex::new(HashMap::new())),
@@ -87,6 +90,23 @@ impl KernelRuntime {
         Ok(runtime)
     }
 
+    /// Replace the proxy used by later catalog refreshes and installs.
+    ///
+    /// An operation that already started keeps the proxy it captured.
+    pub fn set_proxy(&self, proxy: Option<ProxyConfig>) {
+        *self
+            .proxy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = proxy;
+    }
+
+    fn proxy(&self) -> Option<ProxyConfig> {
+        self.proxy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     /// Fetch, verify, and atomically cache the signed catalog.
     pub fn refresh(&self) -> Result<(), KernelError> {
         let trust = self.trust.as_deref().ok_or_else(trust_unconfigured)?;
@@ -95,14 +115,16 @@ impl KernelRuntime {
             .clone()
             .or_else(manifest_url_override)
             .ok_or_else(manifest_unavailable)?;
+        let proxy = self.proxy();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|_| manifest_unavailable())?;
-        let bytes = runtime.block_on(fetch_catalog(
+        let bytes = runtime.block_on(fetch_catalog_with_proxy(
             &url,
             self.allow_loopback_http,
             CATALOG_TIMEOUT,
+            proxy.as_ref(),
         ))?;
         let catalog = CatalogCache::new(&self.cache_dir).store_verified(
             &bytes,
@@ -220,6 +242,7 @@ impl KernelRuntime {
         let trust = self.trust.clone();
         let target = self.target;
         let allow_loopback_http = self.allow_loopback_http;
+        let proxy = self.proxy();
         let operations = Arc::clone(&self.operations);
         let busy = Arc::clone(&self.busy);
         let last_errors = Arc::clone(&self.last_errors);
@@ -234,6 +257,7 @@ impl KernelRuntime {
                     trust,
                     target,
                     allow_loopback_http,
+                    proxy,
                     operations,
                     catalog,
                     kind,
@@ -285,6 +309,7 @@ struct OperationJob {
     trust: Option<String>,
     target: Target,
     allow_loopback_http: bool,
+    proxy: Option<ProxyConfig>,
     operations: Arc<OperationRegistry>,
     catalog: Option<ComponentCatalog>,
     kind: OperationKind,
@@ -307,6 +332,7 @@ fn run_operation(job: OperationJob) -> Result<(), KernelError> {
         trust,
         target,
         allow_loopback_http,
+        proxy,
         operations,
         catalog,
         kind,
@@ -316,6 +342,7 @@ fn run_operation(job: OperationJob) -> Result<(), KernelError> {
         let store = ComponentStore::open(&components_db)?;
         let root = CapDir::open(&kernel_root).map_err(platform_error)?;
         let mut installer = Installer::new(store, root, target, trust, allow_loopback_http);
+        installer.set_proxy(proxy);
         installer.set_operations(operations);
         match kind {
             OperationKind::Install => {

@@ -8,11 +8,11 @@
 
 use std::time::Duration;
 
-use reqwest::redirect::Policy;
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
 use super::error::KernelError;
+use crate::engine::http::{build_client_with_options, ProxyConfig};
 
 /// Maximum accepted artifact URL length in bytes.
 const MAX_ARTIFACT_URL_BYTES: usize = 8192;
@@ -29,13 +29,32 @@ pub async fn download_artifact(
     allow_loopback_http: bool,
     timeout: Duration,
 ) -> Result<Vec<u8>, KernelError> {
+    download_artifact_with_proxy(
+        url,
+        expected_sha256,
+        expected_size,
+        allow_loopback_http,
+        timeout,
+        None,
+    )
+    .await
+}
+
+/// Download through an optional authenticated proxy, then verify size and hash.
+///
+/// The same URL policy and verification rules apply. Proxy authentication is
+/// applied by the transport and never travels to the origin.
+pub async fn download_artifact_with_proxy(
+    url: &str,
+    expected_sha256: &str,
+    expected_size: u64,
+    allow_loopback_http: bool,
+    timeout: Duration,
+    proxy: Option<&ProxyConfig>,
+) -> Result<Vec<u8>, KernelError> {
     validate_url(url, allow_loopback_http)?;
 
-    let client = reqwest::Client::builder()
-        .redirect(Policy::none())
-        .timeout(timeout)
-        .build()
-        .map_err(|_| unavailable())?;
+    let client = build_client_with_options(timeout, timeout, proxy).map_err(|_| unavailable())?;
 
     let mut response = client.get(url).send().await.map_err(|_| unavailable())?;
     if !response.status().is_success() {

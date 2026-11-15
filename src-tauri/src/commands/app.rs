@@ -141,8 +141,8 @@ impl Default for KeyringSecretService {
 
 const DIAGNOSTIC_SECRET_KEY: &str = "diagnostics-roundtrip";
 const HF_TOKEN_KEY: &str = "huggingface-token";
-const PROXY_USERNAME_KEY: &str = "proxy-username";
-const PROXY_PASSWORD_KEY: &str = "proxy-password";
+pub(crate) const PROXY_USERNAME_KEY: &str = "proxy-username";
+pub(crate) const PROXY_PASSWORD_KEY: &str = "proxy-password";
 
 impl SecretService for KeyringSecretService {
     fn roundtrip(&self, secret: &str) -> Result<SecretRoundTripResult, AppError> {
@@ -199,13 +199,16 @@ pub fn app_info(state: &AppState) -> AppInfo {
 }
 
 /// Load-time status of the settings document.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsStatus {
     /// Whether a future schema makes the settings read-only.
     pub read_only: bool,
     /// Whether corrupt input was backed up and defaults were loaded.
     pub recovered: bool,
+    /// Stable reason the configured system proxy cannot be used, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_unavailable_reason: Option<String>,
 }
 
 /// Current settings.
@@ -218,6 +221,7 @@ pub fn settings_status(state: &AppState) -> Result<SettingsStatus, AppError> {
     Ok(SettingsStatus {
         read_only: state.settings_read_only(),
         recovered: state.settings_recovered(),
+        proxy_unavailable_reason: state.proxy_unavailable_reason(),
     })
 }
 
