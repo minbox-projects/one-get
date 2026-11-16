@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2048 2048" role="img" aria-labelledby="title">
   <title id="title">OneGet app icon</title>
-  <circle cx="1024" cy="1024" r="922" fill="#ffffff"/>
+  <rect x="102" y="102" width="1844" height="1844" rx="416" ry="416" fill="#ffffff"/>
   <g transform="translate(377.6 377.6) scale(10.1)">
     <g fill="none" stroke="#000000" stroke-width="28" stroke-linecap="round" stroke-linejoin="round">
       <path d="M64 22 V50"/>
