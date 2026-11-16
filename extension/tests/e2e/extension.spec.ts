@@ -237,7 +237,7 @@ async function handleApiRequest(
       {
         ok: true,
         appVersion: "0.1.0",
-        protocolVersion: 1,
+        protocolVersion: 2,
         capabilities: ["prefill", "takeover"],
       },
       origin,
@@ -271,7 +271,7 @@ async function handleApiRequest(
       sendJson(response, 400, { code: "INVALID_JSON", message: "invalid JSON" }, origin);
       return;
     }
-    if (parsed.protocolVersion !== 1) {
+    if (parsed.protocolVersion !== 1 && parsed.protocolVersion !== 2) {
       sendJson(response, 409, { code: "PROTOCOL_MISMATCH", message: "protocol mismatch" }, origin);
       return;
     }
@@ -284,7 +284,7 @@ async function handleApiRequest(
       response,
       200,
       {
-        protocolVersion: 1,
+        protocolVersion: 2,
         token: PAIRING_TOKEN,
         client: { id: "client-1", label: "Chromium test extension", origin },
       },
@@ -315,7 +315,7 @@ async function handleApiRequest(
       sendJson(response, 400, { code: "INVALID_JSON", message: "invalid JSON" }, origin);
       return;
     }
-    if (parsed.protocolVersion !== 1) {
+    if (parsed.protocolVersion !== 1 && parsed.protocolVersion !== 2) {
       sendJson(response, 409, { code: "PROTOCOL_MISMATCH", message: "protocol mismatch" }, origin);
       return;
     }
@@ -325,7 +325,7 @@ async function handleApiRequest(
       response,
       200,
       {
-        protocolVersion: 1,
+        protocolVersion: 2,
         intent: parsed.intent,
         accepted: parsed.items?.length ?? 0,
         rejected: [],
@@ -342,6 +342,19 @@ async function handleApiRequest(
       sendJson(response, 401, { code: "UNAUTHORIZED", message: "invalid token" }, origin);
       return;
     }
+
+    let parsed: { protocolVersion?: unknown };
+    try {
+      parsed = JSON.parse(rawBody) as { protocolVersion?: unknown };
+    } catch {
+      sendJson(response, 400, { code: "INVALID_JSON", message: "invalid JSON" }, origin);
+      return;
+    }
+    if (parsed.protocolVersion !== 1 && parsed.protocolVersion !== 2) {
+      sendJson(response, 409, { code: "PROTOCOL_MISMATCH", message: "protocol mismatch" }, origin);
+      return;
+    }
+
     sendJson(response, 200, { revoked: true }, origin);
     return;
   }
@@ -530,7 +543,7 @@ test("pairs from the popup with the exact Chromium extension origin", async () =
   expect(request.path).toBe("/pair");
   expect(request.headers.origin).toBe(extensionOrigin());
   expect(JSON.parse(request.body)).toMatchObject({
-    protocolVersion: 1,
+    protocolVersion: 2,
     code: PAIRING_CODE,
   });
   expect(await popup.locator("body").innerText()).not.toContain(PAIRING_TOKEN);

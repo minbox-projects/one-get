@@ -1,6 +1,7 @@
 //! Durable SQLite task store.
 
 mod db;
+pub mod hf;
 mod migrations;
 mod segments;
 mod tasks;

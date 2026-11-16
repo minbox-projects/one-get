@@ -29,6 +29,20 @@ export interface VideoSummary {
   audioOnly: boolean;
 }
 
+/**
+ * Resolver metadata for a HuggingFace download, without tokens or values.
+ * Fields stay optional because summaries from older builds may omit them.
+ */
+export interface HuggingFaceSummary {
+  repoId?: string;
+  filePath?: string;
+  revision?: string;
+  effectiveConnections?: number;
+  refreshCount?: number;
+  downgraded?: boolean;
+  [key: string]: unknown;
+}
+
 export interface DownloadSummary {
   id: string;
   kind?: DownloadKind;
@@ -41,6 +55,9 @@ export interface DownloadSummary {
   downloadedBytes: number;
   totalBytes: number | null;
   connections: number;
+  cookieSource?: "file" | "browser" | null;
+  cookieCount?: number;
+  huggingface?: HuggingFaceSummary | null;
   createdAtMs: number;
   updatedAtMs: number;
   completedAtMs: number | null;
@@ -83,4 +100,6 @@ export interface AddDownloadRequest {
   expectedSha256: string | null;
   allowHtml: boolean;
   extraHeaders: HeaderPair[];
+  cookiesFile?: string | null;
+  cookieHandle?: string | null;
 }

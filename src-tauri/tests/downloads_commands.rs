@@ -20,14 +20,16 @@ use std::time::{Duration, Instant};
 
 use oneget_lib::app_state::AppState;
 use oneget_lib::commands::app::{
-    settings_save, AutostartService, NotificationSendResult, NotificationService,
-    NotificationStatus, QuitService, SecretRoundTripResult, SecretService,
+    hf_token_clear, hf_token_save, hf_token_status, proxy_credentials_clear,
+    proxy_credentials_save, proxy_credentials_status, settings_save, AutostartService,
+    NotificationSendResult, NotificationService, NotificationStatus, QuitService,
+    SecretRoundTripResult, SecretService, SecretStatus,
 };
 use oneget_lib::commands::downloads::{
     downloads_add, downloads_delete_file, downloads_list, downloads_open_file, downloads_probe,
     downloads_segments, AddDownloadRequest, ProbeDownloadRequest,
 };
-use oneget_lib::config::SettingsStore;
+use oneget_lib::config::{ProxyMode, ProxyType, SettingsStore, VideoQualityPreference};
 use oneget_lib::engine::error::EngineError;
 use oneget_lib::engine::part_file::PartFile;
 use oneget_lib::engine::scheduler::EngineOptions;
@@ -37,6 +39,7 @@ use oneget_lib::error::AppError;
 use oneget_lib::logging::{LogConfig, Logger};
 use oneget_lib::platform::files::CapDir;
 use oneget_lib::platform::paths::AppPaths;
+use oneget_lib::platform::secrets::{MemorySecretStore, SecretError, SecretStore, SecretValue};
 use oneget_lib::store::{Database, Task};
 use serde_json::{json, Value};
 use support::fixtures::pattern_bytes;
@@ -51,10 +54,61 @@ const WAIT: Duration = Duration::from_secs(30);
 #[derive(Clone, Copy)]
 struct NoopSecrets;
 
+fn secret_unavailable() -> AppError {
+    AppError::new("secret_unavailable", "platform secret store is unavailable")
+}
+
 impl SecretService for NoopSecrets {
     fn roundtrip(&self, _secret: &str) -> Result<SecretRoundTripResult, AppError> {
         Ok(SecretRoundTripResult { success: true })
     }
+
+    fn get_secret(&self, _key: &str) -> Result<Option<SecretValue>, AppError> {
+        Err(secret_unavailable())
+    }
+
+    fn set_secret(&self, _key: &str, _value: &SecretValue) -> Result<(), AppError> {
+        Err(secret_unavailable())
+    }
+
+    fn delete_secret(&self, _key: &str) -> Result<(), AppError> {
+        Err(secret_unavailable())
+    }
+}
+
+/// In-memory credential store used by the write-only secret command tests.
+struct MemorySecrets {
+    inner: MemorySecretStore,
+}
+
+impl MemorySecrets {
+    fn new() -> Self {
+        Self {
+            inner: MemorySecretStore::new(),
+        }
+    }
+}
+
+impl SecretService for MemorySecrets {
+    fn roundtrip(&self, _secret: &str) -> Result<SecretRoundTripResult, AppError> {
+        Ok(SecretRoundTripResult { success: true })
+    }
+
+    fn get_secret(&self, key: &str) -> Result<Option<SecretValue>, AppError> {
+        self.inner.get(key).map_err(map_secret_error)
+    }
+
+    fn set_secret(&self, key: &str, value: &SecretValue) -> Result<(), AppError> {
+        self.inner.set(key, value).map_err(map_secret_error)
+    }
+
+    fn delete_secret(&self, key: &str) -> Result<(), AppError> {
+        self.inner.delete(key).map_err(map_secret_error)
+    }
+}
+
+fn map_secret_error(error: SecretError) -> AppError {
+    AppError::new(error.code, error.message)
 }
 
 #[derive(Clone, Copy)]
@@ -101,6 +155,13 @@ struct StateHarness {
 }
 
 fn build_state(engine: Option<Arc<EngineService>>) -> StateHarness {
+    build_state_with_secrets(engine, Arc::new(NoopSecrets))
+}
+
+fn build_state_with_secrets(
+    engine: Option<Arc<EngineService>>,
+    secrets: Arc<dyn SecretService>,
+) -> StateHarness {
     let temp = tempdir().expect("tempdir");
     let paths = AppPaths::with_root(temp.path().join("app")).expect("app paths");
     let settings_path = paths.data.join("settings.json");
@@ -110,7 +171,7 @@ fn build_state(engine: Option<Arc<EngineService>>) -> StateHarness {
         paths,
         settings,
         logger,
-        Arc::new(NoopSecrets),
+        secrets,
         Arc::new(NoopNotifications),
         Arc::new(NoopAutostart),
         Arc::new(NoopQuit),
@@ -146,6 +207,7 @@ fn add_download(url: String, filename: &str, connections: u32) -> AddDownload {
         expected_sha256: None,
         allow_html: false,
         extra_headers: Vec::new(),
+        cookies_file: None,
     }
 }
 
@@ -159,6 +221,8 @@ fn add_request(url: String, filename: &str, connections: u32) -> AddDownloadRequ
         expected_sha256: None,
         allow_html: false,
         extra_headers: Vec::new(),
+        cookies_file: None,
+        cookie_handle: None,
     }
 }
 
@@ -989,7 +1053,328 @@ async fn downloads_list_redacts_and_persists_final_url_after_redirect() {
     );
 }
 
-// --- 11. AC-016: file deletion failure keeps the record and file ---
+// --- 11. Settings save rejects invalid new field values atomically ---
+
+#[test]
+fn settings_save_rejects_invalid_new_field_values_and_keeps_file_byte_identical() {
+    let harness = build_state(None);
+    let before = std::fs::read(&harness.settings_path).expect("read settings before invalid saves");
+    let base = harness.state.settings();
+
+    type SettingsMutation = Box<dyn Fn(&mut oneget_lib::config::Settings)>;
+    let cases: Vec<(&str, SettingsMutation)> = vec![
+        (
+            "proxy_port_zero_in_manual_mode",
+            Box::new(|settings| {
+                settings.proxy_mode = ProxyMode::Manual;
+                settings.proxy_host = Some("127.0.0.1".to_string());
+                settings.proxy_port = Some(0);
+            }),
+        ),
+        (
+            "hf_connection_cap_zero",
+            Box::new(|settings| {
+                settings.hf_connection_cap = 0;
+            }),
+        ),
+        (
+            "hf_connection_cap_above_maximum",
+            Box::new(|settings| {
+                settings.hf_connection_cap = 65;
+            }),
+        ),
+        (
+            "connect_timeout_below_minimum",
+            Box::new(|settings| {
+                settings.connect_timeout_secs = 4;
+            }),
+        ),
+        (
+            "connect_timeout_above_maximum",
+            Box::new(|settings| {
+                settings.connect_timeout_secs = 121;
+            }),
+        ),
+        (
+            "read_timeout_below_minimum",
+            Box::new(|settings| {
+                settings.read_timeout_secs = 4;
+            }),
+        ),
+        (
+            "read_timeout_above_maximum",
+            Box::new(|settings| {
+                settings.read_timeout_secs = 301;
+            }),
+        ),
+        (
+            "retry_attempts_zero",
+            Box::new(|settings| {
+                settings.retry_attempts = 0;
+            }),
+        ),
+        (
+            "retry_attempts_eleven",
+            Box::new(|settings| {
+                settings.retry_attempts = 11;
+            }),
+        ),
+        (
+            "user_agent_empty",
+            Box::new(|settings| {
+                settings.user_agent = Some(String::new());
+            }),
+        ),
+        (
+            "user_agent_with_carriage_return",
+            Box::new(|settings| {
+                settings.user_agent = Some("fixture\rvalue".to_string());
+            }),
+        ),
+        (
+            "user_agent_with_line_feed",
+            Box::new(|settings| {
+                settings.user_agent = Some("fixture\nvalue".to_string());
+            }),
+        ),
+        (
+            "manual_mode_without_proxy_host",
+            Box::new(|settings| {
+                settings.proxy_mode = ProxyMode::Manual;
+                settings.proxy_host = None;
+            }),
+        ),
+        (
+            "manual_mode_with_empty_proxy_host",
+            Box::new(|settings| {
+                settings.proxy_mode = ProxyMode::Manual;
+                settings.proxy_host = Some(String::new());
+            }),
+        ),
+    ];
+
+    for (case, mutate) in cases {
+        let mut candidate = base.clone();
+        mutate(&mut candidate);
+        let error = settings_save(&harness.state, candidate)
+            .expect_err("invalid new field values must be rejected");
+        assert_eq!(
+            error.code, "INVALID_SETTINGS",
+            "{case} must fail with INVALID_SETTINGS"
+        );
+        let after =
+            std::fs::read(&harness.settings_path).expect("read settings after rejected save");
+        assert_eq!(
+            after, before,
+            "{case} must leave the settings file byte-identical"
+        );
+        assert_eq!(
+            harness.state.settings(),
+            base,
+            "{case} must not change the in-memory settings snapshot"
+        );
+    }
+}
+
+#[test]
+fn settings_save_accepts_valid_boundary_documents() {
+    for low_boundary in [true, false] {
+        let harness = build_state(None);
+        let cookies = harness._temp.path().join("cookies.txt");
+        std::fs::write(&cookies, b"# fixture cookies\n").expect("write cookies fixture");
+
+        let mut settings = harness.state.settings();
+        settings.proxy_mode = ProxyMode::Manual;
+        settings.proxy_type = ProxyType::Socks5;
+        settings.proxy_host = Some("proxy.example.test".to_string());
+        if low_boundary {
+            settings.proxy_port = Some(1);
+            settings.connect_timeout_secs = 5;
+            settings.read_timeout_secs = 5;
+            settings.retry_attempts = 1;
+            settings.hf_connection_cap = 1;
+            settings.video_quality_preference = VideoQualityPreference::Mp4Compatible;
+        } else {
+            settings.proxy_port = Some(65535);
+            settings.connect_timeout_secs = 120;
+            settings.read_timeout_secs = 300;
+            settings.retry_attempts = 10;
+            settings.hf_connection_cap = 64;
+            settings.video_quality_preference = VideoQualityPreference::Highest;
+        }
+        settings.always_ask_quality = false;
+        settings.user_agent = Some("OneGetFixture/1.0".to_string());
+        settings.default_cookies_file = Some(cookies);
+
+        let saved =
+            settings_save(&harness.state, settings).expect("a valid boundary document must save");
+        assert_eq!(saved.schema_version, 2);
+        assert!(matches!(saved.proxy_mode, ProxyMode::Manual));
+        assert!(matches!(saved.proxy_type, ProxyType::Socks5));
+        assert_eq!(saved.proxy_host.as_deref(), Some("proxy.example.test"));
+        if low_boundary {
+            assert_eq!(saved.proxy_port, Some(1));
+            assert_eq!(saved.connect_timeout_secs, 5);
+            assert_eq!(saved.read_timeout_secs, 5);
+            assert_eq!(saved.retry_attempts, 1);
+            assert_eq!(saved.hf_connection_cap, 1);
+            assert!(matches!(
+                saved.video_quality_preference,
+                VideoQualityPreference::Mp4Compatible
+            ));
+        } else {
+            assert_eq!(saved.proxy_port, Some(65535));
+            assert_eq!(saved.connect_timeout_secs, 120);
+            assert_eq!(saved.read_timeout_secs, 300);
+            assert_eq!(saved.retry_attempts, 10);
+            assert_eq!(saved.hf_connection_cap, 64);
+            assert!(matches!(
+                saved.video_quality_preference,
+                VideoQualityPreference::Highest
+            ));
+        }
+
+        let reloaded = SettingsStore::load(&harness.settings_path)
+            .expect("reload saved boundary settings")
+            .settings();
+        assert_eq!(
+            reloaded, saved,
+            "saved boundary document must reload identically"
+        );
+    }
+}
+
+// --- 12. Write-only secret commands ---
+
+fn secret_state() -> StateHarness {
+    build_state_with_secrets(None, Arc::new(MemorySecrets::new()))
+}
+
+fn assert_single_boolean_status(status: SecretStatus, configured: bool) {
+    assert_eq!(status.configured, configured);
+    let serialized = serde_json::to_value(status).expect("status must serialize");
+    let object = serialized
+        .as_object()
+        .expect("status must serialize as an object");
+    assert_eq!(object.len(), 1, "status must expose exactly one key");
+    assert_eq!(object.get("configured"), Some(&json!(configured)));
+}
+
+#[test]
+fn secret_statuses_start_unconfigured_and_serialize_as_a_single_boolean() {
+    let harness = secret_state();
+
+    let hf = hf_token_status(&harness.state).expect("hf token status");
+    let proxy = proxy_credentials_status(&harness.state).expect("proxy credentials status");
+    assert_single_boolean_status(hf, false);
+    assert_single_boolean_status(proxy, false);
+}
+
+#[test]
+fn hf_token_save_status_and_clear_round_trip_without_exposing_values() {
+    let harness = secret_state();
+
+    let saved = hf_token_save(&harness.state, "hf_fixture_token_value_123".to_string())
+        .expect("save hf token");
+    assert_single_boolean_status(saved, true);
+
+    let status = hf_token_status(&harness.state).expect("status after save");
+    assert_single_boolean_status(status, true);
+
+    let cleared = hf_token_clear(&harness.state).expect("clear hf token");
+    assert_single_boolean_status(cleared, false);
+
+    let status = hf_token_status(&harness.state).expect("status after clear");
+    assert_single_boolean_status(status, false);
+
+    let rendered = serde_json::to_string(&status).expect("render status");
+    assert!(
+        !rendered.contains("hf_fixture_token_value_123"),
+        "the status payload must not carry the token value"
+    );
+}
+
+#[test]
+fn proxy_credentials_save_status_and_clear_round_trip_without_exposing_values() {
+    let harness = secret_state();
+
+    let saved = proxy_credentials_save(
+        &harness.state,
+        "fixture-proxy-user".to_string(),
+        "fixture-proxy-password".to_string(),
+    )
+    .expect("save proxy credentials");
+    assert_single_boolean_status(saved, true);
+
+    let status = proxy_credentials_status(&harness.state).expect("status after save");
+    assert_single_boolean_status(status, true);
+
+    let cleared = proxy_credentials_clear(&harness.state).expect("clear proxy credentials");
+    assert_single_boolean_status(cleared, false);
+
+    let status = proxy_credentials_status(&harness.state).expect("status after clear");
+    assert_single_boolean_status(status, false);
+
+    let rendered = serde_json::to_string(&status).expect("render status");
+    assert!(
+        !rendered.contains("fixture-proxy-user") && !rendered.contains("fixture-proxy-password"),
+        "the status payload must not carry credential values"
+    );
+}
+
+#[test]
+fn empty_secret_inputs_are_rejected_and_never_become_configured() {
+    let harness = secret_state();
+
+    let error = hf_token_save(&harness.state, String::new())
+        .expect_err("an empty hf token must be rejected");
+    assert!(
+        !error.code.is_empty(),
+        "an empty hf token must fail with a typed error"
+    );
+    assert!(
+        !hf_token_status(&harness.state)
+            .expect("status after rejected token save")
+            .configured,
+        "a rejected token save must not become configured"
+    );
+
+    let error = proxy_credentials_save(
+        &harness.state,
+        String::new(),
+        "fixture-proxy-password".to_string(),
+    )
+    .expect_err("an empty proxy username must be rejected");
+    assert!(
+        !error.code.is_empty(),
+        "an empty proxy username must fail with a typed error"
+    );
+    assert!(
+        !proxy_credentials_status(&harness.state)
+            .expect("status after rejected username save")
+            .configured,
+        "a rejected credential save must not become configured"
+    );
+
+    let error = proxy_credentials_save(
+        &harness.state,
+        "fixture-proxy-user".to_string(),
+        String::new(),
+    )
+    .expect_err("an empty proxy password must be rejected");
+    assert!(
+        !error.code.is_empty(),
+        "an empty proxy password must fail with a typed error"
+    );
+    assert!(
+        !proxy_credentials_status(&harness.state)
+            .expect("status after rejected password save")
+            .configured,
+        "a rejected credential save must not become configured"
+    );
+}
+
+// --- 13. AC-016: file deletion failure keeps the record and file ---
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1062,5 +1447,226 @@ async fn delete_file_on_read_only_destination_keeps_record_and_file() {
         final_path.exists(),
         "the final file must remain after cleanup"
     );
+    service.shutdown();
+}
+
+// --- Hugging Face command-surface behavior (RED) ---
+
+#[path = "support/hf_server.rs"]
+mod hf_server;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn downloads_list_exposes_huggingface_summary_and_delete_removes_hf_row() {
+    use hf_server::{HfFixtureConfig, HfFixtureServer, ResolverBehavior};
+    use oneget_lib::commands::downloads::downloads_delete_record;
+    use oneget_lib::engine::scheduler::HuggingFaceOptions;
+    use oneget_lib::store::hf::HfMetadataStore;
+    use sha2::{Digest, Sha256};
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    let body = b"hf command summary fixture bytes".to_vec();
+    let expected_hash = sha256_hex(&body);
+    let cdn_url = "http://cdn-lfs.huggingface.co/repos/fixture/summary.bin";
+    let server = HfFixtureServer::start(HfFixtureConfig {
+        resolver_behavior: ResolverBehavior::RedirectToCdn(cdn_url.to_string()),
+        cdn_body: body.clone(),
+        ..Default::default()
+    });
+
+    let store_dir = tempdir().expect("store tempdir");
+    let dest = tempdir().expect("dest tempdir");
+    let meta_dir = tempdir().expect("meta tempdir");
+    let hf_store = HfMetadataStore::open(meta_dir.path().join("hf.db")).expect("open hf store");
+    let hf_store_for_engine =
+        HfMetadataStore::open(meta_dir.path().join("hf.db")).expect("open hf store handle");
+
+    let store = Database::open(store_dir.path().join("tasks.db")).expect("open store");
+    let service = Arc::new(
+        EngineService::start(
+            store,
+            dest.path().to_path_buf(),
+            EngineOptions { max_concurrent: 2 },
+        )
+        .expect("start service"),
+    );
+
+    // Route resolver/CDN traffic through the loopback forward proxy and enable HF.
+    service
+        .set_proxy(Some(oneget_lib::engine::http::ProxyConfig {
+            url: server.proxy_url(),
+            username: None,
+            password: None,
+        }))
+        .expect("set proxy");
+    service
+        .apply_huggingface_options(HuggingFaceOptions {
+            token: None,
+            connection_cap: 4,
+            metadata: Some(Arc::new(hf_store_for_engine)),
+        })
+        .expect("apply hf options");
+
+    let harness = build_state(Some(Arc::clone(&service)));
+
+    let id = service
+        .add(add_download(
+            "http://huggingface.co/gpt2/resolve/main/summary.bin".to_string(),
+            "summary.bin",
+            8,
+        ))
+        .expect("add hf download");
+    wait_for_state(&service, &id, TaskState::Completed).await;
+
+    let final_bytes = std::fs::read(dest.path().join("summary.bin")).expect("read final file");
+    assert_eq!(sha256_hex(&final_bytes), expected_hash);
+
+    let summaries = summary_values(&harness.state);
+    let summary = summaries
+        .iter()
+        .find(|summary| summary.get("id") == Some(&json!(id)))
+        .expect("completed hf task must be summarized");
+    let object = summary.as_object().expect("summary must be an object");
+    assert!(
+        object.contains_key("huggingface"),
+        "DownloadSummary must expose a huggingface field (camelCase), got keys: {:?}",
+        object.keys().collect::<Vec<_>>()
+    );
+    let hf = summary
+        .get("huggingface")
+        .and_then(Value::as_object)
+        .expect("huggingface must be an object for an HF task");
+    for key in [
+        "repoId",
+        "filePath",
+        "revision",
+        "effectiveConnections",
+        "refreshCount",
+        "downgraded",
+    ] {
+        assert!(
+            hf.contains_key(key),
+            "huggingface summary must expose {key}, got {:?}",
+            hf.keys().collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(hf.get("repoId").and_then(Value::as_str), Some("gpt2"));
+    assert_eq!(
+        hf.get("filePath").and_then(Value::as_str),
+        Some("summary.bin")
+    );
+    assert_eq!(hf.get("revision").and_then(Value::as_str), Some("main"));
+    assert_eq!(
+        hf.get("effectiveConnections").and_then(Value::as_u64),
+        Some(4),
+        "effective connections must reflect hfConnectionCap"
+    );
+    assert_eq!(hf.get("refreshCount").and_then(Value::as_u64), Some(0));
+    assert_eq!(hf.get("downgraded").and_then(Value::as_bool), Some(false));
+
+    let rendered = serde_json::to_string(summary).expect("render summary");
+    assert!(
+        !rendered.contains("hf_test")
+            && !rendered.contains("Bearer")
+            && !rendered.contains("token"),
+        "summary must never expose tokens or signed URLs: {rendered}"
+    );
+
+    // Deleting the record through the existing command must remove the HF row.
+    downloads_delete_record(&harness.state, &id).expect("delete record via command");
+    let after = hf_store.get(&id).expect("get hf metadata after delete");
+    assert!(
+        after.is_none(),
+        "downloads_delete_record must remove the HuggingFace metadata row"
+    );
+
+    service.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn downloads_list_reports_null_huggingface_when_metadata_unavailable() {
+    use hf_server::{HfFixtureConfig, HfFixtureServer, ResolverBehavior};
+    use oneget_lib::engine::scheduler::HuggingFaceOptions;
+    use sha2::{Digest, Sha256};
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    let body = b"hf missing metadata fixture bytes".to_vec();
+    let expected_hash = sha256_hex(&body);
+    let cdn_url = "http://cdn-lfs.huggingface.co/repos/fixture/nullhf.bin";
+    let server = HfFixtureServer::start(HfFixtureConfig {
+        resolver_behavior: ResolverBehavior::RedirectToCdn(cdn_url.to_string()),
+        cdn_body: body.clone(),
+        ..Default::default()
+    });
+
+    let store_dir = tempdir().expect("store tempdir");
+    let dest = tempdir().expect("dest tempdir");
+    let store = Database::open(store_dir.path().join("tasks.db")).expect("open store");
+    let service = Arc::new(
+        EngineService::start(
+            store,
+            dest.path().to_path_buf(),
+            EngineOptions { max_concurrent: 1 },
+        )
+        .expect("start service"),
+    );
+    service
+        .set_proxy(Some(oneget_lib::engine::http::ProxyConfig {
+            url: server.proxy_url(),
+            username: None,
+            password: None,
+        }))
+        .expect("set proxy");
+    // Deliberately do not attach HF metadata store/options metadata: listing must
+    // remain usable and report huggingface as null/unavailable.
+    service
+        .apply_huggingface_options(HuggingFaceOptions {
+            token: None,
+            connection_cap: 4,
+            metadata: None,
+        })
+        .expect("apply hf options without metadata store");
+
+    let harness = build_state(Some(Arc::clone(&service)));
+    let id = service
+        .add(add_download(
+            "http://huggingface.co/gpt2/resolve/main/nullhf.bin".to_string(),
+            "nullhf.bin",
+            4,
+        ))
+        .expect("add hf download");
+    wait_for_state(&service, &id, TaskState::Completed).await;
+
+    let final_bytes = std::fs::read(dest.path().join("nullhf.bin")).expect("read final file");
+    assert_eq!(sha256_hex(&final_bytes), expected_hash);
+
+    let summaries = summary_values(&harness.state);
+    let summary = summaries
+        .iter()
+        .find(|summary| summary.get("id") == Some(&json!(id)))
+        .expect("completed hf task must be summarized");
+    assert!(
+        summary.get("huggingface").is_some() && summary.get("huggingface").unwrap().is_null()
+            || summary.get("huggingface").is_none(),
+        "when hf metadata store is unavailable, huggingface details must be null/unavailable, got: {summary}"
+    );
+
     service.shutdown();
 }

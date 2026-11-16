@@ -694,3 +694,91 @@ Every earlier gate keeps its recorded pending status and is not restated as pass
 ### Exit statement
 
 Phase 5 exit is BLOCKED. It requires the complete manual component, video, HLS, cancellation, one-video queue, and Windows evidence above, and every Phase 0 through Phase 4 gate to be complete or a dated explicit user waiver recorded. The automated evidence is green and is not a phase-exit approval.
+
+## Phase 6: HuggingFace, network transport, proxy, and cookie sources
+
+Date: 2026-11-15
+
+This section records the delivered HuggingFace resolver, global proxy modes and system discovery, configurable timeouts, retries, and User-Agent, the Netscape and captured-browser cookie sources, capture protocol version 2, and the extension cookie opt-in. The automated sweep ran in the coding worktree on macOS arm64. Implementation completion and automated green results are not Phase 6 exit, and no hosted CI run is claimed for this revision.
+
+### Environment
+
+| Component | Value |
+| --- | --- |
+| Host | macOS 27.3 (build 26C5035r), arm64 |
+| Node.js | 24.18.0 |
+| npm | 11.16.0 |
+| rustc | 1.99.1 (58cf8f9c3 2026-10-13) |
+| cargo | 1.99.1 (5f94df478 2026-08-27) |
+
+### Automated commands and results
+
+Frontend, extension, and Playwright commands ran from the worktree root; Rust commands ran in `src-tauri/`. The coding worktree's sweep reported the following; this documentation change re-ran only the notes and navigation validation below.
+
+| Command | Result |
+| --- | --- |
+| `npm run check:pins` | Passed: 30 direct npm entries are exact versions. |
+| `npm run typecheck` | Passed: strict TypeScript project build. |
+| `npm run lint` | Passed: exit 0. |
+| `npm run test` | Passed: 53 Vitest files, 521 tests. |
+| `npm run build` | Passed: production Vite build. |
+| `npm run test:e2e` | Passed: 46 Playwright tests across the chromium-light and chromium-dark projects against deterministic mock IPC. |
+| `npm run typecheck:extension` | Passed: exit 0. |
+| `npm run test:extension` | Passed: 12 files, 143 tests. |
+| `npm run build:extension` | Passed: production Chromium and Firefox packages written. |
+| `npm run build:extension:test` | Passed: Chromium test package written. |
+| `npm run lint:extension:firefox` | Passed: 0 errors, 0 notices, 1 accepted Firefox-for-Android advisory. |
+| `npm run test:e2e:extension` | Passed: 7 Playwright tests against the Chromium test package. |
+| `cargo fmt -- --check` | Passed: exit 0. |
+| `cargo check --locked` | Passed: exit 0. |
+| `cargo clippy --all-targets -- -D warnings` | Passed: exit 0. |
+| `cargo test --locked` | Passed: 392 tests across 40 suites with 1 ignored long soak. |
+
+The post-review repair re-ran the full gates above and additionally verified the running-task global rate limit, resumed HuggingFace metadata preservation, inline resolver token attachment, startup proxy application, secret re-application, cookie prefill handle delivery, and optional User-Agent clearing.
+
+No npm or Rust dependency was added for this revision apart from enabling the already pinned `reqwest` `socks` feature. Every Rust gate uses `--locked` against the committed lockfile, and no automated layer contacts a public host or a real credential.
+
+### Automated coverage by behavior
+
+- The HuggingFace suite covers model, dataset, and Space `/blob/` and `/resolve/` recognition, `/blob/` to `/resolve/` normalization, non-file rejection, token delivery only to resolver hosts, missing-token 401, a single authorization refresh, expired-signature refresh without re-downloading completed bytes, exhausted refreshes, the connection cap and its non-retroactive change, 429 and ignored-Range reduction to one connection, metadata persistence across a reopened `hf.db`, missing or corrupt `hf.db`, and paused resume after restart by re-resolution.
+- The engine network suite covers HTTP proxy basic authentication without credential leakage to the origin, SOCKS5 authentication with correct and wrong credentials, direct-mode override of an available system proxy, injected system-proxy resolution with HTTPS preference and the PAC and unreadable reasons, and cookie-file precedence over captured browser cookies with scope, expiry, and secure filtering.
+- The capture suite covers protocol version 2 acceptance, version 1 back-compatibility, cookie count and byte bounds, URL-scope rejection, and memory-only handle resolution before task creation.
+- The extension suites cover the default-off `sendCookies` normalization, URL-scoped cookie selection, version 2 pairing and capture bodies, popup settings, and the six-permission manifests.
+- Frontend suites cover the Network, HuggingFace, Video, and Extension settings sections, field validation with no partial save, token status with save, replace, and clear, HuggingFace details, cookie source and count without values, and the always-ask quality bypass.
+
+### Manual acceptance checklist
+
+Record date: 2026-11-15 (Asia/Shanghai, UTC+08:00). Host: macOS Darwin 27.3.0 arm64, development worktree build. No public HuggingFace request, no real system-proxy environment, and no browser-cookie capture was performed. Every item below is PENDING, not passed and not failed, and no automated or mock result is substituted for it.
+
+| Manual item | Status | Detail |
+| --- | --- | --- |
+| macOS public HuggingFace smoke with a real token | PENDING: not performed | No public `huggingface.co` file was resolved, downloaded, or hash-checked with a real token. |
+| Real system-proxy environment discovery and download | PENDING: not performed | No real macOS or Windows system proxy, PAC, WPAD, or unreadable configuration was exercised. |
+| Browser-cookie capture with the opt-in enabled | PENDING: not performed | No real browser cookie was captured, scoped, or used for a task. |
+| Windows proxy, SOCKS5, system-proxy, and HuggingFace checks | PENDING: not performed | No Windows run is claimed or inferred from macOS. |
+
+### Pending gates
+
+| Gate | Status |
+| --- | --- |
+| Phase 0 manual platform acceptance matrix | Pending |
+| Phase 1 24-hour soak | Pending |
+| Phase 1 Windows x64 compatibility | Pending |
+| Phase 2 manual real-application local HTTP download | Pending |
+| Phase 2 final targeted design-review recheck | Pending |
+| Phase 3 manual Chrome and Edge records | Pending |
+| Phase 3 Windows install, launch, and browser checks | Pending |
+| Phase 4 manual Firefox record | Pending |
+| Phase 4 Windows Firefox status | Pending |
+| Phase 5 manual component, video, HLS, cancellation, and Windows evidence | Pending |
+| Phase 6 manual HuggingFace, system-proxy, and browser-cookie evidence | Pending |
+
+Every earlier gate keeps its recorded pending status and is not restated as passed. No dated explicit waiver was provided.
+
+### Documentation and navigation evidence
+
+`MEMORY.md`, `docs/architecture.md`, and `docs/extension-protocol.md` describe the delivered proxy, HuggingFace, cookie, protocol, settings, and command behavior. The new implemented architecture note triplet records the lasting decision and is paired; the engine, desktop-interface, component-and-video, local-API, and Firefox records are partially superseded, keep their independently useful decisions, and cross-link the new record. The navigation index added the HuggingFace engine and store modules, the platform proxy module, and the new settings components; the catalog view was regenerated from the JSON authority and the hand-maintained Rust entries were reapplied. The context indexer discovers only TypeScript modules, so the Rust `engine`, `store`, `platform`, `commands`, `api`, `kernel`, `video`, `engine-harness`, `kernel-manifest`, and `video-fixture` entries remain hand-maintained and a rebuild without reapplication drops them.
+
+### Exit statement
+
+Phase 6 exit is BLOCKED. It requires the manual macOS public HuggingFace smoke, a real system-proxy environment, browser-cookie capture, and Windows proxy, SOCKS5, and HuggingFace checks, plus every Phase 0 through Phase 5 gate above to be complete or a dated explicit user waiver recorded. The automated evidence is green and is not a phase-exit approval.

@@ -1,4 +1,7 @@
-use oneget_lib::config::{CloseBehavior, Language, SettingsStore, Theme, CURRENT_SCHEMA_VERSION};
+use oneget_lib::config::{
+    CloseBehavior, Language, ProxyMode, ProxyType, SettingsStore, Theme, VideoQualityPreference,
+    CURRENT_SCHEMA_VERSION,
+};
 use oneget_lib::error::AppError;
 use oneget_lib::logging::LogLevel;
 use serde_json::{json, Value};
@@ -371,6 +374,273 @@ fn assert_typed_settings_error(err: &AppError, expected_code: &str) {
         err.code, expected_code,
         "future-schema save must return stable read-only code"
     );
+}
+
+// --- Network and video settings fields (schema stays 2) ---
+
+#[test]
+fn missing_file_creates_and_writes_network_and_video_defaults() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("settings.json");
+    assert!(!path.exists(), "settings file should start missing");
+
+    let store = SettingsStore::load(&path).expect("load missing settings");
+    let settings = store.settings();
+
+    assert_eq!(settings.schema_version, 2);
+    assert!(matches!(settings.proxy_mode, ProxyMode::Direct));
+    assert!(matches!(settings.proxy_type, ProxyType::Http));
+    assert_eq!(settings.proxy_host, None);
+    assert_eq!(settings.proxy_port, None);
+    assert_eq!(settings.default_cookies_file, None);
+    assert_eq!(settings.user_agent, None);
+    assert_eq!(settings.connect_timeout_secs, 15);
+    assert_eq!(settings.read_timeout_secs, 30);
+    assert_eq!(settings.retry_attempts, 5);
+    assert_eq!(settings.hf_connection_cap, 8);
+    assert!(settings.always_ask_quality);
+    assert!(matches!(
+        settings.video_quality_preference,
+        VideoQualityPreference::Mp4Compatible
+    ));
+
+    assert!(path.exists(), "missing settings file must be created");
+    let raw: Value = serde_json::from_str(&fs::read_to_string(&path).expect("read settings"))
+        .expect("settings must be valid JSON");
+    assert_eq!(raw.get("schemaVersion"), Some(&json!(2)));
+    assert_eq!(raw.get("proxyMode"), Some(&json!("direct")));
+    assert_eq!(raw.get("proxyType"), Some(&json!("http")));
+    assert_eq!(raw.get("connectTimeoutSecs"), Some(&json!(15)));
+    assert_eq!(raw.get("readTimeoutSecs"), Some(&json!(30)));
+    assert_eq!(raw.get("retryAttempts"), Some(&json!(5)));
+    assert_eq!(raw.get("hfConnectionCap"), Some(&json!(8)));
+    assert_eq!(raw.get("alwaysAskQuality"), Some(&json!(true)));
+    assert_eq!(
+        raw.get("videoQualityPreference"),
+        Some(&json!("mp4Compatible"))
+    );
+}
+
+#[test]
+fn document_missing_new_fields_loads_with_defaults_and_stays_schema_2() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("settings.json");
+    let legacy = json!({
+        "schemaVersion": 2,
+        "theme": "dark",
+        "logLevel": "warn",
+        "nestedExtra": { "keep": true }
+    });
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&legacy).expect("serialize settings"),
+    )
+    .expect("write settings without new fields");
+
+    let mut store = SettingsStore::load(&path).expect("load settings without new fields");
+    let settings = store.settings();
+    assert_eq!(settings.schema_version, 2);
+    assert!(matches!(settings.theme, Theme::Dark));
+    assert!(matches!(settings.proxy_mode, ProxyMode::Direct));
+    assert!(matches!(settings.proxy_type, ProxyType::Http));
+    assert_eq!(settings.proxy_host, None);
+    assert_eq!(settings.proxy_port, None);
+    assert_eq!(settings.default_cookies_file, None);
+    assert_eq!(settings.user_agent, None);
+    assert_eq!(settings.connect_timeout_secs, 15);
+    assert_eq!(settings.read_timeout_secs, 30);
+    assert_eq!(settings.retry_attempts, 5);
+    assert_eq!(settings.hf_connection_cap, 8);
+    assert!(settings.always_ask_quality);
+    assert!(matches!(
+        settings.video_quality_preference,
+        VideoQualityPreference::Mp4Compatible
+    ));
+    assert!(!store.is_read_only());
+
+    store
+        .save(store.settings())
+        .expect("save reloaded defaults");
+    let raw: Value = serde_json::from_str(&fs::read_to_string(&path).expect("read settings"))
+        .expect("settings must remain valid JSON");
+    assert_eq!(raw.get("schemaVersion"), Some(&json!(2)));
+    assert_eq!(raw.get("proxyMode"), Some(&json!("direct")));
+    assert_eq!(raw.get("connectTimeoutSecs"), Some(&json!(15)));
+    assert_eq!(raw.get("nestedExtra"), Some(&json!({ "keep": true })));
+}
+
+#[test]
+fn full_network_and_video_document_round_trips_without_loss_and_preserves_unknown_fields() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("settings.json");
+    let cookies_path = dir.path().join("cookies.txt");
+    fs::write(&cookies_path, b"# fixture cookies\n").expect("write cookies fixture");
+
+    let document = json!({
+        "schemaVersion": 2,
+        "theme": "dark",
+        "logLevel": "debug",
+        "language": "zh-CN",
+        "closeBehavior": "quit",
+        "proxyMode": "manual",
+        "proxyType": "socks5",
+        "proxyHost": "proxy.example.test",
+        "proxyPort": 1080,
+        "defaultCookiesFile": cookies_path.to_str().expect("cookies path is valid UTF-8"),
+        "userAgent": "OneGetFixture/1.0",
+        "connectTimeoutSecs": 60,
+        "readTimeoutSecs": 120,
+        "retryAttempts": 10,
+        "hfConnectionCap": 4,
+        "alwaysAskQuality": false,
+        "videoQualityPreference": "highest",
+        "unknownTopLevel": { "keep": true },
+        "unknownString": "preserve-me"
+    });
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&document).expect("serialize full settings"),
+    )
+    .expect("write full settings");
+
+    let mut store = SettingsStore::load(&path).expect("load full settings");
+    let settings = store.settings();
+    assert!(matches!(settings.proxy_mode, ProxyMode::Manual));
+    assert!(matches!(settings.proxy_type, ProxyType::Socks5));
+    assert_eq!(settings.proxy_host.as_deref(), Some("proxy.example.test"));
+    assert_eq!(settings.proxy_port, Some(1080));
+    assert_eq!(
+        settings.default_cookies_file.as_deref(),
+        Some(cookies_path.as_path())
+    );
+    assert_eq!(settings.user_agent.as_deref(), Some("OneGetFixture/1.0"));
+    assert_eq!(settings.connect_timeout_secs, 60);
+    assert_eq!(settings.read_timeout_secs, 120);
+    assert_eq!(settings.retry_attempts, 10);
+    assert_eq!(settings.hf_connection_cap, 4);
+    assert!(!settings.always_ask_quality);
+    assert!(matches!(
+        settings.video_quality_preference,
+        VideoQualityPreference::Highest
+    ));
+
+    store.save(store.settings()).expect("save full settings");
+
+    let reloaded = SettingsStore::load(&path)
+        .expect("reload settings")
+        .settings();
+    assert!(matches!(reloaded.proxy_mode, ProxyMode::Manual));
+    assert!(matches!(reloaded.proxy_type, ProxyType::Socks5));
+    assert_eq!(reloaded.proxy_host.as_deref(), Some("proxy.example.test"));
+    assert_eq!(reloaded.proxy_port, Some(1080));
+    assert_eq!(
+        reloaded.default_cookies_file.as_deref(),
+        Some(cookies_path.as_path())
+    );
+    assert_eq!(reloaded.user_agent.as_deref(), Some("OneGetFixture/1.0"));
+    assert_eq!(reloaded.connect_timeout_secs, 60);
+    assert_eq!(reloaded.read_timeout_secs, 120);
+    assert_eq!(reloaded.retry_attempts, 10);
+    assert_eq!(reloaded.hf_connection_cap, 4);
+    assert!(!reloaded.always_ask_quality);
+    assert!(matches!(
+        reloaded.video_quality_preference,
+        VideoQualityPreference::Highest
+    ));
+
+    let raw: Value = serde_json::from_str(&fs::read_to_string(&path).expect("read settings"))
+        .expect("settings must remain valid JSON");
+    assert_eq!(raw.get("schemaVersion"), Some(&json!(2)));
+    assert_eq!(raw.get("proxyMode"), Some(&json!("manual")));
+    assert_eq!(raw.get("proxyType"), Some(&json!("socks5")));
+    assert_eq!(raw.get("proxyHost"), Some(&json!("proxy.example.test")));
+    assert_eq!(raw.get("proxyPort"), Some(&json!(1080)));
+    assert_eq!(
+        raw.get("defaultCookiesFile").and_then(Value::as_str),
+        cookies_path.to_str()
+    );
+    assert_eq!(raw.get("userAgent"), Some(&json!("OneGetFixture/1.0")));
+    assert_eq!(raw.get("connectTimeoutSecs"), Some(&json!(60)));
+    assert_eq!(raw.get("readTimeoutSecs"), Some(&json!(120)));
+    assert_eq!(raw.get("retryAttempts"), Some(&json!(10)));
+    assert_eq!(raw.get("hfConnectionCap"), Some(&json!(4)));
+    assert_eq!(raw.get("alwaysAskQuality"), Some(&json!(false)));
+    assert_eq!(raw.get("videoQualityPreference"), Some(&json!("highest")));
+    assert_eq!(raw.get("unknownTopLevel"), Some(&json!({ "keep": true })));
+    assert_eq!(raw.get("unknownString"), Some(&json!("preserve-me")));
+}
+
+#[test]
+fn new_enums_use_the_contract_wire_values() {
+    assert_eq!(
+        serde_json::to_value(ProxyMode::Direct).expect("serialize proxy mode"),
+        json!("direct")
+    );
+    assert_eq!(
+        serde_json::to_value(ProxyMode::System).expect("serialize proxy mode"),
+        json!("system")
+    );
+    assert_eq!(
+        serde_json::to_value(ProxyMode::Manual).expect("serialize proxy mode"),
+        json!("manual")
+    );
+    assert_eq!(
+        serde_json::to_value(ProxyType::Http).expect("serialize proxy type"),
+        json!("http")
+    );
+    assert_eq!(
+        serde_json::to_value(ProxyType::Https).expect("serialize proxy type"),
+        json!("https")
+    );
+    assert_eq!(
+        serde_json::to_value(ProxyType::Socks5).expect("serialize proxy type"),
+        json!("socks5")
+    );
+    assert_eq!(
+        serde_json::to_value(VideoQualityPreference::Mp4Compatible)
+            .expect("serialize video quality preference"),
+        json!("mp4Compatible")
+    );
+    assert_eq!(
+        serde_json::to_value(VideoQualityPreference::Highest)
+            .expect("serialize video quality preference"),
+        json!("highest")
+    );
+
+    assert!(matches!(
+        serde_json::from_value::<ProxyMode>(json!("direct")).expect("parse proxy mode"),
+        ProxyMode::Direct
+    ));
+    assert!(matches!(
+        serde_json::from_value::<ProxyMode>(json!("system")).expect("parse proxy mode"),
+        ProxyMode::System
+    ));
+    assert!(matches!(
+        serde_json::from_value::<ProxyMode>(json!("manual")).expect("parse proxy mode"),
+        ProxyMode::Manual
+    ));
+    assert!(matches!(
+        serde_json::from_value::<ProxyType>(json!("http")).expect("parse proxy type"),
+        ProxyType::Http
+    ));
+    assert!(matches!(
+        serde_json::from_value::<ProxyType>(json!("https")).expect("parse proxy type"),
+        ProxyType::Https
+    ));
+    assert!(matches!(
+        serde_json::from_value::<ProxyType>(json!("socks5")).expect("parse proxy type"),
+        ProxyType::Socks5
+    ));
+    assert!(matches!(
+        serde_json::from_value::<VideoQualityPreference>(json!("mp4Compatible"))
+            .expect("parse video quality preference"),
+        VideoQualityPreference::Mp4Compatible
+    ));
+    assert!(matches!(
+        serde_json::from_value::<VideoQualityPreference>(json!("highest"))
+            .expect("parse video quality preference"),
+        VideoQualityPreference::Highest
+    ));
 }
 
 fn assert_typed_app_error(err: &AppError) {

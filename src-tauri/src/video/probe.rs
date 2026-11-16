@@ -2,8 +2,9 @@
 //!
 //! The probe validates the URL before any spawn, runs yt-dlp through the guarded
 //! process runner with a fixed metadata argument set, and turns the JSON result
-//! into [`VideoMetadata`]. Cookies, proxy, and runtime paths are forwarded as
-//! arguments only and never logged.
+//! into [`VideoMetadata`]. Cookies and runtime paths are forwarded as arguments;
+//! the effective proxy reaches the child only through allowlisted environment
+//! variables and is never logged.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,6 +15,7 @@ use url::Url;
 use super::error::VideoError;
 use super::metadata::{VideoFormat, VideoMetadata};
 use super::process::{run_probe, ProcessSpec, TimeoutPolicy};
+use crate::engine::http::ProxyConfig;
 
 /// Maximum accepted source URL length in bytes.
 const MAX_URL_BYTES: usize = 8 * 1024;
@@ -33,6 +35,8 @@ pub struct ProbeOptions {
     pub cookies_file: Option<PathBuf>,
     /// Optional credential-free HTTP proxy URL passed to yt-dlp.
     pub proxy_url: Option<String>,
+    /// Effective proxy from settings, delivered through the child environment.
+    pub proxy: Option<ProxyConfig>,
     /// Bound for the whole probe.
     pub timeout: Duration,
 }
@@ -44,7 +48,7 @@ pub async fn probe_video(url: &str, options: &ProbeOptions) -> Result<VideoMetad
         program: options.yt_dlp.clone(),
         args: probe_args(parsed.as_str(), options),
         cwd: None,
-        env: Vec::new(),
+        env: proxy_environment(options.proxy.as_ref(), options.proxy_url.as_deref()),
     };
     let policy = TimeoutPolicy {
         probe: options.timeout,
@@ -94,13 +98,48 @@ fn probe_args(url: &str, options: &ProbeOptions) -> Vec<String> {
         args.push("--cookies".to_string());
         args.push(cookies_file.to_string_lossy().into_owned());
     }
-    if let Some(proxy_url) = &options.proxy_url {
-        args.push("--proxy".to_string());
-        args.push(proxy_url.clone());
-    }
 
     args.push(url.to_string());
     args
+}
+
+/// Build the proxy environment for one yt-dlp child.
+///
+/// A per-video proxy URL overrides the effective settings proxy. Both are
+/// delivered only through `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`, so no
+/// credential or proxy flag ever reaches the command line. Settings credentials
+/// are embedded into the environment URL because yt-dlp and its transport read
+/// them from there.
+pub(crate) fn proxy_environment(
+    proxy: Option<&ProxyConfig>,
+    proxy_url: Option<&str>,
+) -> Vec<(String, String)> {
+    let url = match proxy_url {
+        Some(value) if !value.trim().is_empty() => Some(value.to_string()),
+        Some(_) => None,
+        None => proxy.map(proxy_environment_url),
+    };
+    let Some(url) = url else {
+        return Vec::new();
+    };
+    ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]
+        .into_iter()
+        .map(|name| (name.to_string(), url.clone()))
+        .collect()
+}
+
+fn proxy_environment_url(proxy: &ProxyConfig) -> String {
+    let Some(username) = proxy.username.as_deref() else {
+        return proxy.url.clone();
+    };
+    let Ok(mut url) = Url::parse(&proxy.url) else {
+        return proxy.url.clone();
+    };
+    if url.set_username(username).is_err() {
+        return proxy.url.clone();
+    }
+    let _ = url.set_password(proxy.password.as_deref());
+    url.to_string()
 }
 
 fn parse_metadata(bytes: &[u8]) -> Result<VideoMetadata, VideoError> {

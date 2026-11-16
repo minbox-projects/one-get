@@ -19,6 +19,7 @@ use std::time::Duration;
 use futures_util::future::LocalBoxFuture;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedReceiver;
+use url::Url;
 
 use super::control::{ControlAction, DownloadControl};
 use super::download::{run_video_task, RunOutcome};
@@ -29,6 +30,7 @@ use super::probe::{probe_video, ProbeOptions};
 use super::process::TimeoutPolicy;
 use super::quality::{build_quality_model, QualityModel};
 use crate::engine::error::EngineError;
+use crate::engine::http::ProxyConfig;
 use crate::engine::state::TaskState;
 use crate::kernel::error::KernelError;
 use crate::kernel::store::ComponentStore;
@@ -54,6 +56,8 @@ pub struct VideoServiceConfig {
     pub timeouts: TimeoutPolicy,
     /// Minimum delay between persisted progress snapshots.
     pub progress_persist_interval: Duration,
+    /// Effective proxy delivered to every probe and download child.
+    pub proxy: Option<ProxyConfig>,
 }
 
 /// A confirmed video download request.
@@ -127,8 +131,10 @@ impl VideoService {
                     }
                 };
 
+                let proxy = config.proxy.clone();
                 let state = Rc::new(VideoRuntime {
                     config,
+                    proxy: RefCell::new(proxy),
                     full_urls: RefCell::new(HashMap::new()),
                 });
 
@@ -170,7 +176,19 @@ impl VideoService {
 
     /// Persist one video task and return its identifier.
     pub fn add(&self, request: StartVideoRequest) -> Result<String, VideoError> {
-        self.call(move |reply| Command::Add(request, reply), expect_id)
+        self.add_with_connections(request, None)
+    }
+
+    /// Persist one video task with its requested connection count.
+    pub fn add_with_connections(
+        &self,
+        request: StartVideoRequest,
+        connections: Option<u32>,
+    ) -> Result<String, VideoError> {
+        self.call(
+            move |reply| Command::Add(request, connections, reply),
+            expect_id,
+        )
     }
 
     /// Pause a running, queued, or already-paused video task.
@@ -209,6 +227,13 @@ impl VideoService {
             move |reply| Command::Probe(url, cookies_file, proxy_url, reply),
             expect_probe,
         )
+    }
+
+    /// Replace the proxy used by later probes and downloads.
+    ///
+    /// A task that already started keeps the proxy it captured at spawn.
+    pub fn set_proxy(&self, proxy: Option<ProxyConfig>) -> Result<(), VideoError> {
+        self.call(move |reply| Command::SetProxy(proxy, reply), expect_unit)
     }
 
     /// Kill active work, persist it paused, and refuse later requests.
@@ -253,16 +278,24 @@ impl VideoService {
 
 pub(crate) struct VideoRuntime {
     pub(crate) config: VideoServiceConfig,
+    proxy: RefCell<Option<ProxyConfig>>,
     full_urls: RefCell<HashMap<String, String>>,
 }
 
+impl VideoRuntime {
+    pub(crate) fn proxy(&self) -> Option<ProxyConfig> {
+        self.proxy.borrow().clone()
+    }
+}
+
 enum Command {
-    Add(StartVideoRequest, ReplySender),
+    Add(StartVideoRequest, Option<u32>, ReplySender),
     Probe(String, Option<PathBuf>, Option<String>, ReplySender),
     Pause(String, ReplySender),
     Resume(String, ReplySender),
     Cancel(String, ReplySender),
     Retry(String, ReplySender),
+    SetProxy(Option<ProxyConfig>, ReplySender),
     Shutdown(Sender<Result<(), VideoError>>),
 }
 
@@ -470,24 +503,30 @@ async fn handle_active_command(
 
 fn handle_idle_command(runtime: &Rc<VideoRuntime>, command: Command, want_run: &mut bool) -> bool {
     match command {
-        Command::Add(request, reply) => {
-            let result = add_request(runtime, request);
+        Command::Add(request, connections, reply) => {
+            let result = add_request(runtime, request, connections);
             if result.is_ok() {
                 *want_run = true;
             }
             let _ = reply.send(result.map(Reply::Id));
         }
         Command::Probe(url, cookies_file, proxy_url, reply) => {
+            if let Err(error) = validate_per_video_proxy(proxy_url.as_deref()) {
+                let _ = reply.send(Err(error));
+                return true;
+            }
             let tools = resolve_execution_tools(&runtime.config);
             match tools {
                 Ok(tools) => {
                     let timeout = runtime.config.timeouts.probe;
+                    let proxy = runtime.proxy();
                     tokio::spawn(async move {
                         let options = ProbeOptions {
                             yt_dlp: tools.yt_dlp,
                             deno: tools.deno,
                             cookies_file,
                             proxy_url,
+                            proxy,
                             timeout,
                         };
                         let result = probe_video(&url, &options).await.map(|metadata| {
@@ -522,6 +561,10 @@ fn handle_idle_command(runtime: &Rc<VideoRuntime>, command: Command, want_run: &
             }
             let _ = reply.send(result.map(|()| Reply::Unit));
         }
+        Command::SetProxy(proxy, reply) => {
+            *runtime.proxy.borrow_mut() = proxy;
+            let _ = reply.send(Ok(Reply::Unit));
+        }
         Command::Shutdown(reply) => {
             let _ = reply.send(Ok(()));
             return false;
@@ -552,7 +595,10 @@ async fn settle_interrupted(
 fn add_request(
     runtime: &Rc<VideoRuntime>,
     request: StartVideoRequest,
+    connections: Option<u32>,
 ) -> Result<String, VideoError> {
+    validate_per_video_proxy(request.proxy_url.as_deref())?;
+
     let requirements = if request.audio_only {
         vec![
             crate::kernel::tools::ToolRequirement::YtDlp,
@@ -606,6 +652,13 @@ fn add_request(
     if let Err(error) = runtime.config.store.patch_video_json(&id, &patch) {
         let _ = runtime.config.store.delete_task(&id);
         return Err(store_error(error));
+    }
+
+    if let Some(connections) = connections {
+        if let Err(error) = runtime.config.store.record_connections(&id, connections) {
+            let _ = runtime.config.store.delete_task(&id);
+            return Err(store_error(error));
+        }
     }
 
     runtime
@@ -808,6 +861,30 @@ fn platform_error(error: PlatformError) -> VideoError {
 
 fn invalid_state(message: impl Into<String>) -> VideoError {
     VideoError::new("INVALID_STATE", message)
+}
+
+/// The per-video input stays a credential-free HTTP or HTTPS proxy.
+///
+/// Settings proxies may use SOCKS5; a task-level override keeps the narrower
+/// input contract its command surface already exposes.
+fn validate_per_video_proxy(proxy: Option<&str>) -> Result<(), VideoError> {
+    let Some(value) = proxy else {
+        return Ok(());
+    };
+    let validated =
+        crate::engine::http::validate_proxy_url(value).map_err(|_| invalid_per_video_proxy())?;
+    let url = Url::parse(&validated).map_err(|_| invalid_per_video_proxy())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(invalid_per_video_proxy());
+    }
+    Ok(())
+}
+
+fn invalid_per_video_proxy() -> VideoError {
+    VideoError::new(
+        "INVALID_PROXY_URL",
+        "the per-video proxy must be a credential-free HTTP or HTTPS URL",
+    )
 }
 
 fn service_stopped() -> VideoError {

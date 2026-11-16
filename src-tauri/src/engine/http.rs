@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, COOKIE, LOCATION};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, COOKIE, LOCATION, USER_AGENT};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Response};
 use url::Url;
@@ -22,10 +22,10 @@ const MAX_URL_BYTES: usize = 8 * 1024;
 /// Maximum number of redirects followed before the chain fails.
 const MAX_REDIRECTS: usize = 10;
 
-/// An in-memory HTTP proxy configuration.
+/// An in-memory HTTP, HTTPS, or SOCKS5 proxy configuration.
 ///
 /// The URL must not embed credentials; the optional username and password are
-/// applied as basic authentication and are never persisted or logged.
+/// applied as proxy authentication and are never persisted or logged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProxyConfig {
     /// Proxy URL without embedded userinfo.
@@ -82,10 +82,13 @@ pub fn validate_url(input: &str) -> Result<String, EngineError> {
         ));
     }
 
-    Ok(url.as_str().to_string())
+    super::hf::normalize_download_url(url.as_str())
 }
 
 /// Parse and validate a proxy URL that must not embed credentials.
+///
+/// HTTP, HTTPS, and SOCKS5 proxies are accepted. Credentials are supplied
+/// separately through [`ProxyConfig`] so they never enter the URL.
 pub fn validate_proxy_url(input: &str) -> Result<String, EngineError> {
     if input.is_empty() || input.len() > MAX_URL_BYTES {
         return Err(invalid_proxy("the proxy URL is empty or too long"));
@@ -95,8 +98,10 @@ pub fn validate_proxy_url(input: &str) -> Result<String, EngineError> {
     }
 
     let url = Url::parse(input).map_err(|_| invalid_proxy("the proxy URL is not well formed"))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(invalid_proxy("only HTTP and HTTPS proxies are supported"));
+    if !matches!(url.scheme(), "http" | "https" | "socks5") {
+        return Err(invalid_proxy(
+            "only HTTP, HTTPS, and SOCKS5 proxies are supported",
+        ));
     }
     if url.host_str().map(str::is_empty).unwrap_or(true) {
         return Err(invalid_proxy("the proxy URL does not contain a host"));
@@ -206,11 +211,40 @@ pub fn build_client_with_options(
     read: Duration,
     proxy: Option<&ProxyConfig>,
 ) -> Result<Client, EngineError> {
+    build_client_with_network(connect, read, proxy, None)
+}
+
+/// Build a client with explicit timeouts, proxy behavior, and a fallback
+/// `User-Agent`.
+///
+/// The User-Agent is installed as a default header, so a request-level value
+/// replaces it for the task that supplied one. Without either value no global
+/// User-Agent is sent.
+pub fn build_client_with_network(
+    connect: Duration,
+    read: Duration,
+    proxy: Option<&ProxyConfig>,
+    user_agent: Option<&str>,
+) -> Result<Client, EngineError> {
     let mut builder = Client::builder()
         .http1_only()
         .connect_timeout(connect)
         .read_timeout(read)
         .redirect(Policy::none());
+
+    if let Some(agent) = user_agent {
+        let mut defaults = HeaderMap::new();
+        defaults.insert(
+            USER_AGENT,
+            HeaderValue::from_str(agent).map_err(|_| {
+                EngineError::new(
+                    "INVALID_HEADER",
+                    "the configured User-Agent is not a valid header value",
+                )
+            })?,
+        );
+        builder = builder.default_headers(defaults);
+    }
 
     match proxy {
         None => builder = builder.no_proxy(),

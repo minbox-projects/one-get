@@ -166,6 +166,7 @@ impl Harness {
                 default_destination: paths.downloads.clone(),
                 timeouts: TimeoutPolicy::default(),
                 progress_persist_interval: Duration::from_millis(10),
+                proxy: None,
             })
             .expect("video service starts"),
         );
@@ -417,6 +418,7 @@ fn start_request(harness: &Harness, filename: &str) -> VideoStartRequest {
         }),
         cookies_file: None,
         proxy_url: None,
+        connections: None,
     }
 }
 
@@ -594,6 +596,45 @@ fn video_start_rejects_invalid_options_before_persisting() {
     assert_eq!(tasks.len(), 1, "a valid request creates exactly one task");
     assert_eq!(tasks[0].id, id);
     assert_eq!(tasks[0].kind, TaskKind::Video);
+
+    harness.shutdown();
+}
+
+#[test]
+fn video_start_persists_connections_and_rejects_out_of_range() {
+    let harness = Harness::new();
+    harness.install_download();
+    let store = harness.store();
+
+    let mut request = start_request(&harness, "clip.mp4");
+    request.connections = Some(6);
+    let id = video_start(&harness.state, request).expect("a video task starts");
+
+    let summaries = downloads_list(&harness.state).expect("list summaries");
+    let summary = summaries
+        .iter()
+        .find(|summary| summary.id == id)
+        .expect("the video row is listed");
+    assert_eq!(
+        summary.connections, 6,
+        "the requested connection count is persisted"
+    );
+
+    for invalid in [0_u32, 65] {
+        let mut request = start_request(&harness, "clip.mp4");
+        request.connections = Some(invalid);
+        let error = video_start(&harness.state, request)
+            .expect_err(&format!("connections {invalid} must be rejected"));
+        assert_eq!(
+            error.code, "INVALID_CONNECTIONS",
+            "connections {invalid} must carry the typed code"
+        );
+        assert_eq!(
+            store.list_tasks().expect("tasks list").len(),
+            1,
+            "rejected connections {invalid} must create no additional task"
+        );
+    }
 
     harness.shutdown();
 }

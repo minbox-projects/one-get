@@ -26,7 +26,7 @@ use crate::api::pairing_store::PairingStore;
 use crate::api::protocol::API_PORT;
 use crate::api::rate_limit::RateLimitPolicy;
 use crate::api::server::{ApiServerConfig, ApiServerHandle};
-use crate::app_state::{AppState, PairingRuntime};
+use crate::app_state::{network_options, AppState, PairingRuntime};
 use crate::commands::app::{
     AutostartService, KeyringSecretService, NotificationService, PlatformQuitService, QuitService,
     SecretService,
@@ -71,6 +71,12 @@ pub fn run() {
             commands::ipc::settings_status,
             commands::ipc::settings_save,
             commands::ipc::deep_link_last,
+            commands::ipc::hf_token_status,
+            commands::ipc::hf_token_save,
+            commands::ipc::hf_token_clear,
+            commands::ipc::proxy_credentials_status,
+            commands::ipc::proxy_credentials_save,
+            commands::ipc::proxy_credentials_clear,
             commands::ipc::diagnostics_secret_roundtrip,
             commands::ipc::diagnostics_notification_status,
             commands::ipc::diagnostics_send_notification,
@@ -153,6 +159,7 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         EngineOptions { max_concurrent },
     )?);
     engine.apply_settings(max_concurrent, snapshot.global_rate_limit)?;
+    engine.apply_network_settings(network_options(&snapshot))?;
 
     let secrets: Arc<dyn SecretService> = Arc::new(KeyringSecretService::new());
     let notifications: Arc<dyn NotificationService> =
@@ -192,6 +199,7 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 default_destination: destination.clone(),
                 timeouts: TimeoutPolicy::default(),
                 progress_persist_interval: std::time::Duration::from_millis(250),
+                proxy: None,
             })
             .ok()
         })
@@ -215,6 +223,12 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         state = state.with_video(video);
     }
     let state = Arc::new(state);
+    // Applying the saved proxy is best effort: an unavailable system proxy
+    // records a stable reason and leaves direct connections usable. Opening
+    // the optional Hugging Face metadata store and reading the saved token is
+    // likewise best effort.
+    let _ = state.apply_proxy_settings(&snapshot);
+    let _ = state.apply_huggingface_settings(&snapshot);
 
     if let Some(store) = pairing_store {
         let bridge = Arc::new(TauriDesktopBridge::new(

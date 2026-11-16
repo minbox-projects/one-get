@@ -18,7 +18,7 @@ const EN_US = {
   "popup.takeoverFailed.token_revoked":
     "Pairing expired before {filename} could be taken over. Pair again, then retry.",
   "popup.takeoverFailed.update_required":
-    "OneGet needs an update before it can take over {filename}.",
+    "Update OneGet or the extension to continue. {filename} was not taken over.",
   "popup.manifestUnavailable": "HLS and DASH manifests cannot be downloaded directly.",
   "popup.kind.video": "Video",
   "popup.kind.audio": "Audio",
@@ -42,6 +42,7 @@ const EN_US = {
   "popup.updateRequired": "Update OneGet or the extension to continue.",
   "popup.settings": "Takeover settings",
   "popup.takeoverEnabled": "Take over browser downloads",
+  "popup.sendCookiesWithCapture": "Send cookies with capture",
   "popup.minimumSize": "Minimum size in bytes",
   "popup.blacklist": "Blocked hosts",
   "popup.blacklistHint": "One host per line.",
@@ -74,7 +75,7 @@ const ZH_CN = {
   "popup.takeoverFailed.token_revoked":
     "在接管 {filename} 之前配对已失效。请重新配对后重试。",
   "popup.takeoverFailed.update_required":
-    "OneGet 需要更新后才能接管 {filename}。",
+    "请更新 OneGet 或扩展后继续。无法接管 {filename}。",
   "popup.manifestUnavailable": "HLS 和 DASH 清单无法直接下载。",
   "popup.kind.video": "视频",
   "popup.kind.audio": "音频",
@@ -98,6 +99,7 @@ const ZH_CN = {
   "popup.updateRequired": "请更新 OneGet 或扩展后继续。",
   "popup.settings": "接管设置",
   "popup.takeoverEnabled": "接管浏览器下载",
+  "popup.sendCookiesWithCapture": "捕获时发送 Cookie",
   "popup.minimumSize": "最小大小（字节）",
   "popup.blacklist": "屏蔽的主机",
   "popup.blacklistHint": "每行一个主机。",

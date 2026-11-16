@@ -1030,6 +1030,43 @@ describe("AppShell settings", () => {
 });
 
 describe("AppShell capture prefill", () => {
+
+  it("delivers a pending prefill cookie handle to New Download and includes it on submit (E4)", async () => {
+    const user = userEvent.setup();
+    const pending = pendingPrefill([prefillItem()], 1_700_000_000_777) as PendingPrefill & {
+      items: Array<PendingPrefillItem & { cookieHandle: string }>;
+    };
+    (pending.items[0] as PendingPrefillItem & { cookieHandle: string }).cookieHandle =
+      "cookie-handle-shell-e4";
+    const added: AddDownloadRequest[] = [];
+    takePendingPrefill.mockResolvedValue({ ok: true, data: pending as PendingPrefill });
+    mockCaptureIpc([], added);
+
+    renderShell();
+
+    const dialog = await screen.findByRole("dialog", {
+      name: /new download/i,
+    });
+    expect(within(dialog).getByLabelText(/^url$/i)).toHaveValue(
+      pending.items[0].url,
+    );
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith(
+        "downloads_probe",
+        expect.anything(),
+      );
+    });
+
+    await user.click(dialogSubmitButton(dialog));
+
+    await waitFor(() => {
+      expect(added).toHaveLength(1);
+    });
+    expect((added[0] as AddDownloadRequest & { cookieHandle?: string | null }).cookieHandle).toBe(
+      "cookie-handle-shell-e4",
+    );
+  });
+
   it("subscribes before fetching a single pending prefill and opens New Download without submitting", async () => {
     const pending = pendingPrefill([prefillItem()]);
     const added: AddDownloadRequest[] = [];

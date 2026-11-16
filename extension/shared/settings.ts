@@ -6,6 +6,12 @@ export interface ExtensionSettings {
   categories: Record<ResourceCategory, boolean>;
   minimumSizeBytes: number;
   blacklistHosts: string[];
+  /**
+   * Opt-in cookie capture. Stored documents written before this field existed
+   * omit it, so it stays optional on input; `normalizeSettings` always fills a
+   * concrete boolean and any value other than `true` resolves to off.
+   */
+  sendCookies?: boolean;
 }
 
 export type SettingsDocument = Record<string, unknown> & ExtensionSettings;
@@ -23,6 +29,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   },
   minimumSizeBytes: 1024 * 1024,
   blacklistHosts: [],
+  sendCookies: false,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -117,6 +124,7 @@ export function normalizeSettings(raw: unknown): ExtensionSettings {
     categories,
     minimumSizeBytes: normalizeMinimumSize(raw.minimumSizeBytes),
     blacklistHosts: normalizeBlacklist(raw.blacklistHosts),
+    sendCookies: raw.sendCookies === true,
   };
 }
 
@@ -131,5 +139,10 @@ export function mergeSettingsDocument(
     categories: cloneCategories(replacement.categories),
     minimumSizeBytes: replacement.minimumSizeBytes,
     blacklistHosts: [...replacement.blacklistHosts],
+    // Only write the opt-in when the caller supplied it, so a legacy caller
+    // that omits the field leaves any existing value untouched.
+    ...(replacement.sendCookies === undefined
+      ? {}
+      : { sendCookies: replacement.sendCookies === true }),
   };
 }

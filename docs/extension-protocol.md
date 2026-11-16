@@ -1,6 +1,6 @@
 # OneGet Browser Capture Protocol
 
-This document specifies the loopback protocol between the OneGet desktop application and its Chromium and Firefox extensions. Protocol version 1 covers health discovery, pairing, capture, and revocation. The desktop service is optional: a bind or pairing-database failure leaves ordinary downloads and settings usable, and the pairing surface reports the service as unavailable.
+This document specifies the loopback protocol between the OneGet desktop application and its Chromium and Firefox extensions. Protocol version 2 covers health discovery, pairing, capture, revocation, and an optional opt-in cookie list; the desktop still accepts version 1 captures, which carry no cookies. The desktop service is optional: a bind or pairing-database failure leaves ordinary downloads and settings usable, and the pairing surface reports the service as unavailable.
 
 ## Service and health
 
@@ -12,7 +12,7 @@ The service binds only to `127.0.0.1`. The production port is `37652`; a test bu
 {
   "ok": true,
   "appVersion": "0.1.0",
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "capabilities": ["capture", "prefill", "takeover"]
 }
 ```
@@ -28,7 +28,7 @@ Every route is rejected before any task or prefill is created. The checks run in
 3. The route-specific origin rule. `GET /health` allows an absent `Origin` and rejects a present non-extension origin. `POST /pair`, `POST /capture`, and `POST /pair/revoke` require an exact browser-extension origin.
 4. A declared `application/json` content type for `POST /pair` and `POST /capture`. A `charset` or other parameter after the media type is allowed. `POST /pair/revoke` needs no body and does not require this header.
 5. Bearer authentication for `POST /capture` and `POST /pair/revoke`. The token is read only from `Authorization: Bearer <token>`; a missing, malformed, query-string, or invalid token is rejected.
-6. The per-route rate limit, then body reading and parsing, protocol version, and per-item validation.
+6. The per-route rate limit, then body reading and parsing, protocol version (`1` or `2`), and per-item validation.
 
 A supported browser-extension origin is exactly one of two forms. A Chromium origin is `chrome-extension://` followed by 32 lowercase `a`–`p` characters. A Firefox origin is `moz-extension://` followed by a lowercase UUID in canonical 8-4-4-4-12 form, using only digits and `a`–`f` with hyphens at those fixed positions. An uppercase UUID, a UUID with a path, query, or fragment, another extension scheme, a web-page origin, `Origin: null`, a missing write origin, and a stolen token presented with a different origin are rejected. The accepted scheme changes no admission order, limit, token binding, or error code. No wildcard CORS header is returned.
 
@@ -43,13 +43,15 @@ A supported browser-extension origin is exactly one of two forms. A Chromium ori
 | Capture headers per item | 10 |
 | Capture header name | 128 bytes |
 | Capture header value | 2,048 bytes |
+| Capture cookies per item (version 2) | 100 |
+| Capture cookie name and value bytes per item (version 2) | 8,192 bytes combined |
 | Request headers | 64 count; 16 KiB combined name and value bytes |
 | Pairing attempts per origin | 10 requests per 60 seconds |
 | Capture requests per token | 120 requests per 60 seconds |
 | Retained rate-limit keys | 256 per limiter |
 | Retained duplicate records | 256 token-and-source entries |
 
-A body over the limit returns 413. An oversized header set, too many items, an oversized URL, header, or filename, and an invalid body return 400. A protocol version other than 1 returns 409. A takeover request with anything other than exactly one item returns 400. A rate-limited request returns 429 with `Retry-After` in whole seconds and creates nothing. Limiter and duplicate state are bounded and evict the oldest entries.
+A body over the limit returns 413. An oversized header set, too many items, an oversized URL, header, filename, or cookie list, and an invalid body return 400. A protocol version other than `1` or `2` returns 409. A takeover request with anything other than exactly one item returns 400. A rate-limited request returns 429 with `Retry-After` in whole seconds and creates nothing. Limiter and duplicate state are bounded and evict the oldest entries.
 
 ## Pairing
 
@@ -59,7 +61,7 @@ The desktop generates an eight-digit decimal code with a ten-minute lifetime. On
 
 ```json
 {
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "code": "12345678",
   "label": "Optional client label"
 }
@@ -94,7 +96,7 @@ The pairing database is a separate SQLite file, `pairing.db`, with schema versio
 
 ```json
 {
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "intent": "takeover",
   "sourceId": "takeover:123",
   "items": [
@@ -105,7 +107,17 @@ The pairing database is a separate SQLite file, `pairing.db`, with schema versio
       "mime": "application/zip",
       "size": 1048576,
       "kind": "file",
-      "headers": [{ "name": "Referer", "value": "https://example.test/page" }]
+      "headers": [{ "name": "Referer", "value": "https://example.test/page" }],
+      "cookies": [
+        {
+          "name": "session",
+          "value": "<opaque value>",
+          "domain": "example.test",
+          "path": "/",
+          "secure": true,
+          "expires": 1763000000
+        }
+      ]
     }
   ]
 }
@@ -122,8 +134,9 @@ The pairing database is a separate SQLite file, `pairing.db`, with schema versio
 | `size` | Optional non-negative byte count. |
 | `kind` | Optional `file`, `hls`, `dash`, or `video-platform`; absence means `file`. |
 | `headers` | Optional safe headers. |
+| `cookies` | Optional protocol version 2 cookie list, at most 100 entries and 8 KiB of combined name and value bytes; every entry must match the item URL by host, include-subdomains, path, secure, and expiry. |
 
-Only `Referer`, `User-Agent`, `Accept`, and `Accept-Language` are accepted as capture headers. Names are matched case-insensitively; a different name, a CR or LF in a name or value, or a duplicate normalized name is rejected. Cookies, authorization values, and arbitrary request headers are never accepted. Only `kind: "file"` is usable; `hls`, `dash`, and `video-platform` are rejected per item with `UNSUPPORTED_KIND`, and the UI explains that video parsing is not part of this capability.
+Only `Referer`, `User-Agent`, `Accept`, and `Accept-Language` are accepted as capture headers. Names are matched case-insensitively; a different name, a CR or LF in a name or value, or a duplicate normalized name is rejected. Authorization values and arbitrary request headers are never accepted. A version 2 `cookies` list is accepted only as URL-scoped data: an out-of-scope entry rejects the item with `COOKIE_SCOPE` and an over-limit list with `COOKIE_LIMIT`, and the values are never persisted or logged. A version 1 item carries no cookie list. Only `kind: "file"` is usable; `hls`, `dash`, and `video-platform` are rejected per item with `UNSUPPORTED_KIND`, and the UI explains that video parsing is not part of this capability.
 
 A per-item failure does not discard the other items. A request with no usable item returns 400 `INVALID_CAPTURE_ITEM` and creates nothing.
 
@@ -154,13 +167,13 @@ A successful prefill returns:
 }
 ```
 
-Prefill replaces any earlier pending prefill with one bounded in-memory list, emits `app://capture-prefill`, and focuses the main window. It never creates a task. The desktop fetches the single pending prefill when the interface opens and also subscribes to the event, so an event that fires before subscription is still delivered. One item opens the New Download dialog with URL, filename, and a `Referer` header prefilled; multiple items open the Batch Download dialog with their URLs. If any dialog is already open, the prefill waits until it closes. Submitting the dialog creates one task per valid submitted item; dismissing it drops the prefill. Prefill content never survives an app restart. A new prefill replaces the previous pending one.
+Prefill replaces any earlier pending prefill with one bounded in-memory list, emits `app://capture-prefill`, and focuses the main window. It never creates a task. The desktop fetches the single pending prefill when the interface opens and also subscribes to the event, so an event that fires before subscription is still delivered. One item opens the New Download dialog with URL, filename, and a `Referer` header prefilled; multiple items open the Batch Download dialog with their URLs. A version 2 cookie list is retained in a memory-only vault behind an opaque single-use handle that the dialog carries into the created task; an unknown or already-used handle fails with `INVALID_COOKIE_HANDLE` before a task exists. If any dialog is already open, the prefill waits until it closes. Submitting the dialog creates one task per valid submitted item; dismissing it drops the prefill and its cookies. Prefill content and captured cookies never survive an app restart. A new prefill replaces the previous pending one.
 
 ## Takeover sequence
 
 The extension evaluates a browser download when the browser reports it. Chromium uses `downloads.onDeterminingFilename`; Firefox uses `downloads.onCreated`, and its `DownloadItem` is reduced to a safe basename or a URL-derived filename, with `totalBytes: -1` treated as an unknown size:
 
-1. Read the stored token and the current settings. An unpaired extension allows the download.
+1. Read the stored token and the current settings. An unpaired extension allows the download. When the default-off cookie opt-in is enabled, query only the cookies scoped to the download URL and attach them to a version 2 capture; otherwise read no cookie.
 2. Classify the target by filename extension first and MIME type second.
 3. Refuse takeover when takeover is disabled, the URL is not HTTP or HTTPS, the download is incognito or extension-originated, the host is blacklisted exactly or as a subdomain, the target is an HLS or DASH manifest, the kind is unsupported, the category is disabled, or a known size is below the minimum. An unknown size is exempt from the minimum-size rule.
 4. Send one takeover capture with a token-bound source identifier.
@@ -197,6 +210,8 @@ Errors use a JSON body `{ "code": "<stable code>", "message": "<safe prose>" }`.
 | 400 | `TOO_MANY_ITEMS` | More than 50 capture items. |
 | 400 | `TAKEOVER_ITEM_COUNT` | A takeover request does not contain exactly one item. |
 | 400 | `INVALID_CAPTURE_ITEM` | No item survived validation. |
+| 400 | `COOKIE_SCOPE` | A version 2 cookie does not match the item URL's scope. |
+| 400 | `COOKIE_LIMIT` | A version 2 cookie list exceeds 100 entries or 8 KiB. |
 | 401 | `UNAUTHORIZED` | Missing, malformed, unknown, revoked, or origin-mismatched token. |
 | 401 | `INVALID_CODE` | Wrong, expired, reused, or superseded pairing code. |
 | 403 | `INVALID_HOST` | Missing or non-exact loopback `Host`. |
@@ -213,7 +228,7 @@ Errors use a JSON body `{ "code": "<stable code>", "message": "<safe prose>" }`.
 | 503 | `ENGINE_UNAVAILABLE` | The engine service is unavailable for a takeover. |
 | 503 | `API_BIND_FAILED` | The loopback port could not be bound at startup. |
 
-Per-item rejection codes are `INVALID_URL`, `CREDENTIALED_URL`, `UNSAFE_FILENAME`, `INVALID_REFERER`, `HEADER_LIMIT`, `FORBIDDEN_HEADER`, `DUPLICATE_HEADER`, and `UNSUPPORTED_KIND`. Rate-limited and locked responses carry `Retry-After` in whole seconds.
+Per-item rejection codes are `INVALID_URL`, `CREDENTIALED_URL`, `UNSAFE_FILENAME`, `INVALID_REFERER`, `HEADER_LIMIT`, `FORBIDDEN_HEADER`, `DUPLICATE_HEADER`, `COOKIE_SCOPE`, `COOKIE_LIMIT`, and `UNSUPPORTED_KIND`. Rate-limited and locked responses carry `Retry-After` in whole seconds.
 
 ## Extension message flow
 
@@ -237,9 +252,9 @@ Both packages listen to `webRequest.onResponseStarted`, `webNavigation.onCommitt
 
 ## Permissions, CSP, and storage
 
-The Chromium MV3 manifest requires Chrome 114 or later. The Firefox MV3 manifest uses `background.scripts` instead of a service worker, declares the Gecko ID `oneget@oneget.app`, requires Firefox 140 or later, and declares `data_collection_permissions.required: ["none"]`. Both request `webRequest`, `downloads`, `storage`, `tabs`, and `webNavigation`, plus host permissions for `http://*/*`, `https://*/*`, and the loopback API. Neither requests cookies, native messaging, a remote script source, or telemetry. The extension-page CSP is `script-src 'self'; object-src 'self';`, so no remote code and no eval are permitted. The build copies the local OneGet icons into each package.
+The Chromium MV3 manifest requires Chrome 114 or later. The Firefox MV3 manifest uses `background.scripts` instead of a service worker, declares the Gecko ID `oneget@oneget.app`, requires Firefox 140 or later, and declares `data_collection_permissions.required: ["none"]`. Both request `cookies`, `webRequest`, `downloads`, `storage`, `tabs`, and `webNavigation`, plus host permissions for `http://*/*`, `https://*/*`, and the loopback API. The `cookies` permission backs only the default-off opt-in; neither package uses native messaging, a remote script source, or telemetry. The extension-page CSP is `script-src 'self'; object-src 'self';`, so no remote code and no eval are permitted. The build copies the local OneGet icons into each package.
 
-The pairing token and settings use the browser's local storage area. Resource metadata uses the session storage area only and is bounded to 5,000 serialized entries. The background reloads the session snapshot after a service-worker or event-page restart and re-hydrates its per-tab store; Firefox also restores its bounded takeover-failure record from session storage. Page content, response bodies, cookies, and authorization values are never stored. Displayed URLs remove username, password, query, and fragment; the popup never renders the token.
+The pairing token and settings use the browser's local storage area. Resource metadata uses the session storage area only and is bounded to 5,000 serialized entries. The background reloads the session snapshot after a service-worker or event-page restart and re-hydrates its per-tab store; Firefox also restores its bounded takeover-failure record from session storage. Page content, response bodies, and authorization values are never stored. Cookie values are read only for an opted-in capture and are never written to local or session storage. Displayed URLs remove username, password, query, and fragment; the popup never renders the token or a cookie value.
 
 ## Manual verification expectations
 
@@ -251,6 +266,7 @@ Automated checks use a local fixture page and a mock loopback API. A real accept
 - listing an HLS manifest and a DASH manifest while filtering their transport and media segments;
 - sending one prefill and confirming the desktop dialog opens without creating a task until submit;
 - a takeover that creates exactly one desktop task and removes the browser download only after success;
+- an opted-in cookie capture that attaches only URL-scoped cookies and a capture with the opt-in off that reads no cookie;
 - an unpaired, revoked, or locked state that leaves the browser download untouched and reports actionable guidance;
 - a Firefox event-page suspension after a failed takeover that still shows the popup retry path;
 - Windows install and launch.

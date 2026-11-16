@@ -9,7 +9,7 @@ use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_RANGE,
     CONTENT_TYPE, ETAG, LAST_MODIFIED, RANGE,
 };
-use reqwest::{Response, StatusCode};
+use reqwest::{Client, Response, StatusCode};
 use url::Url;
 
 use crate::platform::{current_target, sanitize_filename};
@@ -48,7 +48,18 @@ pub struct ProbeOutcome {
 /// Probe `url` for download metadata without consuming the body.
 pub async fn probe(url: &str, options: &ProbeOptions) -> Result<ProbeOutcome, EngineError> {
     let client = build_client()?;
+    probe_with_client(&client, url, options).await
+}
 
+/// Probe `url` with an already configured client.
+///
+/// The client carries the engine transport bounds and the global User-Agent
+/// fallback; a per-task header in `options` overrides that fallback.
+pub(crate) async fn probe_with_client(
+    client: &Client,
+    url: &str,
+    options: &ProbeOptions,
+) -> Result<ProbeOutcome, EngineError> {
     let mut headers = HeaderMap::new();
     for (name, value) in &options.extra_headers {
         let name = HeaderName::from_bytes(name.as_bytes())
@@ -61,7 +72,7 @@ pub async fn probe(url: &str, options: &ProbeOptions) -> Result<ProbeOutcome, En
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
     headers.insert(RANGE, HeaderValue::from_static("bytes=0-0"));
 
-    let (response, final_url) = get_following_redirects(&client, url, headers).await?;
+    let (response, final_url) = get_following_redirects(client, url, headers).await?;
 
     let content_type = header_text(&response, CONTENT_TYPE);
     let etag = header_text(&response, ETAG);

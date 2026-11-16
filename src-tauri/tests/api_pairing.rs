@@ -70,6 +70,7 @@ fn valid_item() -> CaptureItem {
         size: Some(1_024),
         kind: Some(CaptureKind::File),
         headers: Vec::new(),
+        cookies: Vec::new(),
     }
 }
 
@@ -722,10 +723,11 @@ fn capture_protocol_serde_uses_kebab_case_enums_and_camel_case_fields() {
                 name: "Accept".to_string(),
                 value: "*/*".to_string(),
             }],
+            cookies: Vec::new(),
         }],
     };
     let value = serde_json::to_value(&request).expect("serialize capture request");
-    assert_eq!(value["protocolVersion"], 1);
+    assert_eq!(value["protocolVersion"], 2);
     assert_eq!(value["intent"], "prefill");
     assert_eq!(value["sourceId"], "source-1");
     let item = &value["items"][0];
@@ -773,7 +775,7 @@ fn capture_protocol_serde_uses_kebab_case_enums_and_camel_case_fields() {
 
 #[test]
 fn protocol_constants_match_the_capture_and_admission_contract() {
-    assert_eq!(API_PROTOCOL_VERSION, 1);
+    assert_eq!(API_PROTOCOL_VERSION, 2);
     assert_eq!(MAX_BODY_BYTES, 65_536);
     assert_eq!(MAX_CAPTURE_ITEMS, 50);
     assert_eq!(MAX_URL_BYTES, 8_192);
@@ -905,4 +907,216 @@ fn a_pending_code_does_not_survive_reopening_the_pairing_database() {
         matches!(paired, PairResult::Paired { .. }),
         "a newly generated code must pair after the restart"
     );
+}
+
+// --- Protocol v2 pairing and health ---
+
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use axum::body::Body;
+use axum::http::{header, Method, Request};
+use axum::Router;
+use http_body_util::BodyExt;
+use serde_json::json;
+use serde_json::Value;
+use tower::ServiceExt;
+
+use oneget_lib::api::desktop::{DesktopBridge, PendingPrefill};
+use oneget_lib::api::server::{build_router, ApiServerConfig, ApiState};
+
+#[derive(Debug)]
+struct TestClock {
+    now_ms: AtomicI64,
+}
+
+impl TestClock {
+    fn new(now_ms: i64) -> Arc<Self> {
+        Arc::new(Self {
+            now_ms: AtomicI64::new(now_ms),
+        })
+    }
+}
+
+impl Clock for TestClock {
+    fn now_ms(&self) -> i64 {
+        self.now_ms.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Default)]
+struct NoopBridge {
+    created: AtomicUsize,
+}
+
+impl DesktopBridge for NoopBridge {
+    fn create_takeover_task(&self, _item: &CaptureItem, _now_ms: i64) -> Result<String, ApiError> {
+        let id = self.created.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(format!("task-{id}"))
+    }
+
+    fn queue_prefill(&self, _prefill: PendingPrefill) -> Result<(), ApiError> {
+        Ok(())
+    }
+
+    fn focus_main_window(&self) {}
+
+    fn log_event(&self, _event: &str, _fields: Value) {}
+}
+
+fn pairing_router(port: u16) -> (Router, Arc<Mutex<PairingStore>>, Arc<TestClock>) {
+    let dir = tempdir().expect("tempdir");
+    // Keep tempdir alive by leaking into a static-like holder is not possible; instead store path is enough
+    // because tests run in-process and tempdir would drop. Use a long-lived path under tempdir by forgetting.
+    let path = dir.path().join("pairing.db");
+    std::mem::forget(dir);
+    let store = Arc::new(Mutex::new(
+        PairingStore::open(&path).expect("pairing store"),
+    ));
+    let clock = TestClock::new(NOW_MS);
+    let bridge = Arc::new(NoopBridge::default());
+    let config = ApiServerConfig {
+        port,
+        app_version: "test".to_string(),
+        pairing_store: Arc::clone(&store),
+        bridge: bridge as Arc<dyn DesktopBridge>,
+        clock: Arc::clone(&clock) as Arc<dyn Clock>,
+        pair_origin_policy: RateLimitPolicy::new(10, 60_000),
+        token_policy: RateLimitPolicy::new(10, 60_000),
+    };
+    let router = build_router(ApiState::new(config));
+    (router, store, clock)
+}
+
+async fn send_json(router: &Router, request: Request<Body>) -> (u16, Value) {
+    let response = router
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("router response");
+    let status = response.status().as_u16();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let body = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+        panic!(
+            "expected json body, got {}",
+            String::from_utf8_lossy(&bytes)
+        )
+    });
+    (status, body)
+}
+
+fn pair_http_request(port: u16, origin: &str, body: Vec<u8>) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/pair")
+        .header(header::HOST, format!("127.0.0.1:{port}"))
+        .header(header::ORIGIN, origin)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .expect("pair request")
+}
+
+fn health_http_request(port: u16) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri("/health")
+        .header(header::HOST, format!("127.0.0.1:{port}"))
+        .body(Body::empty())
+        .expect("health request")
+}
+
+#[tokio::test]
+async fn pairing_accepts_protocol_versions_one_and_two_and_health_reports_version_two() {
+    let port = 37653u16;
+    let (router, store, clock) = pairing_router(port);
+    let origin = extension_origin('a');
+
+    let (status, body) = send_json(&router, health_http_request(port)).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["protocolVersion"], json!(2));
+
+    let code_v1 = store
+        .lock()
+        .expect("lock")
+        .generate_code(clock.now_ms())
+        .expect("code v1")
+        .code;
+    let (status, body) = send_json(
+        &router,
+        pair_http_request(
+            port,
+            &origin,
+            serde_json::to_vec(&json!({
+                "protocolVersion": 1,
+                "code": code_v1,
+                "label": "Chrome extension",
+            }))
+            .expect("body"),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "v1 pairing body: {body}");
+    assert_eq!(body["client"]["origin"], json!(origin));
+    assert!(body["token"].as_str().is_some());
+
+    let code_v2 = store
+        .lock()
+        .expect("lock")
+        .generate_code(clock.now_ms())
+        .expect("code v2")
+        .code;
+    let (status, body) = send_json(
+        &router,
+        pair_http_request(
+            port,
+            &origin,
+            serde_json::to_vec(&json!({
+                "protocolVersion": 2,
+                "code": code_v2,
+                "label": "Chrome extension",
+            }))
+            .expect("body"),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "v2 pairing body: {body}");
+    assert_eq!(body["client"]["origin"], json!(origin));
+    assert!(body["token"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn pairing_rejects_protocol_versions_other_than_one_or_two() {
+    let port = 37654u16;
+    let (router, store, clock) = pairing_router(port);
+    let origin = extension_origin('b');
+    let code = store
+        .lock()
+        .expect("lock")
+        .generate_code(clock.now_ms())
+        .expect("code")
+        .code;
+
+    for version in [0u32, 3u32] {
+        let (status, body) = send_json(
+            &router,
+            pair_http_request(
+                port,
+                &origin,
+                serde_json::to_vec(&json!({
+                    "protocolVersion": version,
+                    "code": code,
+                    "label": "Chrome extension",
+                }))
+                .expect("body"),
+            ),
+        )
+        .await;
+        assert_eq!(status, 409, "version {version} must mismatch");
+        assert_eq!(body["code"], json!("PROTOCOL_MISMATCH"));
+    }
 }

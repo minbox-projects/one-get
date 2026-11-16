@@ -12,6 +12,7 @@ use serde_json::json;
 
 use super::control::{ControlAction, DownloadControl};
 use super::files;
+use super::probe::proxy_environment;
 use super::process::{run_download_interruptible, DownloadRunOutcome, ProcessSpec};
 use super::progress::{is_merge_line, parse_progress_line};
 use super::service::{
@@ -81,7 +82,10 @@ pub(crate) async fn run_video_task(
         program: tools.yt_dlp.clone(),
         args: download_args(&task, &tools, &full_url, &temp_path, audio_only, reuse),
         cwd: None,
-        env: Vec::new(),
+        env: proxy_environment(
+            runtime.proxy().as_ref(),
+            read_video_string(&task, "proxyUrl").as_deref(),
+        ),
     };
 
     let store = &runtime.config.store;

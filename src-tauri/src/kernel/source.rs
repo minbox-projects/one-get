@@ -9,11 +9,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use reqwest::redirect::Policy;
 use url::{Host, Url};
 
 use super::catalog::{verify_catalog, ComponentCatalog, Target};
 use super::error::KernelError;
+use crate::engine::http::{build_client_with_options, ProxyConfig};
 
 /// File name of the cached signed catalog inside the cache root.
 pub const CATALOG_FILE_NAME: &str = "catalog.json";
@@ -51,13 +51,24 @@ pub async fn fetch_catalog(
     allow_loopback_http: bool,
     timeout: Duration,
 ) -> Result<Vec<u8>, KernelError> {
+    fetch_catalog_with_proxy(url, allow_loopback_http, timeout, None).await
+}
+
+/// Fetch the raw signed catalog through an optional authenticated proxy.
+///
+/// The same URL policy, redirect refusal, and response bound apply. An
+/// authenticated proxy is applied by the transport, so its credentials never
+/// enter the request URL or the returned bytes.
+pub async fn fetch_catalog_with_proxy(
+    url: &str,
+    allow_loopback_http: bool,
+    timeout: Duration,
+    proxy: Option<&ProxyConfig>,
+) -> Result<Vec<u8>, KernelError> {
     validate_catalog_url(url, allow_loopback_http)?;
 
-    let client = reqwest::Client::builder()
-        .redirect(Policy::none())
-        .timeout(timeout)
-        .build()
-        .map_err(|_| manifest_unavailable())?;
+    let client =
+        build_client_with_options(timeout, timeout, proxy).map_err(|_| manifest_unavailable())?;
 
     let mut response = client
         .get(url)

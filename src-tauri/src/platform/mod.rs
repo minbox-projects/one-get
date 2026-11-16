@@ -14,6 +14,7 @@ pub mod notifications;
 pub mod opener;
 pub mod paths;
 pub mod process;
+pub mod proxy;
 pub mod secrets;
 pub mod tray;
 
@@ -21,6 +22,10 @@ pub use filename::{current_target, sanitize_filename, FilenameTarget};
 pub use files::{CapDir, FileMetadata};
 pub use paths::AppPaths;
 pub use process::ChildGuard;
+pub use proxy::{
+    PlatformSystemProxySource, ProxyResolution, ResolvedProxy, SystemProxyDiscovery,
+    SystemProxySource,
+};
 pub use secrets::{KeyringStore, MemorySecretStore, SecretError, SecretStore, SecretValue};
 
 use std::fmt;

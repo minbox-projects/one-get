@@ -19,15 +19,19 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use tokio::sync::Notify;
 
+use crate::commands::downloads::DownloadSummary;
 use crate::logging::{LogLevel, Logger};
 use crate::platform::opener::open_target;
+use crate::platform::secrets::SecretValue;
 use crate::platform::PlatformError;
 use crate::platform::{current_target, sanitize_filename, CapDir};
+use crate::store::hf::{HfMetadata, HfMetadataStore};
 use crate::store::types::{Task, TaskKind};
 use crate::store::Database;
 
-use super::cookies::CookieJar;
+use super::cookies::{CookieJar, CookieSource};
 use super::error::EngineError;
+use super::hf;
 use super::http::{self, ProxyConfig};
 use super::rate_limit::RateLimiter;
 use super::state::TaskState;
@@ -50,6 +54,52 @@ type TaskFuture<'a> = Pin<Box<dyn Future<Output = Result<(), EngineError>> + 'a>
 pub struct EngineOptions {
     /// Maximum number of tasks in connecting, downloading, or finalizing state.
     pub max_concurrent: usize,
+}
+
+/// Transport settings applied to later engine requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkOptions {
+    /// Fallback User-Agent for requests without a per-task value.
+    pub user_agent: Option<String>,
+    /// Timeout for establishing a connection.
+    pub connect_timeout: Duration,
+    /// Timeout for reading from an established connection.
+    pub read_timeout: Duration,
+    /// Attempts one request may make before it gives up.
+    pub retry_attempts: usize,
+}
+
+impl Default for NetworkOptions {
+    fn default() -> Self {
+        Self {
+            user_agent: None,
+            connect_timeout: Duration::from_secs(15),
+            read_timeout: Duration::from_secs(30),
+            retry_attempts: 5,
+        }
+    }
+}
+
+/// Hugging Face token, connection cap, and metadata store applied to later
+/// task starts.
+#[derive(Clone)]
+pub struct HuggingFaceOptions {
+    /// Access token sent only to resolver-host requests.
+    pub token: Option<SecretValue>,
+    /// Maximum connections one Hugging Face task may use.
+    pub connection_cap: u32,
+    /// Optional durable metadata store.
+    pub metadata: Option<Arc<HfMetadataStore>>,
+}
+
+impl Default for HuggingFaceOptions {
+    fn default() -> Self {
+        Self {
+            token: None,
+            connection_cap: 8,
+            metadata: None,
+        }
+    }
 }
 
 /// Summary of the store and part-file recovery performed at startup.
@@ -76,13 +126,18 @@ pub struct Engine {
     notify: Notify,
     /// Full in-memory specs, including query-bearing URLs and header values.
     specs: Mutex<HashMap<String, DownloadSpec>>,
+    /// Memory-only cookie source per task; captured values are never persisted.
+    task_cookie_sources: Mutex<HashMap<String, CookieSource>>,
     proxy: RwLock<Option<ProxyConfig>>,
+    network_options: RwLock<NetworkOptions>,
+    huggingface: RwLock<HuggingFaceOptions>,
     client: Mutex<Option<Client>>,
     cookie_file: Mutex<Option<PathBuf>>,
-    global_rate: Mutex<Option<Arc<RateLimiter>>>,
+    global_rate: Arc<RateLimiter>,
     task_rates: Mutex<HashMap<String, Arc<RateLimiter>>>,
     logger: Mutex<Option<Arc<Logger>>>,
     startup_done: AtomicBool,
+    stop: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl Engine {
@@ -95,14 +150,35 @@ impl Engine {
             controls: Mutex::new(HashMap::new()),
             notify: Notify::new(),
             specs: Mutex::new(HashMap::new()),
+            task_cookie_sources: Mutex::new(HashMap::new()),
             proxy: RwLock::new(None),
+            network_options: RwLock::new(NetworkOptions::default()),
+            huggingface: RwLock::new(HuggingFaceOptions::default()),
             client: Mutex::new(None),
             cookie_file: Mutex::new(None),
-            global_rate: Mutex::new(None),
+            global_rate: Arc::new(RateLimiter::new(0)),
             task_rates: Mutex::new(HashMap::new()),
             logger: Mutex::new(None),
             startup_done: AtomicBool::new(false),
+            stop: Mutex::new(None),
         }
+    }
+
+    /// Share the service shutdown flag so a stop is not missed by a claim that
+    /// races the request loop.
+    pub(crate) fn set_stop_flag(&self, flag: Arc<AtomicBool>) {
+        *self
+            .stop
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(flag);
+    }
+
+    fn stop_requested(&self) -> bool {
+        self.stop
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
 
     /// The durable store owned by this engine.
@@ -136,6 +212,44 @@ impl Engine {
         Ok(())
     }
 
+    /// Replace the User-Agent fallback, timeouts, and retry budget used by
+    /// later engine requests.
+    ///
+    /// The cached client is discarded so a new request rebuilds it with these
+    /// values. A request already in flight keeps the client and options it
+    /// started with.
+    pub fn set_network_options(&self, options: NetworkOptions) {
+        let mut cached = self
+            .client
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *self
+            .network_options
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = options;
+        *cached = None;
+    }
+
+    /// Replace the Hugging Face token, connection cap, and metadata store used
+    /// by task starts after this call.
+    ///
+    /// A task already running keeps the effective connection count captured
+    /// when it started.
+    pub fn set_huggingface_options(&self, options: HuggingFaceOptions) -> Result<(), EngineError> {
+        if !(1..=64).contains(&options.connection_cap) {
+            return Err(EngineError::new(
+                "INVALID_CONNECTIONS",
+                "the Hugging Face connection cap must be between 1 and 64",
+            ));
+        }
+        *self
+            .huggingface
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = options;
+        self.notify.notify_one();
+        Ok(())
+    }
+
     /// Load a Netscape cookie file at each task start or resume.
     pub fn set_cookie_file(&self, path: Option<PathBuf>) {
         *self
@@ -146,14 +260,11 @@ impl Engine {
 
     /// Pace every task's downloads at a shared bytes-per-second limit.
     ///
-    /// `None` or zero removes the limit without restarting the engine. A
-    /// running task keeps the limiter captured when its network context started;
-    /// changes apply to task starts (including a later resume) after this call.
+    /// `None` or zero removes the limit. The engine keeps one shared limiter
+    /// for its lifetime, so running tasks observe a changed rate on their next
+    /// streamed chunk without restarting.
     pub fn set_global_rate_limit(&self, bytes_per_second: Option<u64>) {
-        *self
-            .global_rate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = active_limiter(bytes_per_second);
+        self.global_rate.set_rate(bytes_per_second.unwrap_or(0));
         self.notify.notify_one();
     }
 
@@ -195,6 +306,7 @@ impl Engine {
     pub fn add_task(&self, spec: DownloadSpec) -> Result<String, EngineError> {
         http::validate_extra_headers(&spec.extra_headers)?;
         let mut spec = spec;
+        spec.url = http::validate_url(&spec.url)?;
         spec.filename = sanitize_filename(&spec.filename, current_target());
         let destination = self.resolve_destination(spec.destination.as_deref())?;
         let stored_destination = destination
@@ -231,6 +343,69 @@ impl Engine {
             .insert(id.clone(), spec);
         self.notify.notify_one();
         Ok(id)
+    }
+
+    /// Create a queued task with exactly one memory-only cookie source.
+    ///
+    /// The source is retained for this process only; a captured browser cookie
+    /// list is never written to the store and so cannot survive a restart. A
+    /// file source must be absolute, because a relative path would otherwise be
+    /// resolved against the process working directory.
+    pub fn add_task_with_cookies(
+        &self,
+        spec: DownloadSpec,
+        source: CookieSource,
+    ) -> Result<String, EngineError> {
+        if let CookieSource::File(path) = &source {
+            if !path.is_absolute() {
+                return Err(EngineError::new(
+                    "INVALID_COOKIES_FILE",
+                    "the cookies file path must be absolute",
+                ));
+            }
+        }
+        let id = self.add_task(spec)?;
+        self.task_cookie_sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.clone(), source);
+        Ok(id)
+    }
+
+    /// Every task as a lightweight summary with its cookie provenance.
+    ///
+    /// The engine default jar and each distinct task-level cookie file are
+    /// loaded at most once per call, so a polling list does not re-read the
+    /// same file for every task. Video tasks report no cookie provenance.
+    pub fn list_summaries(&self) -> Result<Vec<DownloadSummary>, EngineError> {
+        let tasks = self.store.list_tasks()?;
+        let default_jar = self
+            .engine_cookie_file()
+            .and_then(|path| CookieJar::load(&path).ok());
+        let sources = self
+            .task_cookie_sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut file_jars: HashMap<PathBuf, Option<CookieJar>> = HashMap::new();
+        Ok(tasks
+            .into_iter()
+            .map(|task| {
+                let (cookie_source, cookie_count) = if task.kind == TaskKind::Http {
+                    cookie_provenance(
+                        &task,
+                        sources.get(&task.id),
+                        default_jar.as_ref(),
+                        &mut file_jars,
+                    )
+                } else {
+                    (None, 0)
+                };
+                let mut summary = DownloadSummary::from(task);
+                summary.cookie_source = cookie_source;
+                summary.cookie_count = cookie_count;
+                summary
+            })
+            .collect())
     }
 
     /// Resolve and validate the requested destination directory.
@@ -330,10 +505,18 @@ impl Engine {
     /// Re-probe paused tasks so a changed remote file or missing part is not
     /// resumed silently. Unchanged tasks stay paused for an explicit resume.
     async fn revalidate_paused(&self) -> Result<(), EngineError> {
+        let (client, options) = self.client_and_options()?;
+        let hf = self.hf_options();
         let network = NetworkContext {
-            client: self.client()?,
+            client,
             cookies: self.load_cookies().ok().flatten(),
+            cookie_error: None,
+            stop: None,
             limiters: Vec::new(),
+            retry_attempts: options.retry_attempts,
+            hf_token: hf.token,
+            hf_metadata: hf.metadata,
+            hf_connection_cap: hf.connection_cap,
         };
 
         for task in self.store.tasks_by_kind(TaskKind::Http)? {
@@ -513,7 +696,10 @@ impl Engine {
             Err(error) if error.code == "not_found" => {}
             Err(error) => return Err(platform_error(error)),
         }
-        self.store.delete_task(id)
+        self.store.delete_task(id)?;
+        self.forget_hf_metadata(id);
+        self.forget_cookie_source(id);
+        Ok(())
     }
 
     /// Delete a completed task's final file and then its record.
@@ -550,7 +736,10 @@ impl Engine {
             }
             Err(error) => return Err(platform_error(error)),
         }
-        self.store.delete_task(id)
+        self.store.delete_task(id)?;
+        self.forget_hf_metadata(id);
+        self.forget_cookie_source(id);
+        Ok(())
     }
 
     /// Open a completed task's final file with the platform handler.
@@ -602,6 +791,9 @@ impl Engine {
     }
 
     fn claim_next(&self) -> Result<Option<Task>, EngineError> {
+        if self.stop_requested() {
+            return Ok(None);
+        }
         let limit = self.max_concurrent.load(Ordering::SeqCst);
         let active_count = self.store.active_task_count()? as usize;
         if active_count >= limit {
@@ -649,13 +841,18 @@ impl Engine {
         }
     }
 
-    fn client(&self) -> Result<Client, EngineError> {
+    fn client_and_options(&self) -> Result<(Client, NetworkOptions), EngineError> {
         let mut cached = self
             .client
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let options = self
+            .network_options
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         if let Some(client) = cached.as_ref() {
-            return Ok(client.clone());
+            return Ok((client.clone(), options));
         }
 
         let proxy = self
@@ -663,20 +860,61 @@ impl Engine {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let client = http::build_client_with_proxy(proxy.as_ref())?;
+        let client = http::build_client_with_network(
+            options.connect_timeout,
+            options.read_timeout,
+            proxy.as_ref(),
+            options.user_agent.as_deref(),
+        )?;
         *cached = Some(client.clone());
-        Ok(client)
+        Ok((client, options))
+    }
+
+    pub(crate) fn client(&self) -> Result<Client, EngineError> {
+        self.client_and_options().map(|(client, _)| client)
+    }
+
+    fn engine_cookie_file(&self) -> Option<PathBuf> {
+        self.cookie_file
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     fn load_cookies(&self) -> Result<Option<CookieJar>, EngineError> {
-        let path = self
-            .cookie_file
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        match path {
+        match self.engine_cookie_file() {
             Some(path) => CookieJar::load(&path).map(Some),
             None => Ok(None),
+        }
+    }
+
+    /// Resolve the single cookie source for one task start or resume.
+    ///
+    /// A task-level file wins, then a legacy engine-wide file, then captured
+    /// browser cookies. Sources are never merged.
+    fn cookies_for_task(&self, task: &Task) -> (Option<CookieJar>, Option<EngineError>) {
+        let source = self
+            .task_cookie_sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&task.id)
+            .cloned();
+
+        if let Some(CookieSource::File(path)) = &source {
+            return match CookieJar::load(path) {
+                Ok(jar) => (Some(jar), None),
+                Err(error) => (None, Some(error)),
+            };
+        }
+        if let Some(path) = self.engine_cookie_file() {
+            return match CookieJar::load(&path) {
+                Ok(jar) => (Some(jar), None),
+                Err(error) => (None, Some(error)),
+            };
+        }
+        match source {
+            Some(CookieSource::Browser(cookies)) => (Some(CookieJar::from_browser(cookies)), None),
+            _ => (None, None),
         }
     }
 
@@ -694,38 +932,113 @@ impl Engine {
         // available only from the in-memory spec.
         spec.filename = task.filename.clone();
         spec.connections = task.connections.max(1);
+        if hf::is_resolver_url(&spec.url) {
+            let cap = self
+                .huggingface
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .connection_cap
+                .max(1);
+            spec.connections = spec.connections.min(cap);
+        }
         spec.expected_sha256 = task.expected_sha256.clone();
         spec.destination = Some(self.destination_for(task));
         spec
     }
 
-    fn network_for(&self, task_id: &str) -> Result<NetworkContext, EngineError> {
-        let client = self.client()?;
-        let cookies = self.load_cookies()?;
+    fn hf_options(&self) -> HuggingFaceOptions {
+        self.huggingface
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Record Hugging Face metadata when a download starts.
+    ///
+    /// A resumed task keeps its remaining refresh budget and downgrade state;
+    /// only the repository resolution and connection cap follow the current
+    /// run. A fresh task starts with a zero budget and no downgrade.
+    fn record_hf_metadata(&self, task_id: &str, spec: &DownloadSpec) {
+        let Ok(Some(parsed)) = hf::parse_hf_url(&spec.url) else {
+            return;
+        };
+        let options = self.hf_options();
+        let Some(store) = options.metadata else {
+            return;
+        };
+        let persisted = store.get(task_id).ok().flatten();
+        let downgraded = persisted.as_ref().is_some_and(|meta| meta.downgraded);
+        let reduced = persisted.as_ref().is_some_and(|meta| {
+            !meta.downgraded && meta.effective_connections == 1 && spec.connections > 1
+        });
+        let metadata = HfMetadata {
+            task_id: task_id.to_string(),
+            repo_id: parsed.repo_id,
+            file_path: parsed.file_path,
+            revision: parsed.revision,
+            connection_cap: options.connection_cap,
+            effective_connections: if downgraded || reduced {
+                1
+            } else {
+                spec.connections
+            },
+            refresh_count: persisted
+                .as_ref()
+                .map(|meta| meta.refresh_count)
+                .unwrap_or(0),
+            downgraded,
+        };
+        let _ = store.record(&metadata);
+    }
+
+    /// Remove a deleted task's Hugging Face metadata when a store is attached.
+    fn forget_hf_metadata(&self, task_id: &str) {
+        if let Some(store) = self.hf_options().metadata {
+            let _ = store.delete(task_id);
+        }
+    }
+
+    /// Remove a deleted task's memory-only cookie source.
+    fn forget_cookie_source(&self, task_id: &str) {
+        self.task_cookie_sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(task_id);
+    }
+
+    fn network_for(&self, task: &Task) -> Result<NetworkContext, EngineError> {
+        let (client, options) = self.client_and_options()?;
+        let (cookies, cookie_error) = self.cookies_for_task(task);
 
         let mut limiters = Vec::new();
         if let Some(limiter) = self
             .task_rates
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(task_id)
+            .get(&task.id)
             .cloned()
         {
             limiters.push(limiter);
         }
-        if let Some(limiter) = self
-            .global_rate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-        {
-            limiters.push(limiter);
-        }
+        // The shared global limiter is always present so a rate change applies
+        // to tasks that are already running.
+        limiters.push(Arc::clone(&self.global_rate));
 
+        let hf = self.hf_options();
         Ok(NetworkContext {
             client,
             cookies,
+            cookie_error,
+            stop: self
+                .stop
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
             limiters,
+            retry_attempts: options.retry_attempts,
+            hf_token: hf.token,
+            hf_metadata: hf.metadata,
+            hf_connection_cap: hf.connection_cap,
         })
     }
 
@@ -753,8 +1066,9 @@ impl Engine {
                     serde_json::json!({ "task_id": task_id }),
                 );
                 let spec = self.spec_for(&task);
+                self.record_hf_metadata(&task_id, &spec);
                 let destination = self.destination_for(&task);
-                match self.network_for(&task_id) {
+                match self.network_for(&task) {
                     Ok(network) => {
                         download_task_with_network(
                             &self.store,
@@ -864,6 +1178,42 @@ fn require_http_task(task: &Task) -> Result<(), EngineError> {
         ));
     }
     Ok(())
+}
+
+/// Active cookie-source name and matching cookie count for one HTTP task.
+fn cookie_provenance(
+    task: &Task,
+    source: Option<&CookieSource>,
+    default_jar: Option<&CookieJar>,
+    file_jars: &mut HashMap<PathBuf, Option<CookieJar>>,
+) -> (Option<String>, u32) {
+    let url = url::Url::parse(&task.url).ok();
+    match source {
+        Some(CookieSource::File(path)) => {
+            let jar = file_jars
+                .entry(path.clone())
+                .or_insert_with(|| CookieJar::load(path).ok());
+            let count = url
+                .as_ref()
+                .and_then(|url| jar.as_ref().map(|jar| jar.matching_count(url)))
+                .unwrap_or(0);
+            (Some("file".to_string()), count)
+        }
+        Some(CookieSource::Browser(cookies)) => {
+            let count = url
+                .as_ref()
+                .map(|url| CookieJar::from_browser(cookies.clone()).matching_count(url))
+                .unwrap_or(0);
+            (Some("browser".to_string()), count)
+        }
+        None => match default_jar {
+            Some(jar) => {
+                let count = url.as_ref().map(|url| jar.matching_count(url)).unwrap_or(0);
+                (Some("file".to_string()), count)
+            }
+            None => (None, 0),
+        },
+    }
 }
 
 fn active_limiter(bytes_per_second: Option<u64>) -> Option<Arc<RateLimiter>> {

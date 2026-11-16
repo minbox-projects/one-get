@@ -279,7 +279,7 @@ describe("Firefox download mapping", () => {
     await vi.waitFor(() => expect(fetch.calls).toHaveLength(1));
     const body = fetch.calls[0].body as Record<string, unknown>;
     const items = body.items as Array<Record<string, unknown>>;
-    expect(body).toMatchObject({ protocolVersion: 1, intent: "takeover" });
+    expect(body).toMatchObject({ protocolVersion: 2, intent: "takeover" });
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       url: "https://cdn.test/files/movie.mp4",
@@ -558,7 +558,7 @@ describe("Firefox pairing", () => {
     expect(fetch.calls).toHaveLength(1);
     expect(fetch.calls[0].url).toBe(`${TEST_ORIGIN}/pair`);
     expect(fetch.calls[0].body).toMatchObject({
-      protocolVersion: 1,
+      protocolVersion: 2,
       code: "12345678",
       label: "Firefox extension",
     });

@@ -7,19 +7,61 @@ import { dictionaries, I18nProvider } from "../../i18n";
 import type { AddDownloadRequest, ProbeResult } from "../../types/downloads";
 import type { VideoProbeResult } from "../../types/video";
 
-const { addDownload, probeDownload, probeVideo, startVideoDownload } =
+const { addDownload, probeDownload, probeVideo, startVideoDownload, invokeCommand } =
   vi.hoisted(() => ({
     addDownload: vi.fn(),
     probeDownload: vi.fn(),
     probeVideo: vi.fn(),
     startVideoDownload: vi.fn(),
+    invokeCommand: vi.fn(),
   }));
 
 vi.mock("../../lib/downloads", () => ({ addDownload, probeDownload }));
 vi.mock("../../lib/video", () => ({ probeVideo, startVideoDownload }));
+vi.mock("../../lib/tauri", () => ({
+  invokeCommand,
+  isTauriRuntime: () => true,
+}));
 
 import { NewDownloadDialog } from "./NewDownloadDialog";
 import type { BrowserPrefill } from "./NewDownloadDialog";
+
+type SettingsOverrides = Partial<Record<string, unknown>>;
+
+/** Routes the settings commands to a deterministic document; anything else is an error. */
+function mockSettings(overrides: SettingsOverrides = {}) {
+  invokeCommand.mockImplementation(async (command: string) => {
+    if (command === "settings_get") {
+      return {
+        ok: true as const,
+        data: {
+          schemaVersion: 2,
+          language: "en-US",
+          theme: "system",
+          closeBehavior: "tray",
+          defaultDirectory: null,
+          defaultConnections: 8,
+          maxConcurrentTasks: 3,
+          globalRateLimit: null,
+          logLevel: "info",
+          // Keeps the existing quality-dialog flow: ask by default.
+          alwaysAskQuality: true,
+          ...overrides,
+        },
+      };
+    }
+    if (command === "settings_status") {
+      return {
+        ok: true as const,
+        data: { readOnly: false, recovered: false },
+      };
+    }
+    return {
+      ok: false as const,
+      error: { code: "unexpected_command", message: command },
+    };
+  });
+}
 
 const en = dictionaries["en-US"];
 const zh = dictionaries["zh-CN"];
@@ -87,9 +129,11 @@ function qualityDialog(): HTMLElement {
 function DialogHarness({
   onAdded = () => undefined,
   prefill = null,
+  defaults = { destination: "/tmp/downloads", connections: 8 },
 }: {
   onAdded?: () => void;
   prefill?: BrowserPrefill | null;
+  defaults?: { destination: string; connections: number };
 }) {
   const [open, setOpen] = useState(true);
 
@@ -98,7 +142,7 @@ function DialogHarness({
       <NewDownloadDialog
         open={open}
         onOpenChange={setOpen}
-        defaults={{ destination: "/tmp/downloads", connections: 8 }}
+        defaults={defaults}
         onAdded={onAdded}
         prefill={prefill}
       />
@@ -192,6 +236,8 @@ describe("NewDownloadDialog", () => {
     probeDownload.mockReset();
     probeVideo.mockReset();
     startVideoDownload.mockReset();
+    invokeCommand.mockReset();
+    mockSettings();
     addDownload.mockResolvedValue({ ok: true, data: "task-1" });
     probeDownload.mockResolvedValue({ ok: true, data: probe() });
     probeVideo.mockResolvedValue({ ok: true, data: videoProbe() });
@@ -400,6 +446,36 @@ describe("NewDownloadDialog", () => {
     );
   });
 
+
+  it("sends the prefill cookie handle in downloads_add (E4)", async () => {
+    const user = userEvent.setup();
+    const url = "https://files.example.test/media/stream-cookie";
+    const prefill = {
+      url,
+      filename: "captured-cookie.mp4",
+      headers: [],
+      cookieHandle: "cookie-handle-e4",
+    } as BrowserPrefill & { cookieHandle: string };
+
+    render(<DialogHarness prefill={prefill} />);
+    const container = dialog();
+
+    expect(within(container).getByLabelText(/^url$/i)).toHaveValue(url);
+    await waitFor(() => {
+      expect(probeDownload).toHaveBeenCalled();
+    });
+
+    await user.click(submitButton(container));
+
+    await waitFor(() => {
+      expect(addDownload).toHaveBeenCalledTimes(1);
+    });
+    const request = addDownload.mock.calls[0][0] as AddDownloadRequest & {
+      cookieHandle?: string | null;
+    };
+    expect(request.cookieHandle).toBe("cookie-handle-e4");
+  });
+
   it("prefills captured browser metadata, probes, and sends it only after submit", async () => {
     const user = userEvent.setup();
     const url = "https://files.example.test/media/stream";
@@ -493,6 +569,308 @@ describe("NewDownloadDialog", () => {
     });
     expect(startVideoDownload).not.toHaveBeenCalled();
     expect(within(dialog()).getByLabelText(/url/i)).toBeInTheDocument();
+  });
+
+  it("prefills the cookies file and User-Agent from settings, keeps them editable, and sends them", async () => {
+    const user = userEvent.setup();
+    mockSettings({
+      defaultCookiesFile: "/tmp/settings-cookies.txt",
+      userAgent: "OneGetSampleAgent/1.0",
+    });
+
+    render(<DialogHarness />);
+    const container = dialog();
+
+    const cookies = await within(container).findByLabelText(/cookies/i);
+    await waitFor(() => {
+      expect(cookies).toHaveValue("/tmp/settings-cookies.txt");
+    });
+
+    // The global User-Agent arrives as one editable header row.
+    await waitFor(() => {
+      expect(
+        within(container).getByDisplayValue("User-Agent"),
+      ).toBeInTheDocument();
+    });
+    expect(
+      within(container).getByDisplayValue("OneGetSampleAgent/1.0"),
+    ).toBeInTheDocument();
+
+    await enterUrl(user, "https://example.com/file.bin");
+    await waitFor(() => {
+      expect(within(container).getByLabelText(/filename/i)).toHaveValue(
+        "probed-file.bin",
+      );
+    });
+
+    // Open the advanced headers section so the prefilled row can be edited.
+    const toggle = within(container)
+      .getByText(/advanced headers?/i)
+      .closest("button,summary");
+    if (toggle) {
+      await user.click(toggle);
+    }
+    const agentValue = within(container).getByDisplayValue(
+      "OneGetSampleAgent/1.0",
+    );
+    await user.clear(agentValue);
+    await user.type(agentValue, "EditedAgent/2.0");
+
+    await user.clear(cookies);
+    await user.type(cookies, "/tmp/task-cookies.txt");
+
+    await user.click(submitButton(container));
+
+    await waitFor(() => {
+      expect(addDownload).toHaveBeenCalledTimes(1);
+    });
+    const request = addDownload.mock.calls[0][0] as AddDownloadRequest & {
+      cookiesFile?: string | null;
+    };
+    expect(request.cookiesFile).toBe("/tmp/task-cookies.txt");
+    expect(request.extraHeaders).toEqual([["User-Agent", "EditedAgent/2.0"]]);
+  });
+
+  it("sends a null cookies file when the prefilled path is cleared", async () => {
+    const user = userEvent.setup();
+    mockSettings({ defaultCookiesFile: "/tmp/settings-cookies.txt" });
+
+    render(<DialogHarness />);
+    const container = dialog();
+
+    const cookies = await within(container).findByLabelText(/cookies/i);
+    await waitFor(() => {
+      expect(cookies).toHaveValue("/tmp/settings-cookies.txt");
+    });
+
+    await user.clear(cookies);
+
+    await enterUrl(user, "https://example.com/file.bin");
+    await waitFor(() => {
+      expect(within(container).getByLabelText(/filename/i)).toHaveValue(
+        "probed-file.bin",
+      );
+    });
+
+    await user.click(submitButton(container));
+
+    await waitFor(() => {
+      expect(addDownload).toHaveBeenCalledTimes(1);
+    });
+    const request = addDownload.mock.calls[0][0] as AddDownloadRequest & {
+      cookiesFile?: string | null;
+    };
+    expect(request.cookiesFile).toBeNull();
+  });
+
+  it("never overrides a User-Agent header the user already added", async () => {
+    const user = userEvent.setup();
+    mockSettings({ userAgent: "OneGetSampleAgent/1.0" });
+
+    const prefill: BrowserPrefill = {
+      url: "https://files.example.test/media/stream",
+      filename: "captured-video.mp4",
+      headers: [["User-Agent", "MyOwnAgent/9.9"]],
+    };
+    render(<DialogHarness prefill={prefill} />);
+    const container = dialog();
+
+    await waitFor(() => {
+      expect(
+        within(container).getAllByDisplayValue("User-Agent"),
+      ).toHaveLength(1);
+    });
+    expect(
+      within(container).getByDisplayValue("MyOwnAgent/9.9"),
+    ).toBeInTheDocument();
+    expect(
+      within(container).queryByDisplayValue("OneGetSampleAgent/1.0"),
+    ).toBeNull();
+
+    await waitFor(() => {
+      expect(probeDownload).toHaveBeenCalledWith({
+        url: "https://files.example.test/media/stream",
+        allowHtml: false,
+        extraHeaders: [["User-Agent", "MyOwnAgent/9.9"]],
+      });
+    });
+
+    await user.click(submitButton(container));
+
+    await waitFor(() => {
+      expect(addDownload).toHaveBeenCalledTimes(1);
+    });
+    const request = addDownload.mock.calls[0][0] as AddDownloadRequest;
+    expect(request.extraHeaders).toEqual([["User-Agent", "MyOwnAgent/9.9"]]);
+  });
+
+  it("shows the localized HF_AUTH message with the Settings > HuggingFace guidance when adding fails", async () => {
+    const user = userEvent.setup();
+    const raw = "backend detail that must not be shown";
+    expect(en["error.HF_AUTH"], "en-US error.HF_AUTH must be localized").toBeTruthy();
+    expect(zh["error.HF_AUTH"], "zh-CN error.HF_AUTH must be localized").toBeTruthy();
+    addDownload.mockResolvedValue({
+      ok: false,
+      error: { code: "HF_AUTH", message: raw },
+    });
+
+    render(<DialogHarness />);
+    const container = dialog();
+
+    await enterUrl(user, "https://example.com/file.bin");
+    await waitFor(() => {
+      expect(within(container).getByLabelText(/filename/i)).toHaveValue(
+        "probed-file.bin",
+      );
+    });
+
+    await user.click(submitButton(container));
+
+    const alert = await within(container).findByRole("alert");
+    expect(alert).toHaveTextContent(en["error.HF_AUTH"]);
+    expect(alert.textContent ?? "").toMatch(/settings/i);
+    expect(alert.textContent ?? "").toMatch(/hugging\s?face/i);
+    expect(alert).not.toHaveTextContent(raw);
+  });
+
+  function highestAndMp4Probe(): VideoProbeResult {
+    return videoProbe({
+      video: [
+        {
+          id: "hi10",
+          label: "1080p · 8-bit",
+          sizeBytes: 900_000_000,
+          mp4Compatible: false,
+          formatSelector: "hi10+140",
+        },
+        {
+          id: "mid",
+          label: "720p · MP4",
+          sizeBytes: 400_000_000,
+          mp4Compatible: true,
+          formatSelector: "mid+140",
+        },
+      ],
+    });
+  }
+
+  async function parseWithPolicy(
+    user: ReturnType<typeof userEvent.setup>,
+    settings: SettingsOverrides,
+  ) {
+    mockSettings(settings);
+    probeVideo.mockResolvedValue({ ok: true, data: highestAndMp4Probe() });
+
+    const onAdded = vi.fn();
+    render(
+      <DialogHarness
+        onAdded={onAdded}
+        defaults={{ destination: "/tmp/form-destination", connections: 4 }}
+      />,
+    );
+    const container = dialog();
+    await enterUrl(user, "https://example.com/watch?v=1");
+    await setField(
+      user,
+      within(container).getByLabelText(/filename/i),
+      "explicit-video.mp4",
+    );
+
+    await user.click(screen.getByRole("button", { name: /parse video/i }));
+    await waitFor(() => {
+      expect(startVideoDownload).toHaveBeenCalledTimes(1);
+    });
+    return { onAdded, container };
+  }
+
+  it("starts exactly one video task with the highest preference using the form values when always-ask is off", async () => {
+    const user = userEvent.setup();
+    const { onAdded } = await parseWithPolicy(user, {
+      alwaysAskQuality: false,
+      videoQualityPreference: "highest",
+    });
+
+    const request = startVideoDownload.mock.calls[0][0] as {
+      url: string;
+      filename: string;
+      destination: string;
+      formatSelector: string;
+      audioOnly: boolean;
+      connections: number;
+      cookiesFile: string | null;
+      proxyUrl: string | null;
+      metadata: unknown;
+    };
+    expect(request.formatSelector).toBe("hi10+140");
+    expect(request.audioOnly).toBe(false);
+    expect(request.url).toBe("https://example.com/watch?v=1");
+    expect(request.filename).toBe("explicit-video.mp4");
+    expect(request.destination).toBe("/tmp/form-destination");
+    expect(request.connections).toBe(4);
+    expect(addDownload).not.toHaveBeenCalled();
+
+    expect(
+      screen.queryByRole("dialog", { name: /video quality/i }),
+    ).toBeNull();
+    expect(screen.queryByText("Sample Video Title")).toBeNull();
+    await waitFor(() => {
+      expect(onAdded).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: /new download/i }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("starts exactly one video task with the MP4-compatible selector when always-ask is off and MP4 is preferred", async () => {
+    const user = userEvent.setup();
+    await parseWithPolicy(user, {
+      alwaysAskQuality: false,
+      videoQualityPreference: "mp4Compatible",
+    });
+
+    const request = startVideoDownload.mock.calls[0][0] as {
+      formatSelector: string;
+      audioOnly: boolean;
+      connections: number;
+      destination: string;
+      filename: string;
+    };
+    expect(request.formatSelector).toBe("mid+140");
+    expect(request.audioOnly).toBe(false);
+    expect(request.connections).toBe(4);
+    expect(request.destination).toBe("/tmp/form-destination");
+    expect(request.filename).toBe("explicit-video.mp4");
+    expect(addDownload).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("dialog", { name: /video quality/i }),
+    ).toBeNull();
+  });
+
+  it("shows the quality dialog and starts nothing before confirmation when always-ask is on", async () => {
+    const user = userEvent.setup();
+    mockSettings({
+      alwaysAskQuality: true,
+      videoQualityPreference: "highest",
+    });
+
+    render(<DialogHarness />);
+
+    await enterUrl(user, "https://example.com/watch?v=1");
+    await user.click(screen.getByRole("button", { name: /parse video/i }));
+
+    expect(await screen.findByText("Sample Video Title")).toBeInTheDocument();
+    expect(startVideoDownload).not.toHaveBeenCalled();
+
+    await user.click(
+      within(qualityDialog()).getByRole("button", {
+        name: /start download|confirm/i,
+      }),
+    );
+    await waitFor(() => {
+      expect(startVideoDownload).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("video_start_creates_one_video_task_and_http_flow_is_unchanged", async () => {

@@ -317,6 +317,7 @@ fn file_item(url: &str, filename: &str) -> CaptureItem {
         size: Some(1_024),
         kind: Some(CaptureKind::File),
         headers: Vec::new(),
+        cookies: Vec::new(),
     }
 }
 
@@ -350,7 +351,7 @@ async fn health_reports_capabilities_with_an_absent_origin() {
 
     assert_eq!(body["ok"], json!(true));
     assert_eq!(body["appVersion"], json!(TEST_APP_VERSION));
-    assert_eq!(body["protocolVersion"], json!(1));
+    assert_eq!(body["protocolVersion"], json!(2));
     let capabilities = body["capabilities"].as_array().expect("capabilities array");
     for expected in ["capture", "prefill", "takeover"] {
         assert!(
@@ -554,7 +555,7 @@ async fn pairing_protocol_mismatch_is_409_and_does_not_consume_the_code() {
             &origin,
             None,
             Some("application/json"),
-            pairing_body(&code, API_PROTOCOL_VERSION + 1),
+            pairing_body(&code, 3),
         ),
     )
     .await;
@@ -763,7 +764,7 @@ async fn capture_rejects_non_json_content_type_and_invalid_request_shapes() {
     );
 
     let wrong_protocol = serde_json::to_vec(&json!({
-        "protocolVersion": API_PROTOCOL_VERSION + 1,
+        "protocolVersion": 3,
         "intent": "prefill",
         "items": [file_item("https://example.com/a.bin", "a.bin")],
     }))
@@ -1650,6 +1651,335 @@ async fn tokens_bound_to_another_extension_scheme_are_rejected() {
     )
     .await;
     assert_eq!(own_firefox.status().as_u16(), 200);
+}
+
+// --- Cookie capture protocol v2 ---
+
+use oneget_lib::api::protocol::CaptureCookie;
+
+fn browser_cookie(
+    name: &str,
+    domain: &str,
+    path: &str,
+    secure: bool,
+    expires: u64,
+) -> CaptureCookie {
+    CaptureCookie {
+        name: name.to_string(),
+        value: format!("value-for-{name}"),
+        domain: domain.to_string(),
+        path: path.to_string(),
+        secure,
+        expires,
+    }
+}
+
+fn file_item_with_cookies(url: &str, filename: &str, cookies: Vec<CaptureCookie>) -> CaptureItem {
+    CaptureItem {
+        url: url.to_string(),
+        filename: Some(filename.to_string()),
+        referer: Some("https://page.example/".to_string()),
+        mime: Some("application/octet-stream".to_string()),
+        size: Some(1_024),
+        kind: Some(CaptureKind::File),
+        headers: Vec::new(),
+        cookies,
+    }
+}
+
+fn capture_body_v2(
+    intent: CaptureIntent,
+    source_id: Option<&str>,
+    items: Vec<CaptureItem>,
+) -> Vec<u8> {
+    serde_json::to_vec(&CaptureRequest {
+        protocol_version: 2,
+        intent,
+        source_id: source_id.map(str::to_string),
+        items,
+    })
+    .expect("capture body v2")
+}
+
+fn prefill_item_text(prefill: &PendingPrefill) -> String {
+    serde_json::to_string(prefill).expect("serialize prefill")
+}
+
+#[tokio::test]
+async fn version_one_without_cookies_and_version_two_with_in_scope_cookies_are_admitted() {
+    let harness = Harness::new(10, 10);
+    let origin = extension_origin('a');
+    let token = harness.issue_token(&origin, "Chrome extension");
+
+    let v1 = send(
+        &harness.router,
+        write_request(
+            "/capture",
+            &origin,
+            Some(&token),
+            Some("application/json"),
+            capture_body(
+                CaptureIntent::Takeover,
+                Some("v1-no-cookies"),
+                vec![file_item("https://example.com/a.bin", "a.bin")],
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(v1.status().as_u16(), 200);
+    let v1_body = response_json(v1).await;
+    assert_eq!(v1_body["intent"], json!("takeover"));
+    assert_eq!(v1_body["accepted"], json!(1));
+    assert_eq!(v1_body["duplicate"], json!(false));
+
+    let in_scope = browser_cookie("session", "example.com", "/downloads", false, u64::MAX / 2);
+    let item = file_item_with_cookies(
+        "https://example.com/downloads/file.bin",
+        "file.bin",
+        vec![in_scope.clone()],
+    );
+    let v2 = send(
+        &harness.router,
+        write_request(
+            "/capture",
+            &origin,
+            Some(&token),
+            Some("application/json"),
+            capture_body_v2(CaptureIntent::Takeover, Some("v2-cookies"), vec![item]),
+        ),
+    )
+    .await;
+    assert_eq!(v2.status().as_u16(), 200);
+    let v2_body = response_json(v2).await;
+    assert_eq!(v2_body["intent"], json!("takeover"));
+    assert_eq!(v2_body["accepted"], json!(1));
+    assert_eq!(v2_body["duplicate"], json!(false));
+    assert!(v2_body["taskId"].as_str().is_some());
+
+    let records = harness.bridge.records();
+    assert_eq!(records.takeovers.len(), 2);
+    let accepted = &records.takeovers[1].0;
+    assert_eq!(accepted.cookies.len(), 1);
+    assert_eq!(accepted.cookies[0].domain, in_scope.domain);
+    assert_eq!(accepted.cookies[0].path, in_scope.path);
+    assert_eq!(accepted.cookies[0].secure, in_scope.secure);
+    assert_eq!(accepted.cookies[0].expires, in_scope.expires);
+    assert_eq!(accepted.cookies[0].name, in_scope.name);
+    assert_eq!(accepted.cookies[0].value, in_scope.value);
+}
+
+#[tokio::test]
+async fn out_of_scope_or_oversized_capture_cookies_are_rejected_per_item() {
+    let harness = Harness::new(10, 10);
+    let origin = extension_origin('a');
+    let token = harness.issue_token(&origin, "Chrome extension");
+
+    let scope_cases = vec![
+        file_item_with_cookies(
+            "https://example.com/file.bin",
+            "other-host.bin",
+            vec![browser_cookie(
+                "a",
+                "other.example",
+                "/",
+                false,
+                u64::MAX / 2,
+            )],
+        ),
+        file_item_with_cookies(
+            "https://example.com/downloads/file.bin",
+            "wrong-path.bin",
+            vec![browser_cookie(
+                "b",
+                "example.com",
+                "/other",
+                false,
+                u64::MAX / 2,
+            )],
+        ),
+        file_item_with_cookies(
+            "http://example.com/file.bin",
+            "secure-http.bin",
+            vec![browser_cookie("c", "example.com", "/", true, u64::MAX / 2)],
+        ),
+        file_item_with_cookies(
+            "https://example.com/file.bin",
+            "expired.bin",
+            vec![browser_cookie("d", "example.com", "/", false, 1)],
+        ),
+    ];
+
+    for (idx, item) in scope_cases.into_iter().enumerate() {
+        let response = send(
+            &harness.router,
+            write_request(
+                "/capture",
+                &origin,
+                Some(&token),
+                Some("application/json"),
+                capture_body_v2(
+                    CaptureIntent::Prefill,
+                    Some(&format!("scope-{idx}")),
+                    vec![item],
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), 400, "scope case {idx}");
+        let body = response_json(response).await;
+        assert_eq!(body["code"], json!("INVALID_CAPTURE_ITEM"));
+        let rejected = body["rejected"].as_array().expect("rejected array");
+        assert_eq!(rejected.len(), 1, "scope case {idx}");
+        assert_eq!(rejected[0]["index"], json!(0));
+        assert_eq!(rejected[0]["code"], json!("COOKIE_SCOPE"));
+    }
+
+    let too_many: Vec<CaptureCookie> = (0..101)
+        .map(|i| browser_cookie(&format!("c{i}"), "example.com", "/", false, u64::MAX / 2))
+        .collect();
+    let too_many_response = send(
+        &harness.router,
+        write_request(
+            "/capture",
+            &origin,
+            Some(&token),
+            Some("application/json"),
+            capture_body_v2(
+                CaptureIntent::Prefill,
+                Some("too-many"),
+                vec![file_item_with_cookies(
+                    "https://example.com/file.bin",
+                    "many.bin",
+                    too_many,
+                )],
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(too_many_response.status().as_u16(), 400);
+    let too_many_body = response_json(too_many_response).await;
+    assert_eq!(too_many_body["code"], json!("INVALID_CAPTURE_ITEM"));
+    assert_eq!(too_many_body["rejected"][0]["code"], json!("COOKIE_LIMIT"));
+
+    let oversized_name = "n".repeat(8 * 1024);
+    let oversized_value = "v".repeat(64);
+    let oversized = vec![CaptureCookie {
+        name: oversized_name,
+        value: oversized_value,
+        domain: "example.com".to_string(),
+        path: "/".to_string(),
+        secure: false,
+        expires: u64::MAX / 2,
+    }];
+    let oversized_response = send(
+        &harness.router,
+        write_request(
+            "/capture",
+            &origin,
+            Some(&token),
+            Some("application/json"),
+            capture_body_v2(
+                CaptureIntent::Prefill,
+                Some("too-large"),
+                vec![file_item_with_cookies(
+                    "https://example.com/file.bin",
+                    "large.bin",
+                    oversized,
+                )],
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(oversized_response.status().as_u16(), 400);
+    let oversized_body = response_json(oversized_response).await;
+    assert_eq!(oversized_body["code"], json!("INVALID_CAPTURE_ITEM"));
+    assert_eq!(oversized_body["rejected"][0]["code"], json!("COOKIE_LIMIT"));
+
+    let records = harness.bridge.records();
+    assert!(
+        records.takeovers.is_empty(),
+        "rejected items must not create tasks"
+    );
+    assert!(
+        records.prefills.is_empty(),
+        "rejected items must not be prefills"
+    );
+}
+
+#[tokio::test]
+async fn version_two_prefill_exposes_only_cookie_count_and_handle_without_values() {
+    let harness = Harness::new(10, 10);
+    let origin = extension_origin('a');
+    let token = harness.issue_token(&origin, "Chrome extension");
+
+    let cookie_name = "capture-secret-name";
+    let cookie_value = "capture-secret-value";
+    let cookies = vec![CaptureCookie {
+        name: cookie_name.to_string(),
+        value: cookie_value.to_string(),
+        domain: "example.com".to_string(),
+        path: "/".to_string(),
+        secure: false,
+        expires: u64::MAX / 2,
+    }];
+    let item = file_item_with_cookies("https://example.com/file.bin", "file.bin", cookies);
+    let response = send(
+        &harness.router,
+        write_request(
+            "/capture",
+            &origin,
+            Some(&token),
+            Some("application/json"),
+            capture_body_v2(CaptureIntent::Prefill, Some("prefill-v2"), vec![item]),
+        ),
+    )
+    .await;
+    assert_eq!(response.status().as_u16(), 200);
+    let body = response_json(response).await;
+    assert_eq!(body["intent"], json!("prefill"));
+    assert_eq!(body["accepted"], json!(1));
+
+    let records = harness.bridge.records();
+    assert_eq!(records.prefills.len(), 1);
+    let prefill = &records.prefills[0];
+    let serialized = prefill_item_text(prefill);
+    assert!(serialized.contains("\"cookieCount\":1") || serialized.contains("\"cookie_count\":1"));
+    assert!(serialized.contains("cookieHandle") || serialized.contains("cookie_handle"));
+    assert!(!serialized.contains(cookie_name));
+    assert!(!serialized.contains(cookie_value));
+    assert!(!serialized.contains("\"cookies\""));
+    assert_eq!(prefill.items.len(), 1);
+    let item_json = serde_json::to_string(&prefill.items[0]).expect("serialize item");
+    assert!(!item_json.contains(cookie_name));
+    assert!(!item_json.contains(cookie_value));
+    assert!(!item_json.contains("\"cookies\""));
+
+    let v1 = send(
+        &harness.router,
+        write_request(
+            "/capture",
+            &origin,
+            Some(&token),
+            Some("application/json"),
+            capture_body(
+                CaptureIntent::Prefill,
+                Some("prefill-v1"),
+                vec![file_item("https://example.com/legacy.bin", "legacy.bin")],
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(v1.status().as_u16(), 200);
+    let v1_body = response_json(v1).await;
+    assert_eq!(v1_body["intent"], json!("prefill"));
+    assert_eq!(v1_body["accepted"], json!(1));
+    let records = harness.bridge.records();
+    assert_eq!(records.prefills.len(), 2);
+    assert_eq!(records.prefills[1].items.len(), 1);
+    assert_eq!(
+        records.prefills[1].items[0].url,
+        "https://example.com/legacy.bin"
+    );
 }
 
 // --- Real socket and bind failure ---

@@ -49,6 +49,9 @@ pub struct VideoStartRequest {
     pub cookies_file: Option<PathBuf>,
     /// Optional credential-free HTTP proxy URL.
     pub proxy_url: Option<String>,
+    /// Optional requested connection count stored with the task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u32>,
 }
 
 /// One selectable quality choice returned by a probe.
@@ -134,6 +137,7 @@ pub fn video_start(state: &AppState, request: VideoStartRequest) -> Result<Strin
     let url = validate_url(&request.url).map_err(AppError::from)?;
     let minimized_url = storage_url(&url);
     let filename = sanitize_filename(&request.filename, current_target());
+    let connections = validate_connections(request.connections)?;
 
     let destination = request
         .destination
@@ -146,19 +150,32 @@ pub fn video_start(state: &AppState, request: VideoStartRequest) -> Result<Strin
 
     let service = video(state)?;
     service
-        .add(StartVideoRequest {
-            url,
-            minimized_url,
-            filename,
-            destination: Some(destination),
-            format_selector: request.format_selector,
-            audio_only: request.audio_only,
-            metadata: request.metadata,
-            cookies_file,
-            proxy_url,
-            full_url_persisted: false,
-        })
+        .add_with_connections(
+            StartVideoRequest {
+                url,
+                minimized_url,
+                filename,
+                destination: Some(destination),
+                format_selector: request.format_selector,
+                audio_only: request.audio_only,
+                metadata: request.metadata,
+                cookies_file,
+                proxy_url,
+                full_url_persisted: false,
+            },
+            connections,
+        )
         .map_err(video_error)
+}
+
+fn validate_connections(connections: Option<u32>) -> Result<Option<u32>, AppError> {
+    match connections {
+        Some(value) if !(1..=64).contains(&value) => Err(AppError::new(
+            "INVALID_CONNECTIONS",
+            "the connection count must be between 1 and 64",
+        )),
+        value => Ok(value),
+    }
 }
 
 fn validate_cookies_file(path: Option<PathBuf>) -> Result<Option<PathBuf>, AppError> {

@@ -28,6 +28,12 @@ export type LogLevel = "error" | "warn" | "info" | "debug" | "trace";
 
 export type CloseBehavior = "tray" | "quit";
 
+export type ProxyMode = "direct" | "system" | "manual";
+
+export type ProxyType = "http" | "https" | "socks5";
+
+export type VideoQualityPreference = "mp4Compatible" | "highest";
+
 export interface Settings {
   schemaVersion: number;
   language: LanguageSetting;
@@ -38,12 +44,29 @@ export interface Settings {
   maxConcurrentTasks: number;
   globalRateLimit: number | null;
   logLevel: LogLevel;
+  proxyMode?: ProxyMode;
+  proxyType?: ProxyType;
+  proxyHost?: string | null;
+  proxyPort?: number | null;
+  defaultCookiesFile?: string | null;
+  userAgent?: string | null;
+  connectTimeoutSecs?: number;
+  readTimeoutSecs?: number;
+  retryAttempts?: number;
+  hfConnectionCap?: number;
+  alwaysAskQuality?: boolean;
+  videoQualityPreference?: VideoQualityPreference;
   [key: string]: unknown;
 }
 
 export interface SettingsStatus {
   readOnly: boolean;
   recovered: boolean;
+  proxyUnavailableReason?: string | null;
+}
+
+export interface SecretStatus {
+  configured: boolean;
 }
 
 export interface DeepLinkResult {
@@ -77,6 +100,12 @@ export interface CommandArgs {
   settings_get: undefined;
   settings_save: { settings: Settings };
   settings_status: undefined;
+  hf_token_status: undefined;
+  hf_token_save: { token: string };
+  hf_token_clear: undefined;
+  proxy_credentials_status: undefined;
+  proxy_credentials_save: { username: string; password: string };
+  proxy_credentials_clear: undefined;
   deep_link_last: undefined;
   diagnostics_secret_roundtrip: { secret: string };
   diagnostics_notification_status: undefined;
@@ -103,6 +132,12 @@ export interface CommandResults {
   settings_get: Settings;
   settings_save: Settings;
   settings_status: SettingsStatus;
+  hf_token_status: SecretStatus;
+  hf_token_save: SecretStatus;
+  hf_token_clear: SecretStatus;
+  proxy_credentials_status: SecretStatus;
+  proxy_credentials_save: SecretStatus;
+  proxy_credentials_clear: SecretStatus;
   deep_link_last: DeepLinkResult;
   diagnostics_secret_roundtrip: SecretRoundtripResult;
   diagnostics_notification_status: NotificationStatus;

@@ -4,21 +4,26 @@
 
 mod support;
 
+#[path = "support/proxy_server.rs"]
+mod proxy_server;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use ed25519_dalek::{Signer, SigningKey};
+use oneget_lib::engine::http::ProxyConfig;
 use oneget_lib::kernel::archive::{extract_declared_zip, ArchiveLimits, ExtractedFile};
 use oneget_lib::kernel::canonicalize;
 use oneget_lib::kernel::catalog::{
     verify_catalog, ArchiveType, Artifact, ComponentCatalog, ComponentEntry, FileRole, Target,
     CATALOG_SCHEMA_VERSION,
 };
-use oneget_lib::kernel::download::download_artifact;
+use oneget_lib::kernel::download::{download_artifact, download_artifact_with_proxy};
 use oneget_lib::kernel::error::KernelError;
 use oneget_lib::kernel::install::{InstallOutcome, Installer};
+use oneget_lib::kernel::source::fetch_catalog_with_proxy;
 use oneget_lib::kernel::status::{
     component_statuses, ComponentState, ComponentStatus, OperationRegistry,
 };
@@ -28,6 +33,7 @@ use oneget_lib::kernel::store::{
 use oneget_lib::kernel::tools::{ResolvedTools, ToolRequirement, ToolResolver};
 use oneget_lib::platform::component::prepare_executable;
 use oneget_lib::platform::files::CapDir;
+use proxy_server::{ProxyCredentials, ProxyServer};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use support::kernel_server::{build_stored_zip, KernelServer, KernelServerConfig, ZipEntry};
@@ -1867,5 +1873,210 @@ async fn installed_component_resolves_without_trust_or_catalog() {
     assert_eq!(
         after, before,
         "a refused install must not change the active record"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Catalog fetch and artifact download through the authenticated local proxy.
+// ---------------------------------------------------------------------------
+
+const PROXY_USER: &str = "oneget-kernel-proxy-user";
+const PROXY_PASSWORD: &str = "oneget-kernel-proxy-password-secret";
+const WRONG_PASSWORD: &str = "oneget-kernel-proxy-wrong-secret";
+
+fn proxy_test_components() -> [ComponentSpec; 3] {
+    [
+        ComponentSpec {
+            name: "yt-dlp",
+            version: "2026.11.13",
+            sequence: 4,
+            license: "Unlicense",
+            artifact: ArtifactSpec::binary(
+                "yt-dlp",
+                "https://cdn.example.com/yt-dlp",
+                b"yt-dlp-proxy-fixture",
+            ),
+        },
+        unused_ffmpeg_spec(),
+        unused_deno_spec(),
+    ]
+}
+
+fn assert_proxy_requests_hide_credentials(
+    proxy: &ProxyServer,
+    requests: &[proxy_server::ProxyRequest],
+) {
+    let expected = proxy
+        .expected_authorization()
+        .expect("the fixture proxy requires credentials")
+        .to_string();
+    assert!(
+        !requests.is_empty(),
+        "the proxy must observe every forwarded request"
+    );
+    for request in requests {
+        assert_eq!(
+            request.headers.get("proxy-authorization"),
+            Some(&expected),
+            "the proxy must observe Proxy-Authorization for {}",
+            request.target
+        );
+        let forwarded = request
+            .forwarded_headers
+            .as_ref()
+            .expect("an authenticated request must reach the origin");
+        assert!(
+            !forwarded.contains_key("proxy-authorization"),
+            "proxy credentials must not be forwarded to the origin"
+        );
+        for (name, value) in forwarded {
+            assert!(
+                !value.contains(PROXY_USER) && !value.contains(PROXY_PASSWORD),
+                "a forwarded header value leaked a proxy credential: {name}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn catalog_fetch_through_authenticated_proxy_verifies_and_never_leaks() {
+    let signing_key = random_signing_key();
+    let public_key = public_key_hex(&signing_key);
+    let catalog_bytes = signed_catalog(&signing_key, &proxy_test_components());
+    let server = KernelServer::start(KernelServerConfig::new(catalog_bytes.clone()));
+    let proxy = ProxyServer::start(Some(ProxyCredentials {
+        username: PROXY_USER.to_string(),
+        password: PROXY_PASSWORD.to_string(),
+    }));
+    let config = ProxyConfig {
+        url: proxy.url(),
+        username: Some(PROXY_USER.to_string()),
+        password: Some(PROXY_PASSWORD.to_string()),
+    };
+    let timeout = Duration::from_secs(5);
+
+    let body = fetch_catalog_with_proxy(&server.catalog_url(), true, timeout, Some(&config))
+        .await
+        .expect("the catalog must fetch through the authenticated proxy");
+    assert_eq!(
+        body, catalog_bytes,
+        "the fetched catalog must carry the served signed bytes"
+    );
+    let verified = verify_catalog(&body, Some(&public_key), Target::current(), true)
+        .expect("the fetched catalog bytes must verify");
+    assert_eq!(verified.components.len(), 3);
+
+    let requests = proxy.requests();
+    assert_eq!(
+        server.request_count(),
+        requests.len(),
+        "every proxy-observed request must reach the origin exactly once"
+    );
+    assert!(requests
+        .iter()
+        .all(|request| request.target.contains("/catalog.json")));
+    assert_proxy_requests_hide_credentials(&proxy, &requests);
+}
+
+#[tokio::test]
+async fn artifact_download_through_authenticated_proxy_verifies_and_never_leaks() {
+    let bytes: &[u8] = b"canonical-component-artifact-proxy";
+    let digest = sha256_hex(bytes);
+    let size = bytes.len() as u64;
+    let server = KernelServer::start(
+        KernelServerConfig::new(b"{}".to_vec()).artifact("proxy-artifact.bin", bytes.to_vec()),
+    );
+    let proxy = ProxyServer::start(Some(ProxyCredentials {
+        username: PROXY_USER.to_string(),
+        password: PROXY_PASSWORD.to_string(),
+    }));
+    let config = ProxyConfig {
+        url: proxy.url(),
+        username: Some(PROXY_USER.to_string()),
+        password: Some(PROXY_PASSWORD.to_string()),
+    };
+    let timeout = Duration::from_secs(5);
+
+    let downloaded = download_artifact_with_proxy(
+        &server.artifact_url("proxy-artifact.bin"),
+        &digest,
+        size,
+        true,
+        timeout,
+        Some(&config),
+    )
+    .await
+    .expect("a matching artifact must download through the authenticated proxy");
+    assert_eq!(
+        downloaded, bytes,
+        "the proxy must deliver the verified artifact bytes"
+    );
+
+    let requests = proxy.requests();
+    assert_eq!(
+        server.request_count(),
+        requests.len(),
+        "every proxy-observed request must reach the origin exactly once"
+    );
+    assert!(requests
+        .iter()
+        .all(|request| request.target.contains("/artifacts/proxy-artifact.bin")));
+    assert_proxy_requests_hide_credentials(&proxy, &requests);
+}
+
+#[tokio::test]
+async fn wrong_proxy_credentials_fail_typed_and_never_reach_the_origin() {
+    const ARTIFACT_BYTES: &[u8] = b"canonical-component-artifact-rejected";
+    let digest = sha256_hex(ARTIFACT_BYTES);
+    let size = ARTIFACT_BYTES.len() as u64;
+    let server = KernelServer::start(
+        KernelServerConfig::new(b"{}".to_vec())
+            .artifact("proxy-rejected.bin", ARTIFACT_BYTES.to_vec()),
+    );
+    let proxy = ProxyServer::start(Some(ProxyCredentials {
+        username: PROXY_USER.to_string(),
+        password: PROXY_PASSWORD.to_string(),
+    }));
+    let wrong = ProxyConfig {
+        url: proxy.url(),
+        username: Some(PROXY_USER.to_string()),
+        password: Some(WRONG_PASSWORD.to_string()),
+    };
+    let timeout = Duration::from_secs(5);
+
+    let catalog_error =
+        fetch_catalog_with_proxy(&server.catalog_url(), true, timeout, Some(&wrong))
+            .await
+            .expect_err("a wrong proxy password must fail the catalog fetch");
+    assert_eq!(catalog_error.code(), "COMPONENT_MANIFEST_UNAVAILABLE");
+
+    let artifact_error = download_artifact_with_proxy(
+        &server.artifact_url("proxy-rejected.bin"),
+        &digest,
+        size,
+        true,
+        timeout,
+        Some(&wrong),
+    )
+    .await
+    .expect_err("a wrong proxy password must fail the artifact download");
+    assert_eq!(artifact_error.code(), "COMPONENT_DOWNLOAD_UNAVAILABLE");
+
+    let requests = proxy.requests();
+    assert!(
+        !requests.is_empty(),
+        "the proxy must observe the rejected attempts"
+    );
+    for request in &requests {
+        assert!(
+            request.forwarded_headers.is_none(),
+            "a rejected request must not be forwarded to the origin: {}",
+            request.target
+        );
+    }
+    assert_eq!(
+        server.request_count(),
+        0,
+        "the origin must never receive a credential-bearing request it cannot authenticate"
     );
 }

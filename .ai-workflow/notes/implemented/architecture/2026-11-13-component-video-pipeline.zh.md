@@ -18,11 +18,11 @@ OneGet 已经可以下载 HTTP 文件，但还无法获取可信的媒体工具�
 
 视频服务运行在一条专用线程上，使用当前线程运行时、请求通道、控制表，以及与运行循环并行的探测路径。它一次只运行一个视频；后续确认会持久化为 `queued`，只有活动任务进入已完成、失败或已取消后才开始。启动恢复保留排队和暂停任务，把中断的 connecting、downloading 或 finalizing 任务标记为失败并返回 `VIDEO_INTERRUPTED`，同时保留其任务专属临时目录。关闭会在进程边界内暂停活动任务，并拒绝后续工作。yt-dlp 使用固定参数白名单、机器可读进度模板、`--concurrent-fragments 4`、活动 ffmpeg 目录，以及目标目录下的 `.oneget-video-<id>`，随后合并为 MP4 或提取 M4A。输出会移动到目标目录中的唯一文件名，并在完成前存储其 SHA-256。暂停保留临时目录，继续会附加 `--continue`，取消只移除任务专属数据和正在完成阶段的最终文件，重试复用已有数据。完整源 URL 只保留在内存中，因此重启后的重试会以 `VIDEO_URL_UNAVAILABLE` 失败，而不会复用最小化后的已存 URL。
 
-每个视频子进程都不使用 shell，运行在 Unix 进程组或 Windows Job Object 中，并发读取 stdout 与 stderr，合并捕获上限为 2 MiB 并保留 8 KiB 尾部，且使用最小化的白名单环境。生产环境边界为探测 60 秒、从启动到首条下载进度 30 秒、首条进度后无活动 120 秒、终止并回收进程树 5 秒；测试注入更短的值。失败类型为 `VIDEO_TIMEOUT`、`VIDEO_OUTPUT_LIMIT`、`VIDEO_PROCESS_FAILED`、`VIDEO_SPAWN_FAILED`、`VIDEO_MERGE_FAILED`、`VIDEO_OUTPUT_MISSING` 或 `VIDEO_INTERRUPTED`。Cookie 文件和 HTTP 代理是每次下载的输入，只传给 yt-dlp；Cookie 内容从不读取，代理中的用户信息被拒绝，两者都不会被持久化或记录到日志。HLS、DASH 和 AES-128 传输委托给已安装工具，应用从不下载清单、解密分段或绕过 DRM。
+每个视频子进程都不使用 shell，运行在 Unix 进程组或 Windows Job Object 中，并发读取 stdout 与 stderr，合并捕获上限为 2 MiB 并保留 8 KiB 尾部，且使用最小化的白名单环境。生产环境边界为探测 60 秒、从启动到首条下载进度 30 秒、首条进度后无活动 120 秒、终止并回收进程树 5 秒；测试注入更短的值。失败类型为 `VIDEO_TIMEOUT`、`VIDEO_OUTPUT_LIMIT`、`VIDEO_PROCESS_FAILED`、`VIDEO_SPAWN_FAILED`、`VIDEO_MERGE_FAILED`、`VIDEO_OUTPUT_MISSING` 或 `VIDEO_INTERRUPTED`。每次视频的 Cookie 文件和代理是传给 yt-dlp 的视频输入；每次视频的代理会覆盖该探测或下载的生效设置代理，否则应用配置的代理。Cookie 内容从不读取，代理中的用户信息被拒绝，两者都不会被持久化或记录到日志。HLS、DASH 和 AES-128 传输委托给已安装工具，应用从不下载清单、解密分段或绕过 DRM。
 
 界面新增“组件”设置区，显示组件状态、活动与可用版本、已安装版本、目标、回滚目标、操作阶段与百分比、本地化错误，以及安装、更新和回滚操作；缺少组件的错误可直接打开该区。新建下载提供“解析视频”和质量对话框，展示视频与纯音频选项、预估大小、目标目录、文件名，以及可选的每次下载 Cookie 和代理，并在每次确认时只创建一个任务。视频详情显示标题、时长、上传者、质量、合并阶段和最终文件，不虚构分段。新增命令为 `video_probe`、`video_start`、`kernel_status`、`kernel_manifest_refresh`、`kernel_install`、`kernel_update` 和 `kernel_rollback`；`downloads_list` 增加 `kind` 和视频摘要，控制命令按类别路由，视频任务的 `downloads_segments` 保持为空。
 
-本决策扩展了 [OneGet 桌面外壳基线](2026-11-11-oneget-desktop-shell-baseline.md)、[下载引擎与持久任务存储](2026-11-12-download-engine-task-store.md) 与 [桌面下载界面与引擎服务](2026-11-13-desktop-download-ui.md)；这些记录在各自陈述的 kernel 边界、任务 schema 和任务界面处被部分取代。[本地浏览器 API 与配对边界](2026-11-13-local-api-browser-capture.md) 和 [Firefox 扩展对等](2026-11-13-firefox-extension-parity.md) 记录保持其未改变的浏览器边界。
+本决策扩展了 [OneGet 桌面外壳基线](2026-11-11-oneget-desktop-shell-baseline.md)、[下载引擎与持久任务存储](2026-11-12-download-engine-task-store.md) 与 [桌面下载界面与引擎服务](2026-11-13-desktop-download-ui.md)；这些记录在各自陈述的 kernel 边界、任务 schema 和任务界面处被部分取代。[本地浏览器 API 与配对边界](2026-11-13-local-api-browser-capture.md) 和 [Firefox 扩展对等](2026-11-13-firefox-extension-parity.md) 记录保持其未改变的浏览器边界。后续的 [HuggingFace 下载、网络传输与 Cookie 来源](2026-11-15-huggingface-network-capabilities.md) 记录部分取代本记录关于仅每次下载代理和 Cookie 的表述：它为 HTTP 增加全局代理和可选浏览器 Cookie 捕获，而视频 Cookie 仍为每次下载，每次视频的代理覆盖配置代理；本记录为组件、视频、HLS、进程和任务类别决策保持有效。
 
 ## Alternatives considered
 
@@ -35,7 +35,7 @@ OneGet 已经可以下载 HTTP 文件，但还无法获取可信的媒体工具�
 - 并发运行多个视频下载被否决，因为 yt-dlp 与 ffmpeg 占用大量 CPU 和磁盘，且交付的进度模型只有一个活动视频；后续确认改为持久化为排队。
 - 复用 HTTP 引擎的工作池处理视频被否决，因为 HTTP 分段、部件文件和 Range 恢复无法描述合并或单一输出文件，混合两者会让每个领取和计数复杂化。
 - 在应用内解析 HLS 或 DASH 并解密 AES-128 被否决，因为 yt-dlp 与 ffmpeg 已负责传输、解密和编解码，第二套实现会增加版权与 DRM 风险。
-- 增加全局代理、Cookie 导入数据库或浏览器 Cookie 提取被否决，因为现有隐私边界让网络输入保持为每任务输入，并保持设置 schema 2 不变。
+- 为本次视频决策增加全局代理或浏览器 Cookie 来源被否决，因为那会扩大每任务隐私边界；后续网络与 Cookie 决策为 HTTP 增加全局代理和可选浏览器 Cookie，而视频 Cookie 仍为每次下载，每次视频的代理覆盖配置代理。
 - 为重启重试持久化完整源 URL 因同样的隐私原因被否决；最小化 URL 是持久化的，带查询的任务必须重新提交。
 - 把目标相关的进程或可执行行为放进视频服务被否决，因为平台层是放置目标分支的唯一位置；服务调用共享的受控进程与准备接口。
 
@@ -45,6 +45,6 @@ OneGet 已经可以下载 HTTP 文件，但还无法获取可信的媒体工具�
 
 后续任务工作必须保留任务类别、仅 HTTP 的领取与计数查询、`TASK_KIND_UNSUPPORTED` 边界、版本 3 迁移与备份，以及视频任务没有字节分段的规则。后续视频工作必须保留单个活动视频、排队确认行为、任务专属临时目录、受控进程树与超时、唯一输出和已存 SHA-256，以及类型化的恢复与控制结果。
 
-交付界面依赖组件与质量流程、按类别区分的列表与详情，以及本地化的组件与视频错误。浏览器扩展与捕获协议未改变：桌面视频从粘贴的 URL 开始，页面覆盖层仍报告浏览器侧视频下载不可用。
+交付界面依赖组件与质量流程、按类别区分的列表与详情，以及本地化的组件与视频错误。桌面视频流程仍从粘贴的 URL 开始，页面覆盖层仍报告浏览器侧视频下载不可用；后续网络与 Cookie 决策增加捕获协议版本 2 和可选 Cookie 列表，但不改变该视频流程。
 
 真实组件安装、更新、回滚、篡改与无密钥行为，真实视频下载与合并，使用真实工具的本地 HLS AES-128 播放，取消、超时、单视频队列，以及 Windows x64 检查仍是手动验收项，并记录为待完成。自动化夹具与模拟不能替代它们，阶段退出仍然阻塞。上下文索引器只发现 TypeScript 模块，因此 Rust kernel、video、engine、store、commands、api、engine-harness、kernel-manifest 和 video-fixture 导航条目仍由手工维护。

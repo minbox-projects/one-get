@@ -4,8 +4,12 @@ export type {
   AppError,
   AppInfo,
   IpcResult,
+  ProxyMode,
+  ProxyType,
+  SecretStatus,
   Settings,
   SettingsStatus,
+  VideoQualityPreference,
 } from "../types/app";
 
 const RUNTIME_UNAVAILABLE_MESSAGE =

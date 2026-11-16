@@ -22,10 +22,11 @@ use uuid::Uuid;
 
 use super::archive::{extract_declared_zip, ArchiveLimits, ExtractedFile};
 use super::catalog::{ArchiveType, Artifact, ComponentCatalog, ComponentEntry, Target};
-use super::download::download_artifact;
+use super::download::download_artifact_with_proxy;
 use super::error::KernelError;
 use super::status::OperationRegistry;
 use super::store::{ComponentInstall, ComponentStore, InstalledFile};
+use crate::engine::http::ProxyConfig;
 use crate::platform::component::prepare_executable;
 use crate::platform::files::CapDir;
 use crate::platform::PlatformError;
@@ -49,6 +50,7 @@ pub struct Installer {
     target: Target,
     public_key: Option<String>,
     allow_loopback_http: bool,
+    proxy: Option<ProxyConfig>,
     operations: Option<Arc<OperationRegistry>>,
 }
 
@@ -67,8 +69,14 @@ impl Installer {
             target,
             public_key,
             allow_loopback_http,
+            proxy: None,
             operations: None,
         }
+    }
+
+    /// Set the effective proxy used by later artifact downloads.
+    pub fn set_proxy(&mut self, proxy: Option<ProxyConfig>) {
+        self.proxy = proxy;
     }
 
     /// Attach the shared operation registry used by the interface.
@@ -123,12 +131,13 @@ impl Installer {
         let display_version = entry.display_version.clone();
 
         self.update_operation(component, "downloading", 10);
-        let bytes = download_artifact(
+        let bytes = download_artifact_with_proxy(
             &artifact.url,
             &artifact.sha256,
             artifact.size,
             self.allow_loopback_http,
             DOWNLOAD_TIMEOUT,
+            self.proxy.as_ref(),
         )
         .await?;
         self.update_operation(component, "verifying", 50);

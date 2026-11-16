@@ -9,9 +9,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::app_state::AppState;
+use crate::app_state::{AppState, PrefillCookieLookup};
+use crate::engine::cookies::CookieSource;
 use crate::engine::service::{AddDownload, EngineService, ProbeRequest};
 use crate::error::AppError;
+use crate::store::hf::HfMetadata;
 use crate::store::{Segment, Task, TaskKind};
 use crate::video::service::VideoService;
 
@@ -35,6 +37,12 @@ pub struct AddDownloadRequest {
     pub allow_html: bool,
     /// Additional request headers.
     pub extra_headers: Vec<(String, String)>,
+    /// Optional per-task Netscape cookies file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookies_file: Option<PathBuf>,
+    /// Opaque handle for memory-only cookies captured with a prefill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_handle: Option<String>,
 }
 
 /// A request to probe one remote URL.
@@ -67,6 +75,24 @@ pub struct VideoSummary {
     pub audio_only: bool,
 }
 
+/// Persisted Hugging Face metadata exposed alongside an HTTP task summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HuggingFaceSummary {
+    /// Repository identifier without the family prefix.
+    pub repo_id: String,
+    /// File path within the repository.
+    pub file_path: String,
+    /// Revision, branch, or tag.
+    pub revision: String,
+    /// Connections actually used by the task.
+    pub effective_connections: u32,
+    /// Metadata refresh count.
+    pub refresh_count: u32,
+    /// Whether the transfer fell back to a downgraded connection count.
+    pub downgraded: bool,
+}
+
 /// A lightweight task row for the polled download list.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +103,8 @@ pub struct DownloadSummary {
     pub kind: String,
     /// Structured video metadata for a video task.
     pub video: Option<VideoSummary>,
+    /// Structured Hugging Face metadata for a resolver-host task.
+    pub huggingface: Option<HuggingFaceSummary>,
     /// Stored, redacted remote URL.
     pub url: String,
     /// Final URL after redirects, redacted before storage.
@@ -103,6 +131,10 @@ pub struct DownloadSummary {
     pub error_code: Option<String>,
     /// User-safe failure message.
     pub error_message: Option<String>,
+    /// Active cookie source for this task: `file` or `browser`.
+    pub cookie_source: Option<String>,
+    /// Cookies from the active source that apply to the task URL.
+    pub cookie_count: u32,
 }
 
 /// One segment row for the task details panel.
@@ -153,6 +185,7 @@ impl From<Task> for DownloadSummary {
             id: task.id,
             kind,
             video,
+            huggingface: None,
             url: task.url,
             final_url: task.final_url,
             filename: task.filename,
@@ -166,6 +199,8 @@ impl From<Task> for DownloadSummary {
             completed_at_ms: task.completed_at_ms,
             error_code: task.error_code,
             error_message: task.error_message,
+            cookie_source: None,
+            cookie_count: 0,
         }
     }
 }
@@ -222,8 +257,33 @@ fn read_f64(metadata: Option<&Value>, record: &Value, key: &str) -> Option<f64> 
 
 /// List every stored task as a lightweight summary.
 pub fn downloads_list(state: &AppState) -> Result<Vec<DownloadSummary>, AppError> {
-    let tasks = engine(state)?.list().map_err(AppError::from)?;
-    Ok(tasks.into_iter().map(DownloadSummary::from).collect())
+    let engine = engine(state)?;
+    let summaries = engine.list_summaries().map_err(AppError::from)?;
+    let metadata = state
+        .hf_metadata()
+        .or_else(|| engine.huggingface_metadata());
+    Ok(summaries
+        .into_iter()
+        .map(|mut summary| {
+            summary.huggingface = metadata
+                .as_ref()
+                .and_then(|store| store.get(&summary.id).ok().flatten())
+                .as_ref()
+                .map(huggingface_summary);
+            summary
+        })
+        .collect())
+}
+
+fn huggingface_summary(metadata: &HfMetadata) -> HuggingFaceSummary {
+    HuggingFaceSummary {
+        repo_id: metadata.repo_id.clone(),
+        file_path: metadata.file_path.clone(),
+        revision: metadata.revision.clone(),
+        effective_connections: metadata.effective_connections,
+        refresh_count: metadata.refresh_count,
+        downgraded: metadata.downgraded,
+    }
 }
 
 /// Load one task's segment plan; a video task has no byte segments.
@@ -262,19 +322,46 @@ pub fn downloads_probe(
 }
 
 /// Create a queued download task.
+///
+/// A captured-cookie handle is resolved from this application state's in-memory
+/// vault. An unknown, stale, or already-consumed handle fails before task
+/// creation so no task is created without the cookies the user was shown; a
+/// live handle that carried no cookies for this URL creates the task without
+/// captured cookies, matching the prefill that offered none.
 pub fn downloads_add(state: &AppState, request: AddDownloadRequest) -> Result<String, AppError> {
-    engine(state)?
-        .add(AddDownload {
-            url: request.url,
-            filename: request.filename,
-            destination: request.destination,
-            connections: request.connections,
-            rate_limit: request.rate_limit,
-            expected_sha256: request.expected_sha256,
-            allow_html: request.allow_html,
-            extra_headers: request.extra_headers,
-        })
-        .map_err(AppError::from)
+    let engine = engine(state)?;
+    if matches!(crate::engine::hf::parse_hf_url(&request.url), Ok(Some(_))) {
+        state.ensure_hf_metadata_attached();
+    }
+    let source = match request.cookie_handle.as_deref() {
+        Some(handle) => match state.take_prefill_cookies(handle, &request.url) {
+            PrefillCookieLookup::Matched(cookies) => Some(CookieSource::Browser(cookies)),
+            PrefillCookieLookup::NoMatch => None,
+            PrefillCookieLookup::UnknownHandle => {
+                return Err(AppError::new(
+                    "INVALID_COOKIE_HANDLE",
+                    "the captured cookies are no longer available for this download",
+                ))
+            }
+        },
+        None => None,
+    };
+    let download = AddDownload {
+        url: request.url,
+        filename: request.filename,
+        destination: request.destination,
+        connections: request.connections,
+        rate_limit: request.rate_limit,
+        expected_sha256: request.expected_sha256,
+        allow_html: request.allow_html,
+        extra_headers: request.extra_headers,
+        cookies_file: request.cookies_file,
+    };
+    match source {
+        Some(source) => engine.add_with_cookies(download, source),
+        None => engine.add(download),
+    }
+    .map_err(AppError::from)
 }
 
 /// Pause a task through the pipeline that owns it.

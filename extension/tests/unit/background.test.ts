@@ -58,6 +58,7 @@ function savedSettings(overrides: Partial<ExtensionSettings> = {}): ExtensionSet
     categories: { ...DEFAULT_SETTINGS.categories },
     blacklistHosts: [],
     takeoverEnabled: true,
+    sendCookies: false,
     ...overrides,
   };
 }
@@ -158,6 +159,9 @@ interface SetupOptions {
   events?: string[];
   pairLabel?: string;
   log?: (event: string, fields?: Record<string, unknown>) => void;
+  getCookiesForUrl?: (
+    url: string,
+  ) => Promise<{ cookies: Array<{ name: string; value: string; domain: string; path: string; secure: boolean; expires?: number }>; permissionMissing?: boolean; error?: boolean }>;
 }
 
 function setUp(options: SetupOptions = {}) {
@@ -179,6 +183,7 @@ function setUp(options: SetupOptions = {}) {
     downloads,
     ...(options.pairLabel === undefined ? {} : { pairLabel: options.pairLabel }),
     log: options.log ?? (() => {}),
+    ...(options.getCookiesForUrl === undefined ? {} : { getCookiesForUrl: options.getCookiesForUrl }),
   });
   return { controller, persistent, session, fetch, events };
 }
@@ -234,7 +239,7 @@ describe("download takeover", () => {
     expect(headers.get("cookie")).toBeNull();
 
     const body = call.body as Record<string, unknown>;
-    expect(body).toMatchObject({ protocolVersion: 1, intent: "takeover" });
+    expect(body).toMatchObject({ protocolVersion: 2, intent: "takeover" });
     expect(typeof body.sourceId).toBe("string");
     expect((body.sourceId as string).length).toBeGreaterThan(0);
 
@@ -245,14 +250,16 @@ describe("download takeover", () => {
       filename: "movie.mp4",
       referer: "https://page.test/watch",
     });
+    expect("cookies" in items[0]).toBe(false);
 
-    const itemHeaders = (items[0].headers ?? []) as Array<{ name: string }>;
-    for (const header of itemHeaders) {
-      expect(SAFE_HEADERS.has(header.name.toLowerCase())).toBe(true);
-    }
+      const itemHeaders = (items[0].headers ?? []) as Array<{ name: string }>;
+      for (const header of itemHeaders) {
+        expect(SAFE_HEADERS.has(header.name.toLowerCase())).toBe(true);
+      }
 
-    const serializedBody = JSON.stringify(body).toLowerCase();
-    expect(serializedBody).not.toContain("cookie");
+      expect("cookies" in items[0]).toBe(false);
+      const serializedBody = JSON.stringify(body).toLowerCase();
+      expect(serializedBody).not.toContain("cookie");
     expect(serializedBody).not.toContain("authorization");
     expect(JSON.stringify(body)).not.toContain(TOKEN_B);
     expect(events).toEqual([`fetch:${TEST_ORIGIN}/capture`, "cancel:7", "erase:7"]);
@@ -524,6 +531,100 @@ describe("download takeover", () => {
     expect(events).toEqual([]);
   });
 
+
+  it("attaches only matching cookies for the captured resource when sendCookies is enabled and keeps values out of writes and logs", async () => {
+    const events: string[] = [];
+    const logs: Array<{ event: string; fields?: Record<string, unknown> }> = [];
+    const resourceUrl = "https://cdn.test/files/movie.mp4";
+    const secretA = "cookie-secret-alpha";
+    const secretB = "cookie-secret-session";
+    const secretC = "cookie-secret-other";
+    const { controller, persistent, session, fetch } = setUp({
+      token: TOKEN_A,
+      settings: savedSettings({ sendCookies: true }),
+      events,
+      log: (event, fields) => logs.push({ event, fields }),
+      getCookiesForUrl: async (url) => {
+        expect(url).toBe(resourceUrl);
+        return {
+          cookies: [
+            { name: "sid", value: secretA, domain: ".cdn.test", path: "/files", secure: true, expires: 2_000_000_000 },
+            { name: "session", value: secretB, domain: "cdn.test", path: "/", secure: false },
+            { name: "other", value: secretC, domain: "other.test", path: "/", secure: true, expires: 2_000_000_000 },
+          ],
+          permissionMissing: false,
+          error: false,
+        };
+      },
+      handler: ({ url }) => {
+        events.push(`fetch:${url}`);
+        return takeoverAccepted("task-cookie");
+      },
+    });
+
+    const outcome = await controller.handleDownload(browserDownload({ url: resourceUrl }));
+
+    expect(outcome).toMatchObject({ action: "takeover", taskId: "task-cookie" });
+    expect(fetch.calls).toHaveLength(1);
+    const body = fetch.calls[0].body as Record<string, unknown>;
+    const items = body.items as Array<Record<string, unknown>>;
+    expect(items).toHaveLength(1);
+    expect(items[0].cookies).toEqual([
+      { name: "sid", value: secretA, domain: ".cdn.test", path: "/files", secure: true, expires: 2_000_000_000 },
+      { name: "session", value: secretB, domain: "cdn.test", path: "/", secure: false },
+    ]);
+    expect(JSON.stringify(items[0].cookies)).not.toContain(secretC);
+    expect(events).toEqual([`fetch:${TEST_ORIGIN}/capture`, "cancel:7", "erase:7"]);
+
+    const written = JSON.stringify([...persistent.sets, ...session.sets, persistent.store, session.store, logs]);
+    expect(written).not.toContain(secretA);
+    expect(written).not.toContain(secretB);
+    expect(written).not.toContain(secretC);
+  });
+
+  it("attaches matching cookies only to the captured prefill item and leaves other observed resources untouched", async () => {
+    const secret = "prefill-cookie-secret";
+    const { controller, fetch } = setUp({
+      token: TOKEN_A,
+      settings: savedSettings({ sendCookies: true }),
+      getCookiesForUrl: async () => ({
+        cookies: [{ name: "sid", value: secret, domain: "cdn.test", path: "/files", secure: true }],
+        permissionMissing: false,
+        error: false,
+      }),
+      handler: () => jsonResponse({ intent: "prefill", accepted: 1, rejected: [], duplicate: false }),
+    });
+
+    await controller.observeResource(resourceInput("https://cdn.test/files/movie.mp4"));
+    await controller.observeResource(resourceInput("https://cdn.test/files/poster.jpg", { nowMs: 1001, mime: "image/jpeg" }));
+    const [listed] = await controller.listResources(1);
+
+    await controller.handleRuntimeMessage(
+      runtimeMessage({
+        type: "popup/capture-prefill",
+        tabId: 1,
+        url: listed.url,
+        resourceUrl: listed.url,
+        resource: listed,
+        item: listed,
+      }),
+      { tabId: 1 },
+    );
+
+    expect(fetch.calls).toHaveLength(1);
+    const body = fetch.calls[0].body as Record<string, unknown>;
+    const items = body.items as Array<Record<string, unknown>>;
+    expect(items).toHaveLength(1);
+    expect(items[0].cookies).toEqual([
+      { name: "sid", value: secret, domain: "cdn.test", path: "/files", secure: true },
+    ]);
+
+    const resources = await controller.listResources(1);
+    expect(resources).toHaveLength(2);
+    expect(resources.every((entry) => !("cookies" in (entry as Record<string, unknown>)))).toBe(true);
+    expect(JSON.stringify(resources)).not.toContain(secret);
+  });
+
   it("keeps the token and pairing code out of log fields", async () => {
     const logs: Array<{ event: string; fields?: Record<string, unknown> }> = [];
     const { controller } = setUp({
@@ -661,13 +762,14 @@ describe("runtime messages", () => {
     expect(call.url).toBe(`${TEST_ORIGIN}/capture`);
     expect(new Headers(call.init?.headers).get("authorization")).toBe(`Bearer ${TOKEN_A}`);
     const body = call.body as Record<string, unknown>;
-    expect(body).toMatchObject({ protocolVersion: 1, intent: "prefill" });
+    expect(body).toMatchObject({ protocolVersion: 2, intent: "prefill" });
     const items = body.items as Array<Record<string, unknown>>;
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       url: "https://cdn.test/files/movie.mp4",
       filename: "movie.mp4",
     });
+    expect("cookies" in items[0]).toBe(false);
     expect(events).toEqual([]);
   });
 
@@ -690,7 +792,7 @@ describe("runtime messages", () => {
     expect(persistent.store["oneget.token"]).toBe(TOKEN_A);
     expect(fetch.calls).toHaveLength(1);
     expect(fetch.calls[0].url).toBe(`${TEST_ORIGIN}/pair`);
-    expect(fetch.calls[0].body).toMatchObject({ protocolVersion: 1, code: PAIRING_CODE });
+    expect(fetch.calls[0].body).toMatchObject({ protocolVersion: 2, code: PAIRING_CODE });
   });
 
   it("sends the default Chromium pair label", async () => {
@@ -706,7 +808,7 @@ describe("runtime messages", () => {
 
     expect(fetch.calls).toHaveLength(1);
     expect(fetch.calls[0].body).toMatchObject({
-      protocolVersion: 1,
+      protocolVersion: 2,
       code: PAIRING_CODE,
       label: "Chrome extension",
     });
@@ -726,7 +828,7 @@ describe("runtime messages", () => {
 
     expect(fetch.calls).toHaveLength(1);
     expect(fetch.calls[0].body).toMatchObject({
-      protocolVersion: 1,
+      protocolVersion: 2,
       code: PAIRING_CODE,
       label: "Firefox extension",
     });
@@ -957,7 +1059,7 @@ describe("takeover failure surface", () => {
 });
 
 describe("MV3 manifest", () => {
-  it("declares a bundled MV3 service worker, popup, permissions, loopback host, CSP, content scripts, and icons", () => {
+  it("declares a bundled MV3 service worker, popup, permissions including cookies, loopback host, CSP, content scripts, and icons", () => {
     const manifest = JSON.parse(
       readFileSync(new URL("../../chromium/manifest.json", import.meta.url), "utf8"),
     ) as Record<string, unknown>;
@@ -973,9 +1075,8 @@ describe("MV3 manifest", () => {
 
     const permissions = (manifest.permissions ?? []) as string[];
     expect([...permissions].sort()).toEqual(
-      ["downloads", "storage", "tabs", "webNavigation", "webRequest"].sort(),
+      ["cookies", "downloads", "storage", "tabs", "webNavigation", "webRequest"].sort(),
     );
-    expect(permissions).not.toContain("cookies");
     expect(permissions).not.toContain("nativeMessaging");
 
     const hosts = (manifest.host_permissions ?? []) as string[];
