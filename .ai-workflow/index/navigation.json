@@ -52,16 +52,6 @@
       ]
     },
     {
-      "id": "src-tauri",
-      "path": "src-tauri",
-      "owner_role": "shared",
-      "responsibility": "Discovered typescript module at src-tauri",
-      "language": "typescript",
-      "entry_kinds": [
-        "exported-symbol"
-      ]
-    },
-    {
       "id": "kernel",
       "path": "src-tauri/src/kernel",
       "owner_role": "shared",
@@ -4866,30 +4856,6 @@
         "src/types/pairing.ts",
         "src/types/video.ts",
         "src/vite-env.d.ts"
-      ],
-      "shared_entry": false
-    },
-    {
-      "id": "src-tauri",
-      "name": "src-tauri",
-      "aliases": [],
-      "module_root": "src-tauri",
-      "entries": [
-        "src-tauri/tests/fixtures/hls/aes128/segment0.ts",
-        "src-tauri/tests/fixtures/hls/aes128/segment1.ts",
-        "src-tauri/tests/fixtures/hls/aes128/segment2.ts"
-      ],
-      "symbols": [],
-      "related_files": [],
-      "tests": [],
-      "depends_on": [],
-      "relations": [],
-      "owner_role": "shared",
-      "responsibility": "Discovered typescript module at src-tauri",
-      "read_scope": [
-        "src-tauri/tests/fixtures/hls/aes128/segment0.ts",
-        "src-tauri/tests/fixtures/hls/aes128/segment1.ts",
-        "src-tauri/tests/fixtures/hls/aes128/segment2.ts"
       ],
       "shared_entry": false
     },

@@ -7,7 +7,6 @@
 | root | shared | eslint.config.js | Discovered typescript module at . | ai-workflow context locate --feature root --verify |
 | scripts | shared | scripts/check-direct-dependency-pins.mjs | Discovered typescript module at scripts | ai-workflow context locate --feature scripts --verify |
 | src | shared | src/App.tsx | Discovered typescript module at src | ai-workflow context locate --feature src --verify |
-| src-tauri | shared | src-tauri/tests/fixtures/hls/aes128/segment0.ts | Discovered typescript module at src-tauri | ai-workflow context locate --feature src-tauri --verify |
 | api | shared | src-tauri/src/api/auth.rs | Loopback browser-integration API: fixed admission guards with exact Chromium and Firefox extension origins, capture prot | ai-workflow context locate --feature api --verify |
 | engine | shared | src-tauri/src/engine/scheduler.rs | Headless HTTP download engine: proxy- and User-Agent-aware transport, probe, planner, conflict-aware part files, HTTP-on | ai-workflow context locate --feature engine --verify |
 | store | shared | src-tauri/src/store/db.rs | Durable SQLite task store: schema 1 to 3 migrations, task kind and video records, destinations, part names, minimized fi | ai-workflow context locate --feature store --verify |
