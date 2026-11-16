@@ -52,6 +52,16 @@
       ]
     },
     {
+      "id": "src-tauri",
+      "path": "src-tauri",
+      "owner_role": "shared",
+      "responsibility": "Discovered typescript module at src-tauri",
+      "language": "typescript",
+      "entry_kinds": [
+        "exported-symbol"
+      ]
+    },
+    {
       "id": "kernel",
       "path": "src-tauri/src/kernel",
       "owner_role": "shared",
@@ -95,7 +105,7 @@
       "id": "engine",
       "path": "src-tauri/src/engine",
       "owner_role": "shared",
-      "responsibility": "Headless HTTP download engine: probe, transport, planner, conflict-aware part files, HTTP-only workers, scheduler, service actor, retry, rate limiting, cookies, destinations, final-URL recording, deletion, and state machines",
+      "responsibility": "Headless HTTP download engine: proxy- and User-Agent-aware transport, probe, planner, conflict-aware part files, HTTP-only workers, scheduler, service actor, retry, rate limiting, Netscape and captured-browser cookie sources, HuggingFace resolution, refresh, connection cap, Xet-style Range downgrade, destinations, final-URL recording, deletion, and state machines",
       "language": "rust",
       "entry_kinds": [
         "file"
@@ -105,7 +115,7 @@
       "id": "store",
       "path": "src-tauri/src/store",
       "owner_role": "shared",
-      "responsibility": "Durable SQLite task store: schema 1 to 3 migrations, task kind and video records, destinations, part names, minimized final URLs, task and segment records, and progress persistence",
+      "responsibility": "Durable SQLite task store: schema 1 to 3 migrations, task kind and video records, destinations, part names, minimized final URLs, task and segment records, progress persistence, and the separate hf.db schema 1 HuggingFace metadata store",
       "language": "rust",
       "entry_kinds": [
         "file"
@@ -116,6 +126,16 @@
       "path": "src-tauri/src/commands",
       "owner_role": "shared",
       "responsibility": "Tauri command surface for downloads, video, components, settings, diagnostics, pairing, and quit",
+      "language": "rust",
+      "entry_kinds": [
+        "file"
+      ]
+    },
+    {
+      "id": "platform",
+      "path": "src-tauri/src/platform",
+      "owner_role": "shared",
+      "responsibility": "Target-specific paths, filenames, capability files, component preparation, shell-free opener, process containment, secrets, deep links, tray, autostart, notifications, and operating-system proxy discovery",
       "language": "rust",
       "entry_kinds": [
         "file"
@@ -153,6 +173,7 @@
         "e2e/downloads.spec.ts",
         "e2e/kernel.spec.ts",
         "e2e/keyboard.spec.ts",
+        "e2e/settings-network.spec.ts",
         "e2e/settings.spec.ts",
         "e2e/smoke.spec.ts",
         "e2e/video.spec.ts"
@@ -168,6 +189,7 @@
         "e2e/downloads.spec.ts",
         "e2e/kernel.spec.ts",
         "e2e/keyboard.spec.ts",
+        "e2e/settings-network.spec.ts",
         "e2e/settings.spec.ts",
         "e2e/smoke.spec.ts",
         "e2e/support/mock-ipc.ts",
@@ -241,6 +263,12 @@
         },
         {
           "file": "extension/popup/popup.ts",
+          "name": "PairingUpdateGuidanceView",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/popup/popup.ts",
           "name": "PairingView",
           "kind": "interface",
           "visibility": "public"
@@ -253,13 +281,31 @@
         },
         {
           "file": "extension/popup/popup.ts",
+          "name": "SendCookiesToggleView",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/popup/popup.ts",
           "name": "TakeoverFailureView",
           "kind": "interface",
           "visibility": "public"
         },
         {
           "file": "extension/popup/popup.ts",
+          "name": "collectSendCookiesSetting",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/popup/popup.ts",
           "name": "languageFromNavigator",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/popup/popup.ts",
+          "name": "pairingUpdateGuidanceView",
           "kind": "function",
           "visibility": "public"
         },
@@ -272,6 +318,12 @@
         {
           "file": "extension/popup/popup.ts",
           "name": "resourceView",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/popup/popup.ts",
+          "name": "sendCookiesToggleView",
           "kind": "function",
           "visibility": "public"
         },
@@ -301,6 +353,18 @@
         },
         {
           "file": "extension/shared/background.ts",
+          "name": "CookieQuery",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "CookieQueryOutcome",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
           "name": "DownloadAllowReason",
           "kind": "type",
           "visibility": "public"
@@ -314,6 +378,12 @@
         {
           "file": "extension/shared/background.ts",
           "name": "DownloadOutcome",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/background.ts",
+          "name": "ListedResource",
           "kind": "type",
           "visibility": "public"
         },
@@ -373,6 +443,12 @@
         },
         {
           "file": "extension/shared/browser.ts",
+          "name": "BrowserCookie",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/browser.ts",
           "name": "BrowserMessageHandler",
           "kind": "type",
           "visibility": "public"
@@ -404,6 +480,18 @@
         {
           "file": "extension/shared/browser.ts",
           "name": "BrowserTabQuery",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/browser.ts",
+          "name": "CookieQueryLog",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/browser.ts",
+          "name": "CookieQueryResult",
           "kind": "interface",
           "visibility": "public"
         },
@@ -607,6 +695,12 @@
         },
         {
           "file": "extension/shared/protocol.ts",
+          "name": "ProtocolMismatchGuidance",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/protocol.ts",
           "name": "RequestJsonOptions",
           "kind": "interface",
           "visibility": "public"
@@ -620,6 +714,18 @@
         {
           "file": "extension/shared/protocol.ts",
           "name": "isProtocolCompatible",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/protocol.ts",
+          "name": "isProtocolMismatchResult",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "extension/shared/protocol.ts",
+          "name": "protocolMismatchGuidance",
           "kind": "function",
           "visibility": "public"
         },
@@ -862,6 +968,16 @@
         },
         {
           "kind": "imports",
+          "from": "extension/popup/popup.ts#pairingUpdateGuidanceView",
+          "to": "extension/shared/i18n.ts#ExtensionLanguage"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#pairingUpdateGuidanceView",
+          "to": "extension/shared/i18n.ts#translateExtension"
+        },
+        {
+          "kind": "imports",
           "from": "extension/popup/popup.ts#pairingView",
           "to": "extension/shared/i18n.ts#ExtensionLanguage"
         },
@@ -889,6 +1005,16 @@
           "kind": "imports",
           "from": "extension/popup/popup.ts#resourceView",
           "to": "extension/shared/types.ts#ResourceEntry"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#sendCookiesToggleView",
+          "to": "extension/shared/i18n.ts#ExtensionLanguage"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/popup/popup.ts#sendCookiesToggleView",
+          "to": "extension/shared/i18n.ts#translateExtension"
         },
         {
           "kind": "imports",
@@ -932,8 +1058,23 @@
         },
         {
           "kind": "imports",
+          "from": "extension/shared/background.ts#CookieQueryOutcome",
+          "to": "extension/shared/browser.ts#BrowserCookie"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#ListedResource",
+          "to": "extension/shared/types.ts#ResourceEntry"
+        },
+        {
+          "kind": "imports",
           "from": "extension/shared/background.ts#PairOutcome",
           "to": "extension/shared/protocol.ts#ApiErrorBody"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/browser.ts#BrowserCookie"
         },
         {
           "kind": "imports",
@@ -964,6 +1105,11 @@
           "kind": "imports",
           "from": "extension/shared/background.ts#createBackgroundController",
           "to": "extension/shared/protocol.ts#ApiResult"
+        },
+        {
+          "kind": "imports",
+          "from": "extension/shared/background.ts#createBackgroundController",
+          "to": "extension/shared/protocol.ts#protocolMismatchGuidance"
         },
         {
           "kind": "imports",
@@ -1107,7 +1253,7 @@
         }
       ],
       "owner_role": "shared",
-      "responsibility": "Chromium and Firefox MV3 browser-capture extensions: shared browser-agnostic controller and typed adapter, per-browser manifests and event installation, protocol client, classification, HLS and DASH recognition, segment filtering, page ownership, bounded resource store, settings, pairing and prefill views, and bilingual strings",
+      "responsibility": "Discovered typescript module at extension",
       "read_scope": [
         "extension/build.mjs",
         "extension/chromium/background.ts",
@@ -1237,9 +1383,12 @@
         "src/features/pairing/PairingSettings.tsx",
         "src/features/pairing/usePairing.ts",
         "src/features/settings/DownloadSettings.tsx",
+        "src/features/settings/ExtensionSettings.tsx",
         "src/features/settings/GeneralSettings.tsx",
-        "src/features/settings/NetworkPlaceholder.tsx",
+        "src/features/settings/HuggingFaceSettings.tsx",
+        "src/features/settings/NetworkSettings.tsx",
         "src/features/settings/SettingsDialog.tsx",
+        "src/features/settings/VideoSettings.tsx",
         "src/features/settings/useSettings.ts",
         "src/features/video/VideoQualityDialog.tsx",
         "src/i18n/index.tsx",
@@ -1838,6 +1987,12 @@
         },
         {
           "file": "src/features/downloads/useProbe.ts",
+          "name": "LoadedSettingsResult",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/useProbe.ts",
           "name": "ProbeState",
           "kind": "type",
           "visibility": "public"
@@ -1846,6 +2001,12 @@
           "file": "src/features/downloads/useProbe.ts",
           "name": "UseProbeResult",
           "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/downloads/useProbe.ts",
+          "name": "useLoadedSettings",
+          "kind": "function",
           "visibility": "public"
         },
         {
@@ -1933,6 +2094,12 @@
           "visibility": "public"
         },
         {
+          "file": "src/features/settings/ExtensionSettings.tsx",
+          "name": "ExtensionSettings",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
           "file": "src/features/settings/GeneralSettings.tsx",
           "name": "GeneralSettings",
           "kind": "function",
@@ -1951,9 +2118,63 @@
           "visibility": "public"
         },
         {
-          "file": "src/features/settings/NetworkPlaceholder.tsx",
-          "name": "NetworkPlaceholder",
+          "file": "src/features/settings/HuggingFaceSettings.tsx",
+          "name": "HuggingFaceSettings",
           "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/HuggingFaceSettings.tsx",
+          "name": "HuggingFaceSettingsErrorKey",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/HuggingFaceSettings.tsx",
+          "name": "HuggingFaceSettingsErrors",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/HuggingFaceSettings.tsx",
+          "name": "HuggingFaceSettingsProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/HuggingFaceSettings.tsx",
+          "name": "HuggingFaceSettingsValue",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/NetworkSettings.tsx",
+          "name": "NetworkSettings",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/NetworkSettings.tsx",
+          "name": "NetworkSettingsErrorKey",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/NetworkSettings.tsx",
+          "name": "NetworkSettingsErrors",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/NetworkSettings.tsx",
+          "name": "NetworkSettingsProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/NetworkSettings.tsx",
+          "name": "NetworkSettingsValue",
+          "kind": "interface",
           "visibility": "public"
         },
         {
@@ -1965,6 +2186,24 @@
         {
           "file": "src/features/settings/SettingsDialog.tsx",
           "name": "SettingsDialogProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/VideoSettings.tsx",
+          "name": "VideoSettings",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/VideoSettings.tsx",
+          "name": "VideoSettingsProps",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/features/settings/VideoSettings.tsx",
+          "name": "VideoSettingsValue",
           "kind": "interface",
           "visibility": "public"
         },
@@ -2300,6 +2539,24 @@
         },
         {
           "file": "src/lib/tauri.ts",
+          "name": "ProxyMode",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/tauri.ts",
+          "name": "ProxyType",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/tauri.ts",
+          "name": "SecretStatus",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/tauri.ts",
           "name": "Settings",
           "kind": "type",
           "visibility": "public"
@@ -2307,6 +2564,12 @@
         {
           "file": "src/lib/tauri.ts",
           "name": "SettingsStatus",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/tauri.ts",
+          "name": "VideoQualityPreference",
           "kind": "type",
           "visibility": "public"
         },
@@ -2320,6 +2583,12 @@
           "file": "src/lib/tauri.ts",
           "name": "isTauriRuntime",
           "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src/lib/video.ts",
+          "name": "VideoStartDownloadRequest",
+          "kind": "interface",
           "visibility": "public"
         },
         {
@@ -2450,6 +2719,18 @@
         },
         {
           "file": "src/types/app.ts",
+          "name": "ProxyMode",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "ProxyType",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
           "name": "QuitState",
           "kind": "interface",
           "visibility": "public"
@@ -2457,6 +2738,12 @@
         {
           "file": "src/types/app.ts",
           "name": "SecretRoundtripResult",
+          "kind": "interface",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "SecretStatus",
           "kind": "interface",
           "visibility": "public"
         },
@@ -2481,6 +2768,12 @@
         {
           "file": "src/types/app.ts",
           "name": "Theme",
+          "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/app.ts",
+          "name": "VideoQualityPreference",
           "kind": "type",
           "visibility": "public"
         },
@@ -2524,6 +2817,12 @@
           "file": "src/types/downloads.ts",
           "name": "HeaderPair",
           "kind": "type",
+          "visibility": "public"
+        },
+        {
+          "file": "src/types/downloads.ts",
+          "name": "HuggingFaceSummary",
+          "kind": "interface",
           "visibility": "public"
         },
         {
@@ -3056,6 +3355,11 @@
         {
           "kind": "imports",
           "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
+          "to": "src/features/downloads/useProbe.ts#useLoadedSettings"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/BatchDownloadDialog.tsx#BatchDownloadDialog",
           "to": "src/i18n/index.tsx#useI18n"
         },
         {
@@ -3241,6 +3545,11 @@
         {
           "kind": "imports",
           "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/features/downloads/useProbe.ts#useLoadedSettings"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
           "to": "src/features/downloads/useProbe.ts#useProbe"
         },
         {
@@ -3272,6 +3581,11 @@
           "kind": "imports",
           "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
           "to": "src/lib/video.ts#probeVideo"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/NewDownloadDialog.tsx#NewDownloadDialog",
+          "to": "src/lib/video.ts#startVideoDownload"
         },
         {
           "kind": "imports",
@@ -3535,6 +3849,11 @@
         },
         {
           "kind": "imports",
+          "from": "src/features/downloads/useProbe.ts#LoadedSettingsResult",
+          "to": "src/types/app.ts#Settings"
+        },
+        {
+          "kind": "imports",
           "from": "src/features/downloads/useProbe.ts#ProbeState",
           "to": "src/types/app.ts#AppError"
         },
@@ -3547,6 +3866,16 @@
           "kind": "imports",
           "from": "src/features/downloads/useProbe.ts#UseProbeResult",
           "to": "src/types/downloads.ts#HeaderPair"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useProbe.ts#useLoadedSettings",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/downloads/useProbe.ts#useLoadedSettings",
+          "to": "src/types/app.ts#Settings"
         },
         {
           "kind": "imports",
@@ -3725,6 +4054,16 @@
         },
         {
           "kind": "imports",
+          "from": "src/features/settings/ExtensionSettings.tsx#ExtensionSettings",
+          "to": "src/features/pairing/PairingSettings.tsx#PairingSettings"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/ExtensionSettings.tsx#ExtensionSettings",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
           "from": "src/features/settings/GeneralSettings.tsx#GeneralSettings",
           "to": "src/components/ui/Input.tsx#Input"
         },
@@ -3785,8 +4124,88 @@
         },
         {
           "kind": "imports",
-          "from": "src/features/settings/NetworkPlaceholder.tsx#NetworkPlaceholder",
+          "from": "src/features/settings/HuggingFaceSettings.tsx#HuggingFaceSettings",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/HuggingFaceSettings.tsx#HuggingFaceSettings",
+          "to": "src/components/ui/Input.tsx#Input"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/HuggingFaceSettings.tsx#HuggingFaceSettings",
+          "to": "src/i18n/index.tsx#translate"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/HuggingFaceSettings.tsx#HuggingFaceSettings",
           "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/HuggingFaceSettings.tsx#HuggingFaceSettings",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/HuggingFaceSettings.tsx#HuggingFaceSettings",
+          "to": "src/types/app.ts#SecretStatus"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/NetworkSettings.tsx#NetworkSettings",
+          "to": "src/components/ui/Button.tsx#Button"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/NetworkSettings.tsx#NetworkSettings",
+          "to": "src/components/ui/Input.tsx#Input"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/NetworkSettings.tsx#NetworkSettings",
+          "to": "src/components/ui/Select.tsx#Select"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/NetworkSettings.tsx#NetworkSettings",
+          "to": "src/i18n/index.tsx#translate"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/NetworkSettings.tsx#NetworkSettings",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/NetworkSettings.tsx#NetworkSettings",
+          "to": "src/lib/tauri.ts#invokeCommand"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/NetworkSettings.tsx#NetworkSettings",
+          "to": "src/types/app.ts#ProxyMode"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/NetworkSettings.tsx#NetworkSettings",
+          "to": "src/types/app.ts#ProxyType"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/NetworkSettings.tsx#NetworkSettings",
+          "to": "src/types/app.ts#SecretStatus"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/NetworkSettings.tsx#NetworkSettingsValue",
+          "to": "src/types/app.ts#ProxyMode"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/NetworkSettings.tsx#NetworkSettingsValue",
+          "to": "src/types/app.ts#ProxyType"
         },
         {
           "kind": "imports",
@@ -3797,11 +4216,6 @@
           "kind": "imports",
           "from": "src/features/settings/SettingsDialog.tsx#SettingsDialog",
           "to": "src/features/kernel/ComponentsSection.tsx#ComponentsSection"
-        },
-        {
-          "kind": "imports",
-          "from": "src/features/settings/SettingsDialog.tsx#SettingsDialog",
-          "to": "src/features/pairing/PairingSettings.tsx#PairingSettings"
         },
         {
           "kind": "imports",
@@ -3817,6 +4231,31 @@
           "kind": "imports",
           "from": "src/features/settings/SettingsDialog.tsx#SettingsDialogProps",
           "to": "src/types/app.ts#Settings"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/VideoSettings.tsx#VideoSettings",
+          "to": "src/components/ui/Checkbox.tsx#Checkbox"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/VideoSettings.tsx#VideoSettings",
+          "to": "src/components/ui/Select.tsx#Select"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/VideoSettings.tsx#VideoSettings",
+          "to": "src/i18n/index.tsx#useI18n"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/VideoSettings.tsx#VideoSettings",
+          "to": "src/types/app.ts#VideoQualityPreference"
+        },
+        {
+          "kind": "imports",
+          "from": "src/features/settings/VideoSettings.tsx#VideoSettingsValue",
+          "to": "src/types/app.ts#VideoQualityPreference"
         },
         {
           "kind": "imports",
@@ -4250,6 +4689,11 @@
         },
         {
           "kind": "imports",
+          "from": "src/lib/video.ts#VideoStartDownloadRequest",
+          "to": "src/types/video.ts#VideoStartRequest"
+        },
+        {
+          "kind": "imports",
           "from": "src/lib/video.ts#probeVideo",
           "to": "src/lib/tauri.ts#invokeCommand"
         },
@@ -4277,11 +4721,6 @@
           "kind": "imports",
           "from": "src/lib/video.ts#startVideoDownload",
           "to": "src/types/app.ts#IpcResult"
-        },
-        {
-          "kind": "imports",
-          "from": "src/lib/video.ts#startVideoDownload",
-          "to": "src/types/video.ts#VideoStartRequest"
         },
         {
           "kind": "imports",
@@ -4390,10 +4829,13 @@
         "src/features/pairing/usePairing.test.ts",
         "src/features/pairing/usePairing.ts",
         "src/features/settings/DownloadSettings.tsx",
+        "src/features/settings/ExtensionSettings.tsx",
         "src/features/settings/GeneralSettings.tsx",
-        "src/features/settings/NetworkPlaceholder.tsx",
+        "src/features/settings/HuggingFaceSettings.tsx",
+        "src/features/settings/NetworkSettings.tsx",
         "src/features/settings/SettingsDialog.test.tsx",
         "src/features/settings/SettingsDialog.tsx",
+        "src/features/settings/VideoSettings.tsx",
         "src/features/settings/useSettings.test.ts",
         "src/features/settings/useSettings.ts",
         "src/features/video/VideoQualityDialog.test.tsx",
@@ -4424,6 +4866,30 @@
         "src/types/pairing.ts",
         "src/types/video.ts",
         "src/vite-env.d.ts"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "src-tauri",
+      "name": "src-tauri",
+      "aliases": [],
+      "module_root": "src-tauri",
+      "entries": [
+        "src-tauri/tests/fixtures/hls/aes128/segment0.ts",
+        "src-tauri/tests/fixtures/hls/aes128/segment1.ts",
+        "src-tauri/tests/fixtures/hls/aes128/segment2.ts"
+      ],
+      "symbols": [],
+      "related_files": [],
+      "tests": [],
+      "depends_on": [],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Discovered typescript module at src-tauri",
+      "read_scope": [
+        "src-tauri/tests/fixtures/hls/aes128/segment0.ts",
+        "src-tauri/tests/fixtures/hls/aes128/segment1.ts",
+        "src-tauri/tests/fixtures/hls/aes128/segment2.ts"
       ],
       "shared_entry": false
     },
@@ -4647,7 +5113,9 @@
         "src-tauri/src/engine/rate_limit.rs",
         "src-tauri/src/engine/retry.rs",
         "src-tauri/src/engine/state.rs",
-        "src-tauri/src/engine/worker.rs"
+        "src-tauri/src/engine/worker.rs",
+        "src-tauri/src/engine/hf.rs",
+        "src-tauri/tests/hf.rs"
       ],
       "symbols": [
         {
@@ -4715,6 +5183,12 @@
           "name": "TaskState",
           "kind": "enum",
           "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/engine/hf.rs",
+          "name": "parse_hf_url",
+          "kind": "function",
+          "visibility": "public"
         }
       ],
       "related_files": [],
@@ -4727,14 +5201,15 @@
         "src-tauri/tests/engine_recovery.rs",
         "src-tauri/tests/engine_redaction.rs",
         "src-tauri/tests/engine_segments.rs",
-        "src-tauri/tests/soak.rs"
+        "src-tauri/tests/soak.rs",
+        "src-tauri/tests/hf.rs"
       ],
       "depends_on": [
         "store"
       ],
       "relations": [],
       "owner_role": "shared",
-      "responsibility": "Headless HTTP download engine: probe, transport, planner, conflict-aware part files, HTTP-only workers, scheduler, service actor, retry, rate limiting, cookies, destinations, final-URL recording, deletion, and state machines",
+      "responsibility": "Headless HTTP download engine: proxy- and User-Agent-aware transport, probe, planner, conflict-aware part files, HTTP-only workers, scheduler, service actor, retry, rate limiting, Netscape and captured-browser cookie sources, HuggingFace resolution, refresh, connection cap, Xet-style Range downgrade, destinations, final-URL recording, deletion, and state machines",
       "read_scope": [
         "src-tauri/src/engine/scheduler.rs",
         "src-tauri/src/engine/service.rs",
@@ -4757,7 +5232,9 @@
         "src-tauri/tests/engine_recovery.rs",
         "src-tauri/tests/engine_redaction.rs",
         "src-tauri/tests/engine_segments.rs",
-        "src-tauri/tests/soak.rs"
+        "src-tauri/tests/soak.rs",
+        "src-tauri/src/engine/hf.rs",
+        "src-tauri/tests/hf.rs"
       ],
       "shared_entry": false
     },
@@ -4772,7 +5249,8 @@
         "src-tauri/src/store/mod.rs",
         "src-tauri/src/store/segments.rs",
         "src-tauri/src/store/tasks.rs",
-        "src-tauri/src/store/types.rs"
+        "src-tauri/src/store/types.rs",
+        "src-tauri/src/store/hf.rs"
       ],
       "symbols": [
         {
@@ -4816,6 +5294,18 @@
           "name": "SegmentProgressInput",
           "kind": "struct",
           "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/store/hf.rs",
+          "name": "HfMetadataStore",
+          "kind": "struct",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/store/hf.rs",
+          "name": "HfMetadata",
+          "kind": "struct",
+          "visibility": "public"
         }
       ],
       "related_files": [],
@@ -4825,7 +5315,7 @@
       "depends_on": [],
       "relations": [],
       "owner_role": "shared",
-      "responsibility": "Durable SQLite task store: connection setup, schema 1 to 3 migrations, task kind and video records, per-task destinations, part names, minimized final URLs, task and segment records, and progress persistence",
+      "responsibility": "Durable SQLite task store: schema 1 to 3 migrations, task kind and video records, destinations, part names, minimized final URLs, task and segment records, progress persistence, and the separate hf.db schema 1 HuggingFace metadata store",
       "read_scope": [
         "src-tauri/src/store/db.rs",
         "src-tauri/src/store/migrations.rs",
@@ -4833,7 +5323,8 @@
         "src-tauri/src/store/segments.rs",
         "src-tauri/src/store/tasks.rs",
         "src-tauri/src/store/types.rs",
-        "src-tauri/tests/store.rs"
+        "src-tauri/tests/store.rs",
+        "src-tauri/src/store/hf.rs"
       ],
       "shared_entry": false
     },
@@ -4934,6 +5425,42 @@
           "name": "pairing_take_pending_prefill",
           "kind": "function",
           "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/mod.rs",
+          "name": "hf_token_status",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/mod.rs",
+          "name": "hf_token_save",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/mod.rs",
+          "name": "hf_token_clear",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/mod.rs",
+          "name": "proxy_credentials_status",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/mod.rs",
+          "name": "proxy_credentials_save",
+          "kind": "function",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/commands/mod.rs",
+          "name": "proxy_credentials_clear",
+          "kind": "function",
+          "visibility": "public"
         }
       ],
       "related_files": [],
@@ -4953,7 +5480,7 @@
       ],
       "relations": [],
       "owner_role": "shared",
-      "responsibility": "Tauri command surface: typed download, video, component, settings, diagnostics, pairing, and quit commands plus directly testable service functions",
+      "responsibility": "Tauri command surface: typed download, video, component, settings, HuggingFace token, proxy credential, diagnostics, pairing, and quit commands plus directly testable service functions",
       "read_scope": [
         "src-tauri/src/commands/app.rs",
         "src-tauri/src/commands/downloads.rs",
@@ -5455,6 +5982,69 @@
         "src-tauri/src/bin/video_fixture.rs",
         "src-tauri/tests/video_process.rs",
         "src-tauri/tests/video_probe.rs"
+      ],
+      "shared_entry": false
+    },
+    {
+      "id": "platform",
+      "name": "platform",
+      "aliases": [],
+      "module_root": "platform",
+      "entries": [
+        "src-tauri/src/platform/autostart.rs",
+        "src-tauri/src/platform/component.rs",
+        "src-tauri/src/platform/deeplink.rs",
+        "src-tauri/src/platform/filename.rs",
+        "src-tauri/src/platform/files.rs",
+        "src-tauri/src/platform/mod.rs",
+        "src-tauri/src/platform/notifications.rs",
+        "src-tauri/src/platform/opener.rs",
+        "src-tauri/src/platform/paths.rs",
+        "src-tauri/src/platform/process.rs",
+        "src-tauri/src/platform/proxy.rs",
+        "src-tauri/src/platform/secrets.rs",
+        "src-tauri/src/platform/tray.rs"
+      ],
+      "symbols": [
+        {
+          "file": "src-tauri/src/platform/proxy.rs",
+          "name": "SystemProxySource",
+          "kind": "trait",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/platform/proxy.rs",
+          "name": "ProxyResolution",
+          "kind": "enum",
+          "visibility": "public"
+        },
+        {
+          "file": "src-tauri/src/platform/proxy.rs",
+          "name": "resolve_proxy",
+          "kind": "function",
+          "visibility": "public"
+        }
+      ],
+      "related_files": [],
+      "tests": [],
+      "depends_on": [],
+      "relations": [],
+      "owner_role": "shared",
+      "responsibility": "Target-specific paths, filenames, capability files, component preparation, shell-free opener, process containment, secrets, deep links, tray, autostart, notifications, and operating-system proxy discovery",
+      "read_scope": [
+        "src-tauri/src/platform/autostart.rs",
+        "src-tauri/src/platform/component.rs",
+        "src-tauri/src/platform/deeplink.rs",
+        "src-tauri/src/platform/filename.rs",
+        "src-tauri/src/platform/files.rs",
+        "src-tauri/src/platform/mod.rs",
+        "src-tauri/src/platform/notifications.rs",
+        "src-tauri/src/platform/opener.rs",
+        "src-tauri/src/platform/paths.rs",
+        "src-tauri/src/platform/process.rs",
+        "src-tauri/src/platform/proxy.rs",
+        "src-tauri/src/platform/secrets.rs",
+        "src-tauri/src/platform/tray.rs"
       ],
       "shared_entry": false
     }

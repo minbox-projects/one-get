@@ -12,7 +12,7 @@ Status: implemented
 
 共享包拥有与浏览器无关的行为。`extension/shared/background.ts` 导出一个控制器，负责配对、观察、接管、预填充、资源边界和失败状态；`extension/shared/browser.ts` 是一个小型类型化适配器，统一回调风格的 Chromium 与 promise 风格的 Firefox 的消息、活动标签页查询、本地与会话存储以及响应头。隔离内容脚本、MAIN-world 观察器和覆盖层样式移入 `extension/shared`。`extension/chromium/background.ts` 变成薄安装器，注册现有 service worker 监听器、注入 Chrome 依赖，并保留 Chromium 独有的 `onDeterminingFilename` 流程；`extension/firefox/background.ts` 是事件页适配器，同步注册 runtime、响应、下载、导航和标签页监听器，注入基于 promise 的 `browser.*` API，并以 `Firefox extension` 作为配对标签。弹窗导入共享表面，共享控制器通过依赖接收配对标签，而不改变消息协议。
 
-Firefox 包是独立的 MV3 产物，使用 `background.scripts` 而非 service worker，稳定 Gecko ID 为 `oneget@oneget.app`，`strict_min_version` 为 `140.0`，并声明 `data_collection_permissions.required: ["none"]`。它请求与 Chromium 相同的五项权限、相同的 HTTP(S) 与回环主机权限、相同的仅打包扩展页面 CSP，以及相同的弹窗、图标、隔离内容脚本和 MAIN-world 观察器。Firefox for Android、签名和发布仍不在范围内，桌面最低版本不下调。
+Firefox 包是独立的 MV3 产物，使用 `background.scripts` 而非 service worker，稳定 Gecko ID 为 `oneget@oneget.app`，`strict_min_version` 为 `140.0`，并声明 `data_collection_permissions.required: ["none"]`。它请求与 Chromium 相同的六项权限（`cookies`、`webRequest`、`downloads`、`storage`、`tabs`、`webNavigation`）、相同的 HTTP(S) 与回环主机权限、相同的仅打包扩展页面 CSP，以及相同的弹窗、图标、隔离内容脚本和 MAIN-world 观察器。`cookies` 权限只支持默认关闭的 Cookie 选项。Firefox for Android、签名和发布仍不在范围内，桌面最低版本不下调。
 
 API 来源边界现在识别两种精确扩展方案。`is_browser_extension_origin` 接受 `chrome-extension://` 加 32 个 `a`–`p` 字符，或 `moz-extension://` 加小写 8-4-4-4-12 UUID。准入顺序、请求体与请求头限制、速率限制、类型化错误、内容类型检查、bearer 提取以及精确的令牌绑定来源均不变，也不添加通配 CORS 头。Firefox 令牌绑定到它自己的精确来源，因此把令牌用于另一扩展方案会被拒绝。
 
@@ -34,9 +34,9 @@ Firefox 接管在 `downloads.onCreated` 中评估，绝不在 `onDeterminingFile
 
 共享控制器与适配器是两个包的唯一行为来源，Firefox 专属代码仅限于其清单、适配器、下载映射和事件安装。Chromium 保留其 service worker 监听器和 `onDeterminingFilename`，现有配对行、捕获行为和资源边界不变；Firefox 行添加自己的精确来源，不影响 Chromium 客户端。
 
-捕获协议、配对 schema、任务存储 schema、设置 schema 和任务语义均不变。现有 Chromium 配对继续有效，Firefox 配对使用相同路由和限制，回滚 Firefox 包后 Chromium、任务、已完成文件和设置仍可使用。
+捕获协议版本 2 是增量变更，桌面端与版本 1 一同接受，而配对 schema、任务存储 schema、设置 schema 和任务语义均不变。现有 Chromium 配对继续有效，Firefox 配对使用相同路由和限制，回滚 Firefox 包后 Chromium、任务、已完成文件和设置仍可使用。后续的 [HuggingFace 下载、网络传输与 Cookie 来源](2026-11-15-huggingface-network-capabilities.md) 记录部分取代本记录关于五项权限和协议不变的表述：它在默认关闭的选项之后增加 `cookies` 权限和协议版本 2；本记录为共享控制器、Firefox 事件页、来源和构建决策保持有效。
 
-安全性在种类上不变：没有新权限、Cookie、原生消息、远程代码或遥测，Firefox 清单声明不收集数据。来源判定、令牌绑定、准入顺序、限制和错误码是后续扩展工作必须保留的契约。`web-ext` lint 结果为 0 个错误和 1 条建议性警告，指出无数据收集声明在 Firefox for Android 上不受支持；由于 Android 不在范围内且桌面最低版本保持 140.0，该警告被接受。
+浏览器边界的安全性在种类上不变：Cookie 权限只支持默认关闭的选项，仍然没有原生消息、远程代码或遥测，Firefox 清单声明不收集数据。来源判定、令牌绑定、准入顺序、限制和错误码是后续扩展工作必须保留的契约。`web-ext` lint 结果为 0 个错误和 1 条建议性警告，指出无数据收集声明在 Firefox for Android 上不受支持；由于 Android 不在范围内且桌面最低版本保持 140.0，该警告被接受。
 
 自动化证据覆盖 Rust 来源与捕获套件、共享适配器与 Firefox 映射单元测试、两个生产构建、Chromium 测试构建、Firefox lint，以及现有前端、扩展和 Playwright 套件。尚未执行真实 Firefox 浏览器交互、事件页挂起、Windows Firefox 检查或手动 Chrome 与 Edge 记录，因此浏览器捕获与 Firefox 退出仍被阻塞。
 

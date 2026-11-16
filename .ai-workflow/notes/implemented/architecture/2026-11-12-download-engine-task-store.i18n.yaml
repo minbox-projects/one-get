@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 # ai-workflow notes pairing --project <project-root> --write .ai-workflow/notes/implemented/architecture/2026-11-12-download-engine-task-store.md
-2026-11-12-download-engine-task-store.md: 301cdc9f782d865ec0760566b690513d0e0ad3f1
-2026-11-12-download-engine-task-store.zh.md: e3789b384af388295aa4b88a0b47d4ae838ca02b
+2026-11-12-download-engine-task-store.md: a35c9b6e5bcc291fb4218e7e07d01862a005ec82
+2026-11-12-download-engine-task-store.zh.md: ea6d60845a0ad4bd474e649557fb413318dc35b4

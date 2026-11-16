@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 # ai-workflow notes pairing --project <project-root> --write .ai-workflow/notes/implemented/architecture/2026-11-13-firefox-extension-parity.md
-2026-11-13-firefox-extension-parity.md: 6c006c1c9e0954d1cdb214cbe1ac424ea1bb4d20
-2026-11-13-firefox-extension-parity.zh.md: 5cc4a33def2f05c104a54dd80ef8b26c785fd569
+2026-11-13-firefox-extension-parity.md: d3b1c40fd2aad1b1366a165202ce6a9ab2f13a23
+2026-11-13-firefox-extension-parity.zh.md: cfd7e1697ff05401be0e316a312d29fa5d176754
