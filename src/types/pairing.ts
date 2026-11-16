@@ -41,4 +41,8 @@ export interface PendingPrefillItem {
 export interface PendingPrefill {
   items: PendingPrefillItem[];
   receivedAtMs: number;
+  /** Number of cookies retained for this prefill. */
+  cookieCount?: number;
+  /** Opaque handle for retained cookies, never a cookie value. */
+  cookieHandle?: string | null;
 }

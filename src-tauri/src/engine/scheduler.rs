@@ -133,7 +133,7 @@ pub struct Engine {
     huggingface: RwLock<HuggingFaceOptions>,
     client: Mutex<Option<Client>>,
     cookie_file: Mutex<Option<PathBuf>>,
-    global_rate: Mutex<Option<Arc<RateLimiter>>>,
+    global_rate: Arc<RateLimiter>,
     task_rates: Mutex<HashMap<String, Arc<RateLimiter>>>,
     logger: Mutex<Option<Arc<Logger>>>,
     startup_done: AtomicBool,
@@ -156,7 +156,7 @@ impl Engine {
             huggingface: RwLock::new(HuggingFaceOptions::default()),
             client: Mutex::new(None),
             cookie_file: Mutex::new(None),
-            global_rate: Mutex::new(None),
+            global_rate: Arc::new(RateLimiter::new(0)),
             task_rates: Mutex::new(HashMap::new()),
             logger: Mutex::new(None),
             startup_done: AtomicBool::new(false),
@@ -260,14 +260,11 @@ impl Engine {
 
     /// Pace every task's downloads at a shared bytes-per-second limit.
     ///
-    /// `None` or zero removes the limit without restarting the engine. A
-    /// running task keeps the limiter captured when its network context started;
-    /// changes apply to task starts (including a later resume) after this call.
+    /// `None` or zero removes the limit. The engine keeps one shared limiter
+    /// for its lifetime, so running tasks observe a changed rate on their next
+    /// streamed chunk without restarting.
     pub fn set_global_rate_limit(&self, bytes_per_second: Option<u64>) {
-        *self
-            .global_rate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = active_limiter(bytes_per_second);
+        self.global_rate.set_rate(bytes_per_second.unwrap_or(0));
         self.notify.notify_one();
     }
 
@@ -376,64 +373,39 @@ impl Engine {
     }
 
     /// Every task as a lightweight summary with its cookie provenance.
+    ///
+    /// The engine default jar and each distinct task-level cookie file are
+    /// loaded at most once per call, so a polling list does not re-read the
+    /// same file for every task. Video tasks report no cookie provenance.
     pub fn list_summaries(&self) -> Result<Vec<DownloadSummary>, EngineError> {
         let tasks = self.store.list_tasks()?;
+        let default_jar = self
+            .engine_cookie_file()
+            .and_then(|path| CookieJar::load(&path).ok());
+        let sources = self
+            .task_cookie_sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut file_jars: HashMap<PathBuf, Option<CookieJar>> = HashMap::new();
         Ok(tasks
             .into_iter()
             .map(|task| {
-                let (cookie_source, cookie_count) = self.cookie_provenance(&task);
+                let (cookie_source, cookie_count) = if task.kind == TaskKind::Http {
+                    cookie_provenance(
+                        &task,
+                        sources.get(&task.id),
+                        default_jar.as_ref(),
+                        &mut file_jars,
+                    )
+                } else {
+                    (None, 0)
+                };
                 let mut summary = DownloadSummary::from(task);
                 summary.cookie_source = cookie_source;
                 summary.cookie_count = cookie_count;
                 summary
             })
             .collect())
-    }
-
-    /// The active cookie source name and applicable count for one task.
-    fn cookie_provenance(&self, task: &Task) -> (Option<String>, u32) {
-        let source = self
-            .task_cookie_sources
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&task.id)
-            .cloned();
-
-        let url = url::Url::parse(&task.url).ok();
-        match source {
-            Some(CookieSource::File(path)) => {
-                let count = url
-                    .as_ref()
-                    .and_then(|url| {
-                        CookieJar::load(&path)
-                            .ok()
-                            .map(|jar| jar.matching_count(url))
-                    })
-                    .unwrap_or(0);
-                (Some("file".to_string()), count)
-            }
-            Some(CookieSource::Browser(cookies)) => {
-                let count = url
-                    .as_ref()
-                    .map(|url| CookieJar::from_browser(cookies).matching_count(url))
-                    .unwrap_or(0);
-                (Some("browser".to_string()), count)
-            }
-            None => match self.engine_cookie_file() {
-                Some(path) => {
-                    let count = url
-                        .as_ref()
-                        .and_then(|url| {
-                            CookieJar::load(&path)
-                                .ok()
-                                .map(|jar| jar.matching_count(url))
-                        })
-                        .unwrap_or(0);
-                    (Some("file".to_string()), count)
-                }
-                None => (None, 0),
-            },
-        }
     }
 
     /// Resolve and validate the requested destination directory.
@@ -982,6 +954,10 @@ impl Engine {
     }
 
     /// Record Hugging Face metadata when a download starts.
+    ///
+    /// A resumed task keeps its remaining refresh budget and downgrade state;
+    /// only the repository resolution and connection cap follow the current
+    /// run. A fresh task starts with a zero budget and no downgrade.
     fn record_hf_metadata(&self, task_id: &str, spec: &DownloadSpec) {
         let Ok(Some(parsed)) = hf::parse_hf_url(&spec.url) else {
             return;
@@ -990,15 +966,27 @@ impl Engine {
         let Some(store) = options.metadata else {
             return;
         };
+        let persisted = store.get(task_id).ok().flatten();
+        let downgraded = persisted.as_ref().is_some_and(|meta| meta.downgraded);
+        let reduced = persisted.as_ref().is_some_and(|meta| {
+            !meta.downgraded && meta.effective_connections == 1 && spec.connections > 1
+        });
         let metadata = HfMetadata {
             task_id: task_id.to_string(),
             repo_id: parsed.repo_id,
             file_path: parsed.file_path,
             revision: parsed.revision,
             connection_cap: options.connection_cap,
-            effective_connections: spec.connections,
-            refresh_count: 0,
-            downgraded: false,
+            effective_connections: if downgraded || reduced {
+                1
+            } else {
+                spec.connections
+            },
+            refresh_count: persisted
+                .as_ref()
+                .map(|meta| meta.refresh_count)
+                .unwrap_or(0),
+            downgraded,
         };
         let _ = store.record(&metadata);
     }
@@ -1032,14 +1020,9 @@ impl Engine {
         {
             limiters.push(limiter);
         }
-        if let Some(limiter) = self
-            .global_rate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-        {
-            limiters.push(limiter);
-        }
+        // The shared global limiter is always present so a rate change applies
+        // to tasks that are already running.
+        limiters.push(Arc::clone(&self.global_rate));
 
         let hf = self.hf_options();
         Ok(NetworkContext {
@@ -1195,6 +1178,42 @@ fn require_http_task(task: &Task) -> Result<(), EngineError> {
         ));
     }
     Ok(())
+}
+
+/// Active cookie-source name and matching cookie count for one HTTP task.
+fn cookie_provenance(
+    task: &Task,
+    source: Option<&CookieSource>,
+    default_jar: Option<&CookieJar>,
+    file_jars: &mut HashMap<PathBuf, Option<CookieJar>>,
+) -> (Option<String>, u32) {
+    let url = url::Url::parse(&task.url).ok();
+    match source {
+        Some(CookieSource::File(path)) => {
+            let jar = file_jars
+                .entry(path.clone())
+                .or_insert_with(|| CookieJar::load(path).ok());
+            let count = url
+                .as_ref()
+                .and_then(|url| jar.as_ref().map(|jar| jar.matching_count(url)))
+                .unwrap_or(0);
+            (Some("file".to_string()), count)
+        }
+        Some(CookieSource::Browser(cookies)) => {
+            let count = url
+                .as_ref()
+                .map(|url| CookieJar::from_browser(cookies.clone()).matching_count(url))
+                .unwrap_or(0);
+            (Some("browser".to_string()), count)
+        }
+        None => match default_jar {
+            Some(jar) => {
+                let count = url.as_ref().map(|url| jar.matching_count(url)).unwrap_or(0);
+                (Some("file".to_string()), count)
+            }
+            None => (None, 0),
+        },
+    }
 }
 
 fn active_limiter(bytes_per_second: Option<u64>) -> Option<Arc<RateLimiter>> {

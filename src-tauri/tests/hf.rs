@@ -28,7 +28,7 @@ use oneget_lib::engine::service::EngineService;
 use oneget_lib::engine::state::TaskState;
 use oneget_lib::engine::worker::DownloadSpec;
 use oneget_lib::platform::secrets::SecretValue;
-use oneget_lib::store::hf::HfMetadataStore;
+use oneget_lib::store::hf::{HfMetadata, HfMetadataStore};
 use oneget_lib::store::Database;
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
@@ -1989,5 +1989,252 @@ async fn engine_service_hf_task_resumes_after_restart_with_re_resolve_and_preser
         part.exists(),
         "service resume HF_AUTH must preserve the part file at {}",
         part.display()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Review repair RED tests: AC HF metadata, E1 inline resolver token
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ac_hf_resumed_metadata_preserves_refresh_count_and_downgraded_after_restart() {
+    let body = (0..(512 * 1024u32))
+        .map(|i| (i % 251) as u8)
+        .collect::<Vec<_>>();
+    let expected_hash = sha256_hex(&body);
+    let cdn_base = "http://cdn-lfs.huggingface.co/repos/fixture/resume-meta.bin";
+
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let meta_dir = tempdir().expect("meta");
+    let db_path = store_dir.path().join("tasks.db");
+    let hf_path = meta_dir.path().join("hf.db");
+
+    // First run: create a paused HF task with progress and a real part.
+    let server1 = HfFixtureServer::start(HfFixtureConfig {
+        resolver_behavior: ResolverBehavior::RedirectToFreshCdn(cdn_base.to_string()),
+        cdn_body: body.clone(),
+        cdn_stream_delay: Some(Duration::from_millis(15)),
+        cdn_stream_chunk_size: 16 * 1024,
+        ..Default::default()
+    });
+
+    let id;
+    {
+        let store = Database::open(&db_path).expect("open store");
+        let hf_store = HfMetadataStore::open(&hf_path).expect("open hf store");
+        let engine = Engine::new(
+            store,
+            dest.path().to_path_buf(),
+            EngineOptions { max_concurrent: 2 },
+        );
+        engine
+            .set_proxy(Some(hf_proxy(&server1)))
+            .expect("set proxy");
+        engine
+            .set_huggingface_options(HuggingFaceOptions {
+                token: Some(SecretValue::new("hf_resume_token".to_string()).expect("secret")),
+                connection_cap: 4,
+                metadata: Some(Arc::new(hf_store.clone())),
+            })
+            .expect("set hf options");
+
+        let spec = DownloadSpec {
+            expected_sha256: Some(expected_hash.clone()),
+            ..make_spec(
+                "http://huggingface.co/gpt2/resolve/main/resume-meta.bin".to_string(),
+                "resume-meta.bin",
+                4,
+            )
+        };
+        id = engine.add_task(spec).expect("add hf task");
+
+        let engine_ref = &engine;
+        let pause_id = id.clone();
+        let (run_result, _) = tokio::join!(
+            async {
+                timeout(WAIT_TIMEOUT, engine_ref.run())
+                    .await
+                    .expect("engine run timed out")
+            },
+            async {
+                let start = Instant::now();
+                loop {
+                    let task = engine_ref
+                        .store()
+                        .task(&pause_id)
+                        .expect("load")
+                        .expect("exists");
+                    if task.downloaded_bytes >= 64 * 1024 {
+                        engine_ref.pause(&pause_id).await.expect("pause");
+                        break;
+                    }
+                    if matches!(task.state, TaskState::Completed | TaskState::Failed) {
+                        break;
+                    }
+                    if start.elapsed() > WAIT_TIMEOUT {
+                        panic!("timed out waiting for progress before pause");
+                    }
+                    sleep(POLL_INTERVAL).await;
+                }
+                let start = Instant::now();
+                loop {
+                    let task = engine_ref
+                        .store()
+                        .task(&pause_id)
+                        .expect("load")
+                        .expect("exists");
+                    if task.state == TaskState::Paused || task.state == TaskState::Completed {
+                        break;
+                    }
+                    if start.elapsed() > WAIT_TIMEOUT {
+                        panic!("timed out waiting for paused state, got {:?}", task.state);
+                    }
+                    sleep(POLL_INTERVAL).await;
+                }
+            }
+        );
+        run_result.expect("engine run failed");
+        let task = engine.store().task(&id).expect("load").expect("exists");
+        assert_eq!(
+            task.state,
+            TaskState::Paused,
+            "task must be paused before restart"
+        );
+
+        // Seed the persisted HF metadata with the required flags. This mirrors a
+        // task whose prior run recorded refreshes/downgrade; a resume must not
+        // overwrite them.
+        let seeded = HfMetadata {
+            task_id: id.clone(),
+            repo_id: "gpt2".to_string(),
+            file_path: "resume-meta.bin".to_string(),
+            revision: "main".to_string(),
+            connection_cap: 4,
+            effective_connections: 1,
+            refresh_count: 2,
+            downgraded: true,
+        };
+        hf_store.record(&seeded).expect("seed hf metadata");
+    }
+    drop(server1);
+
+    // Second run: reopen same task DB and hf store, resume, complete.
+    let server2 = HfFixtureServer::start(HfFixtureConfig {
+        resolver_behavior: ResolverBehavior::RedirectToFreshCdn(cdn_base.to_string()),
+        cdn_body: body.clone(),
+        cdn_stream_delay: Some(Duration::from_millis(4)),
+        cdn_stream_chunk_size: 16 * 1024,
+        ..Default::default()
+    });
+
+    {
+        let store = Database::open(&db_path).expect("reopen store");
+        let hf_store = HfMetadataStore::open(&hf_path).expect("reopen hf store");
+        let engine = Engine::new(
+            store,
+            dest.path().to_path_buf(),
+            EngineOptions { max_concurrent: 2 },
+        );
+        engine
+            .set_proxy(Some(hf_proxy(&server2)))
+            .expect("set proxy");
+        engine
+            .set_huggingface_options(HuggingFaceOptions {
+                token: Some(SecretValue::new("hf_resume_token".to_string()).expect("secret")),
+                connection_cap: 4,
+                metadata: Some(Arc::new(hf_store.clone())),
+            })
+            .expect("set hf options");
+
+        engine.resume(&id).await.expect("resume after restart");
+        let state = run_engine_to_terminal(&engine, &id).await;
+        assert_eq!(state, TaskState::Completed, "resumed HF task must complete");
+
+        let final_bytes =
+            std::fs::read(dest.path().join("resume-meta.bin")).expect("read final file");
+        assert_eq!(
+            sha256_hex(&final_bytes),
+            expected_hash,
+            "completed file hash must match the fixture"
+        );
+
+        let meta = hf_store
+            .get(&id)
+            .expect("get hf metadata")
+            .expect("hf metadata exists after resumed run");
+        assert_eq!(
+            meta.refresh_count, 2,
+            "resumed run must preserve the seeded refresh_count"
+        );
+        assert!(
+            meta.downgraded,
+            "resumed run must preserve the seeded downgraded flag"
+        );
+    }
+}
+
+#[tokio::test]
+async fn e1_inline_resolver_download_sends_token_to_every_resolver_host_request() {
+    let body = b"inline resolver file bytes with auth".to_vec();
+    let expected_hash = sha256_hex(&body);
+    let server = HfFixtureServer::start(HfFixtureConfig {
+        resolver_behavior: ResolverBehavior::Bytes(body.clone()),
+        cdn_body: Vec::new(),
+        ..Default::default()
+    });
+
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store_in(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 2 },
+    );
+    engine
+        .set_proxy(Some(hf_proxy(&server)))
+        .expect("set proxy");
+    engine
+        .set_huggingface_options(hf_options(4, Some("hf_inline_token"), None))
+        .expect("set hf options");
+
+    let spec = DownloadSpec {
+        expected_sha256: Some(expected_hash.clone()),
+        ..make_spec(
+            "http://huggingface.co/gpt2/resolve/main/inline.bin".to_string(),
+            "inline.bin",
+            2,
+        )
+    };
+    let id = engine.add_task(spec).expect("add inline hf task");
+    let state = run_engine_to_terminal(&engine, &id).await;
+    assert_eq!(
+        state,
+        TaskState::Completed,
+        "inline resolver download must complete with the configured token"
+    );
+
+    let final_bytes = std::fs::read(dest.path().join("inline.bin")).expect("read final file");
+    assert_eq!(final_bytes, body, "inline resolver bytes must be preserved");
+    assert_eq!(sha256_hex(&final_bytes), expected_hash);
+
+    let resolver = server.resolver_requests();
+    assert!(
+        !resolver.is_empty(),
+        "inline resolver must receive requests for the download"
+    );
+    assert!(
+        resolver
+            .iter()
+            .all(|req| req.authorization.as_deref() == Some("Bearer hf_inline_token")),
+        "every resolver-host request for the download must carry Authorization, got {:?}",
+        resolver
+            .iter()
+            .map(|req| req.authorization.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        server.cdn_requests().is_empty(),
+        "an inline resolver response must not contact the CDN host"
     );
 }

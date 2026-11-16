@@ -32,6 +32,9 @@ mod cookies;
 #[path = "support/proxy_server.rs"]
 mod proxy_server;
 
+#[path = "support/hf_server.rs"]
+mod hf_server;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,6 +43,7 @@ use std::time::Duration;
 use cookies::{
     cookie_names, cookie_value, future_expiry, past_expiry, write_cookie_file, NetscapeCookie,
 };
+use hf_server::{HfFixtureConfig, HfFixtureServer, ResolverBehavior};
 use oneget_lib::commands::downloads::DownloadSummary;
 use oneget_lib::engine::cookies::{BrowserCookie, CookieSource};
 use oneget_lib::engine::http::{build_client_with_timeouts, ProxyConfig};
@@ -3947,5 +3951,410 @@ async fn request_level_relative_cookies_file_is_rejected_before_task_creation() 
     assert!(
         fixture.requests().is_empty(),
         "a rejected cookies file path must not produce any request"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Review repair RED tests: AC-028 / AC-029 and E3
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ac_028_running_task_applies_global_rate_limit_without_restart() {
+    // Long, slowly streamed body so the limit can be changed while the task is
+    // actively downloading. The post-change steady window must reflect the new
+    // limit without restarting the task.
+    const BODY_BYTES: usize = 12 * 1024 * 1024;
+    let body = pattern_bytes(0x61, BODY_BYTES);
+    let hash = sha256_hex(&body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body,
+        range_mode: RangeMode::HonorRange,
+        slow_first_half_delay: Some(Duration::from_millis(8)),
+        stream_chunk_size: 64 * 1024,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    let id = engine
+        .add_task(make_spec(
+            fixture.url("/rate/ac028-running-global.bin"),
+            "ac028-running-global.bin",
+            1,
+            Some(hash.clone()),
+        ))
+        .expect("add task");
+
+    let new_limit = MIB;
+    let mut change_at: Option<Instant> = None;
+    let mut samples: Vec<ProgressSample> = Vec::new();
+
+    let (run_result, _) = tokio::join!(
+        async {
+            timeout(Duration::from_secs(60), engine.run())
+                .await
+                .expect("engine run timed out")
+        },
+        async {
+            // Let it make progress without a throttling limit, then lower the
+            // global limit while the task is still running.
+            let started = Instant::now();
+            loop {
+                let task = engine.store().task(&id).expect("load task").expect("task");
+                if task.downloaded_bytes >= 2 * MIB || task.state == TaskState::Completed {
+                    break;
+                }
+                if started.elapsed() > WAIT_TIMEOUT {
+                    panic!(
+                        "timed out waiting for initial progress, state {:?}, downloaded={}",
+                        task.state, task.downloaded_bytes
+                    );
+                }
+                sleep(POLL_INTERVAL).await;
+            }
+            let task_before_change = engine.store().task(&id).expect("load task").expect("task");
+            assert_eq!(
+                task_before_change.state,
+                TaskState::Downloading,
+                "the task must still be running when the global limit changes"
+            );
+
+            change_at = Some(Instant::now());
+            engine.set_global_rate_limit(Some(new_limit));
+
+            // Sample until terminal so the post-change steady window is observed.
+            let start = Instant::now();
+            loop {
+                let task = engine.store().task(&id).expect("load task").expect("task");
+                samples.push(ProgressSample {
+                    at: Instant::now(),
+                    downloaded: task.downloaded_bytes,
+                });
+                if matches!(
+                    task.state,
+                    TaskState::Completed
+                        | TaskState::Failed
+                        | TaskState::Cancelled
+                        | TaskState::Paused
+                ) {
+                    break;
+                }
+                if start.elapsed() > Duration::from_secs(60) {
+                    panic!(
+                        "timed out sampling after limit change, state {:?}, downloaded={}",
+                        task.state, task.downloaded_bytes
+                    );
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        }
+    );
+    run_result.expect("engine run failed");
+
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(
+        task.state,
+        TaskState::Completed,
+        "limited running download failed with {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+
+    let change_at = change_at.expect("limit change timestamp recorded");
+    // Measure throughput over a stable post-change window (drop a couple of
+    // boundary samples to avoid changeover/startup noise) so the result reflects
+    // the limit applied to the still-running task without a restart.
+    let post: Vec<ProgressSample> = samples
+        .into_iter()
+        .filter(|sample| sample.at >= change_at)
+        .collect();
+    assert!(
+        post.len() >= 6,
+        "expected enough post-change samples to measure throughput, got {}",
+        post.len()
+    );
+    let trim = 2usize.min(post.len() / 3);
+    let window = &post[trim..post.len().saturating_sub(trim)];
+    assert!(
+        window.len() >= 2,
+        "post-change measurement window must contain at least two samples"
+    );
+    let first = &window[0];
+    let last = window.last().expect("window has samples");
+    let dt = last.at.duration_since(first.at).as_secs_f64();
+    assert!(dt > 0.0, "post-change measurement window must span time");
+    let bytes = last.downloaded.saturating_sub(first.downloaded) as f64;
+    let measured = bytes / dt;
+    let expected = new_limit as f64;
+    assert!(
+        (expected * 0.9..=expected * 1.1).contains(&measured),
+        "post-change steady throughput {measured:.0} B/s is outside 10% of {expected:.0} B/s (task must apply the lower global limit mid-download without restart)"
+    );
+}
+
+#[tokio::test]
+async fn ac_029_per_task_and_global_limits_use_the_stricter_combination() {
+    const BODY_BYTES: usize = 8 * 1024 * 1024;
+    let body = pattern_bytes(0x62, BODY_BYTES);
+    let hash = sha256_hex(&body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body,
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let engine = Engine::new(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    );
+
+    let per_task = 2 * MIB;
+    let global = MIB;
+    let stricter = global.min(per_task);
+    engine.set_global_rate_limit(Some(global));
+
+    let id = engine
+        .add_task(make_spec(
+            fixture.url("/rate/ac029-combined.bin"),
+            "ac029-combined.bin",
+            2,
+            Some(hash.clone()),
+        ))
+        .expect("add task");
+    engine.set_task_rate_limit(&id, Some(per_task));
+
+    let ((), samples) = tokio::join!(
+        async {
+            timeout(Duration::from_secs(40), engine.run())
+                .await
+                .expect("combined-rate engine run timed out")
+                .expect("engine run failed");
+        },
+        sample_progress(engine.store(), &id, Duration::from_secs(40)),
+    );
+
+    let task = engine.store().task(&id).expect("load task").expect("task");
+    assert_eq!(
+        task.state,
+        TaskState::Completed,
+        "combined-rate download failed with {:?}: {:?}",
+        task.error_code,
+        task.error_message
+    );
+    assert_eq!(task.actual_sha256.as_deref(), Some(hash.as_str()));
+
+    let measured = steady_rate(&samples, BODY_BYTES as u64, RATE_STARTUP, RATE_FINALIZE);
+    let expected = stricter as f64;
+    assert!(
+        (expected * 0.9..=expected * 1.1).contains(&measured),
+        "combined steady throughput {measured:.0} B/s must respect the stricter limit {expected:.0} B/s within 10%"
+    );
+}
+
+use oneget_lib::commands::app::hf_token_save as app_hf_token_save;
+use oneget_lib::commands::downloads::downloads_add as app_downloads_add;
+use oneget_lib::commands::downloads::AddDownloadRequest;
+
+#[tokio::test]
+async fn e3_secret_reapplication_applies_hf_token_and_proxy_credentials_to_running_engine() {
+    // Hugging Face token: saved through the command must be applied so a gated
+    // HF download started afterwards carries Authorization, and clearing removes it.
+    let body = non_periodic_bytes(128 * 1024);
+    let hash = sha256_hex(&body);
+    let cdn_base = "http://cdn-lfs.huggingface.co/repos/fixture/e3.bin";
+    let hf = HfFixtureServer::start(HfFixtureConfig {
+        resolver_behavior: ResolverBehavior::RedirectToFreshCdn(cdn_base.to_string()),
+        cdn_body: body.clone(),
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store = Database::open(dest.path().join("tasks.db")).expect("open store");
+    let engine = Arc::new(
+        EngineService::start(
+            store,
+            dest.path().to_path_buf(),
+            EngineOptions { max_concurrent: 1 },
+        )
+        .expect("start engine"),
+    );
+    engine
+        .set_proxy(Some(ProxyConfig {
+            url: hf.proxy_url(),
+            username: None,
+            password: None,
+        }))
+        .expect("route HF fixture through proxy");
+
+    // Build an AppState harness whose engine is the one we control.
+    let temp = tempdir().expect("tempdir");
+    let paths = AppPaths::with_root(temp.path().join("app")).expect("app paths");
+    let settings_path = paths.data.join("settings.json");
+    let settings_store = SettingsStore::load(&settings_path).expect("settings store");
+    let logger = Logger::new(LogConfig::with_defaults(paths.logs.clone())).expect("logger");
+    let secrets: Arc<dyn SecretService> = Arc::new(MemorySecrets::new());
+    let state = AppState::new(
+        paths,
+        settings_store,
+        logger,
+        secrets,
+        Arc::new(NoopNotifications),
+        Arc::new(NoopAutostart),
+        Arc::new(NoopQuit),
+    )
+    .with_engine(Arc::clone(&engine));
+
+    let saved_token =
+        app_hf_token_save(&state, "hf_e3_secret_token".to_string()).expect("save hf token");
+    assert_single_boolean_status(saved_token, true);
+
+    let id = app_downloads_add(
+        &state,
+        AddDownloadRequest {
+            url: "http://huggingface.co/gpt2/resolve/main/e3.bin".to_string(),
+            filename: "e3-gated.bin".to_string(),
+            destination: None,
+            connections: 1,
+            rate_limit: None,
+            expected_sha256: Some(hash.clone()),
+            allow_html: false,
+            extra_headers: Vec::new(),
+            cookies_file: None,
+            cookie_handle: None,
+        },
+    )
+    .expect("add gated HF task");
+
+    let terminal = wait_service_terminal(&engine, &id, Duration::from_secs(30)).await;
+    assert_eq!(
+        terminal,
+        TaskState::Completed,
+        "gated HF task must complete once the saved token is applied"
+    );
+    let resolver = hf.resolver_requests();
+    assert!(
+        !resolver.is_empty(),
+        "resolver must be contacted for the HF download"
+    );
+    assert!(
+        resolver
+            .iter()
+            .all(|req| req.authorization.as_deref() == Some("Bearer hf_e3_secret_token")),
+        "every resolver request must carry the saved token after hf_token_save, got {:?}",
+        resolver
+            .iter()
+            .map(|req| req.authorization.clone())
+            .collect::<Vec<_>>()
+    );
+
+    oneget_lib::commands::app::hf_token_clear(&state).expect("clear hf token");
+
+    // Start a second gated fixture/task and assert no Authorization is sent.
+    let body2 = non_periodic_bytes(64 * 1024);
+    let hash2 = sha256_hex(&body2);
+    let cdn_base2 = "http://cdn-lfs.huggingface.co/repos/fixture/e3b.bin";
+    let hf2 = HfFixtureServer::start(HfFixtureConfig {
+        resolver_behavior: ResolverBehavior::RedirectToFreshCdn(cdn_base2.to_string()),
+        cdn_body: body2.clone(),
+        ..Default::default()
+    });
+    engine
+        .set_proxy(Some(ProxyConfig {
+            url: hf2.proxy_url(),
+            username: None,
+            password: None,
+        }))
+        .expect("route second HF fixture through proxy");
+
+    let id2 = app_downloads_add(
+        &state,
+        AddDownloadRequest {
+            url: "http://huggingface.co/gpt2/resolve/main/e3b.bin".to_string(),
+            filename: "e3b-gated.bin".to_string(),
+            destination: None,
+            connections: 1,
+            rate_limit: None,
+            expected_sha256: Some(hash2),
+            allow_html: false,
+            extra_headers: Vec::new(),
+            cookies_file: None,
+            cookie_handle: None,
+        },
+    )
+    .expect("add second gated HF task");
+    let _ = wait_service_terminal(&engine, &id2, Duration::from_secs(30)).await;
+    let resolver2 = hf2.resolver_requests();
+    assert!(!resolver2.is_empty(), "second resolver must be contacted");
+    assert!(
+        resolver2.iter().all(|req| req.authorization.is_none()),
+        "clearing the HF token must remove Authorization from later requests, got {:?}",
+        resolver2
+            .iter()
+            .map(|req| req.authorization.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // Proxy credentials: save while manual mode is saved, then a subsequent
+    // authenticated proxy download must succeed without another settings save.
+    const PROXY_USER: &str = "e3-proxy-user";
+    const PROXY_PASS: &str = "e3-proxy-pass-secret";
+    let proxy_body = non_periodic_bytes(128 * 1024);
+    let proxy_hash = sha256_hex(&proxy_body);
+    let fixture = RangeServer::start(FixtureConfig {
+        body: proxy_body.clone(),
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let proxy = ProxyServer::start(Some(ProxyCredentials {
+        username: PROXY_USER.to_string(),
+        password: PROXY_PASS.to_string(),
+    }));
+
+    let proxy_port: u16 = proxy
+        .url()
+        .rsplit(':')
+        .next()
+        .expect("proxy port")
+        .parse()
+        .expect("proxy port number");
+    let manual = manual_proxy_settings(ProxyType::Http, "127.0.0.1", proxy_port);
+    settings_save(&state, manual).expect("save manual proxy settings");
+    let saved_proxy =
+        proxy_credentials_save(&state, PROXY_USER.to_string(), PROXY_PASS.to_string())
+            .expect("save proxy credentials");
+    assert_single_boolean_status(saved_proxy, true);
+
+    let proxy_task = app_downloads_add(
+        &state,
+        AddDownloadRequest {
+            url: fixture.url("/e3/proxy.bin"),
+            filename: "e3-proxy.bin".to_string(),
+            destination: None,
+            connections: 1,
+            rate_limit: None,
+            expected_sha256: Some(proxy_hash.clone()),
+            allow_html: false,
+            extra_headers: Vec::new(),
+            cookies_file: None,
+            cookie_handle: None,
+        },
+    )
+    .expect("add authenticated proxy task");
+    let proxy_state = wait_service_terminal(&engine, &proxy_task, Duration::from_secs(30)).await;
+    assert_eq!(
+        proxy_state,
+        TaskState::Completed,
+        "saving proxy credentials must make a subsequent manual-proxy download succeed"
+    );
+    assert!(
+        !proxy.requests().is_empty(),
+        "the authenticated proxy must observe the download request"
     );
 }

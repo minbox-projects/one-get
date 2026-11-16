@@ -115,6 +115,10 @@ pub(crate) struct HfDownload {
 
 impl HfDownload {
     /// Resolve the initial signed URL and remember the task's metadata.
+    ///
+    /// A resumed task starts from its persisted refresh budget, downgrade flag,
+    /// and one-connection fallback; a fresh task starts with none of them.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn initial(
         resolver_url: &str,
         client: &Client,
@@ -122,6 +126,7 @@ impl HfDownload {
         cookies: Option<&CookieJar>,
         extra_headers: &[(String, String)],
         base: HfMetadata,
+        resumed_reduced: bool,
         metadata: Option<Arc<HfMetadataStore>>,
     ) -> Result<Self, EngineError> {
         let signed_url =
@@ -130,9 +135,9 @@ impl HfDownload {
         Ok(Self {
             resolver_url: resolver_url.to_string(),
             signed_url: RwLock::new(signed_url),
-            refresh_count: AtomicU32::new(0),
-            downgraded: AtomicBool::new(false),
-            reduced: AtomicBool::new(false),
+            refresh_count: AtomicU32::new(base.refresh_count),
+            downgraded: AtomicBool::new(base.downgraded),
+            reduced: AtomicBool::new(resumed_reduced),
             token,
             base,
             metadata,

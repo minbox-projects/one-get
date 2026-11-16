@@ -365,7 +365,7 @@ const enUS = {
   "settings.extension.takeoverRules":
     "Takeover rules live in the browser extension popup. Pair a browser there to let OneGet capture downloads.",
   "settings.capturedAtStart":
-    "Concurrency and global rate limits apply to new tasks after you save. Running downloads keep the limits captured when they started.",
+    "The maximum concurrent tasks and the global rate limit apply immediately to the running engine. Per-task rate limits stay with the task they were set on.",
   "settings.readOnly":
     "These settings were written by a newer version of OneGet. They are read-only and cannot be saved here.",
   "settings.recovered":

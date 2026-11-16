@@ -41,7 +41,7 @@ import type {
   DownloadSummary,
   HeaderPair,
 } from "../types/downloads";
-import type { PendingPrefill } from "../types/pairing";
+import type { PendingPrefill, PendingPrefillItem } from "../types/pairing";
 
 const FILTER_VIEWS: Array<{ view: SidebarView; key: string }> = [
   { view: "all", key: "nav.all" },
@@ -285,11 +285,17 @@ export function AppShell() {
           headers.push([header.name, header.value]);
         }
       }
+      // The pending batch normally carries the cookie handle; keep an
+      // item-scoped fallback for captures that attach it to the item.
+      const itemHandle = (
+        item as PendingPrefillItem & { cookieHandle?: string | null }
+      ).cookieHandle;
       setNewDialogKey((key) => key + 1);
       setNewPrefill({
         url: item.url,
         filename: item.filename || null,
         headers,
+        cookieHandle: itemHandle ?? payload.cookieHandle ?? null,
       });
       setNewOpen(true);
       return;

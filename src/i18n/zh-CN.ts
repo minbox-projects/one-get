@@ -328,7 +328,7 @@ const zhCN = {
   "settings.extension.takeoverRules":
     "接管规则位于浏览器扩展弹窗中。请在那里配对浏览器以允许 OneGet 捕获下载。",
   "settings.capturedAtStart":
-    "并发数和全局限速在保存后对新任务生效。正在运行的下载会保留任务开始时的限制。",
+    "最大并发任务数与全局限速会立即应用到运行中的引擎；单个任务的限速仍随该任务保留。",
   "settings.readOnly":
     "这些设置由更新版本的 OneGet 写入，当前版本只能查看，无法保存。",
   "settings.recovered":

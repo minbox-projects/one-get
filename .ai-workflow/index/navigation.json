@@ -3174,6 +3174,11 @@
         },
         {
           "kind": "imports",
+          "from": "src/app/AppShell.tsx#AppShell",
+          "to": "src/types/pairing.ts#PendingPrefillItem"
+        },
+        {
+          "kind": "imports",
           "from": "src/app/ErrorBoundary.tsx#ErrorBoundary",
           "to": "src/i18n/index.tsx#resolveLanguage"
         },

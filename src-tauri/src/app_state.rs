@@ -519,7 +519,17 @@ impl AppState {
     /// Direct and system modes delete stored proxy credentials because those
     /// modes never attach authentication. An unavailable system proxy connects
     /// directly and records only a stable reason code.
-    fn apply_proxy_settings(&self, settings: &Settings) -> Result<(), AppError> {
+    pub(crate) fn apply_proxy_settings(&self, settings: &Settings) -> Result<(), AppError> {
+        self.apply_proxy(settings, true)
+    }
+
+    /// Re-resolve and apply the effective proxy without pruning stored
+    /// credentials that the saved mode does not currently use.
+    pub(crate) fn reapply_proxy_settings(&self, settings: &Settings) -> Result<(), AppError> {
+        self.apply_proxy(settings, false)
+    }
+
+    fn apply_proxy(&self, settings: &Settings, prune_credentials: bool) -> Result<(), AppError> {
         let credentials = self.proxy_credentials()?;
         let resolution = resolve_proxy(
             settings,
@@ -560,7 +570,8 @@ impl AppState {
                 .map_err(|error| AppError::new(error.code(), error.message()))?;
         }
 
-        if matches!(settings.proxy_mode, ProxyMode::Direct | ProxyMode::System) {
+        if prune_credentials && matches!(settings.proxy_mode, ProxyMode::Direct | ProxyMode::System)
+        {
             let secrets = self.secrets();
             // A credentials store that is unavailable must not make an
             // otherwise valid settings save fail; there is simply nothing to

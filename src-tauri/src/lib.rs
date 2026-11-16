@@ -223,8 +223,11 @@ fn initialize(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         state = state.with_video(video);
     }
     let state = Arc::new(state);
-    // Opening the optional Hugging Face metadata store and reading the saved
-    // token is best effort: startup stays usable when either is unavailable.
+    // Applying the saved proxy is best effort: an unavailable system proxy
+    // records a stable reason and leaves direct connections usable. Opening
+    // the optional Hugging Face metadata store and reading the saved token is
+    // likewise best effort.
+    let _ = state.apply_proxy_settings(&snapshot);
     let _ = state.apply_huggingface_settings(&snapshot);
 
     if let Some(store) = pairing_store {

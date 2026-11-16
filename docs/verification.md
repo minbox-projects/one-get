@@ -720,7 +720,7 @@ Frontend, extension, and Playwright commands ran from the worktree root; Rust co
 | `npm run check:pins` | Passed: 30 direct npm entries are exact versions. |
 | `npm run typecheck` | Passed: strict TypeScript project build. |
 | `npm run lint` | Passed: exit 0. |
-| `npm run test` | Passed: 53 Vitest files, 519 tests. |
+| `npm run test` | Passed: 53 Vitest files, 521 tests. |
 | `npm run build` | Passed: production Vite build. |
 | `npm run test:e2e` | Passed: 46 Playwright tests across the chromium-light and chromium-dark projects against deterministic mock IPC. |
 | `npm run typecheck:extension` | Passed: exit 0. |
@@ -732,7 +732,9 @@ Frontend, extension, and Playwright commands ran from the worktree root; Rust co
 | `cargo fmt -- --check` | Passed: exit 0. |
 | `cargo check --locked` | Passed: exit 0. |
 | `cargo clippy --all-targets -- -D warnings` | Passed: exit 0. |
-| `cargo test --locked` | Passed: 387 tests across all suites with 1 ignored long soak. |
+| `cargo test --locked` | Passed: 392 tests across 40 suites with 1 ignored long soak. |
+
+The post-review repair re-ran the full gates above and additionally verified the running-task global rate limit, resumed HuggingFace metadata preservation, inline resolver token attachment, startup proxy application, secret re-application, cookie prefill handle delivery, and optional User-Agent clearing.
 
 No npm or Rust dependency was added for this revision apart from enabling the already pinned `reqwest` `socks` feature. Every Rust gate uses `--locked` against the committed lockfile, and no automated layer contacts a public host or a real credential.
 

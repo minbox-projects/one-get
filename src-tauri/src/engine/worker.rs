@@ -991,15 +991,30 @@ pub(crate) async fn download_task_with_network(
 
     let hf_state = match hf::parse_hf_url(&spec.url)? {
         Some(parsed) => {
+            let persisted = network
+                .hf_metadata
+                .as_ref()
+                .and_then(|store| store.get(task_id).ok().flatten());
+            let downgraded = persisted.as_ref().is_some_and(|meta| meta.downgraded);
+            let reduced = persisted.as_ref().is_some_and(|meta| {
+                meta.downgraded || (meta.effective_connections == 1 && spec.connections > 1)
+            });
             let base = HfMetadata {
                 task_id: task_id.to_string(),
                 repo_id: parsed.repo_id,
                 file_path: parsed.file_path,
                 revision: parsed.revision,
                 connection_cap: network.hf_connection_cap,
-                effective_connections: spec.connections,
-                refresh_count: 0,
-                downgraded: false,
+                effective_connections: if downgraded || reduced {
+                    1
+                } else {
+                    spec.connections
+                },
+                refresh_count: persisted
+                    .as_ref()
+                    .map(|meta| meta.refresh_count)
+                    .unwrap_or(0),
+                downgraded,
             };
             match hf::HfDownload::initial(
                 &spec.url,
@@ -1008,6 +1023,7 @@ pub(crate) async fn download_task_with_network(
                 network.cookies.as_ref(),
                 &spec.extra_headers,
                 base,
+                reduced,
                 network.hf_metadata.clone(),
             )
             .await
@@ -2041,9 +2057,7 @@ async fn stream_request(
                 None => spec.url.clone(),
             };
             let mut headers = request_headers(spec, current.range_header())?;
-            if hf.is_none() {
-                apply_huggingface_authorization(&mut headers, spec, network.hf_token.as_ref());
-            }
+            apply_huggingface_authorization(&mut headers, &request_url, network.hf_token.as_ref());
             let response = match get_following_redirects_with_cookies(
                 &network.client,
                 &request_url,
@@ -2299,15 +2313,18 @@ async fn stream_request(
 }
 
 /// Attach a Hugging Face bearer token only for resolver-host requests.
+///
+/// The request URL decides: an inline resolver response keeps the resolver host
+/// and still receives the token, while a redirected CDN URL never does.
 fn apply_huggingface_authorization(
     headers: &mut HeaderMap,
-    spec: &DownloadSpec,
+    request_url: &str,
     token: Option<&SecretValue>,
 ) {
     let Some(token) = token else {
         return;
     };
-    if !hf::is_resolver_url(&spec.url) {
+    if !hf::is_resolver_url(request_url) {
         return;
     }
     if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", token.expose_secret())) {
@@ -2372,9 +2389,7 @@ async fn check_first_range(
             spec,
             Some(format!("bytes={start}-{}", request_end.saturating_sub(1))),
         )?;
-        if hf.is_none() {
-            apply_huggingface_authorization(&mut headers, spec, network.hf_token.as_ref());
-        }
+        apply_huggingface_authorization(&mut headers, &request_url, network.hf_token.as_ref());
         let result = match get_following_redirects_with_cookies(
             &network.client,
             &request_url,
@@ -2549,9 +2564,7 @@ async fn probe_for_download(
             None => spec.url.clone(),
         };
         let mut headers = request_headers(spec, Some(format!("bytes={start}-{start}")))?;
-        if hf.is_none() {
-            apply_huggingface_authorization(&mut headers, spec, network.hf_token.as_ref());
-        }
+        apply_huggingface_authorization(&mut headers, &request_url, network.hf_token.as_ref());
         let is_hf = hf.is_some() || hf::is_resolver_url(&spec.url);
         let (response, final_url) = get_following_redirects_with_cookies(
             &network.client,

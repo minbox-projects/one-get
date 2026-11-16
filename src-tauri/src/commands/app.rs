@@ -251,12 +251,14 @@ pub fn hf_token_status(state: &AppState) -> Result<SecretStatus, AppError> {
 pub fn hf_token_save(state: &AppState, token: String) -> Result<SecretStatus, AppError> {
     let value = SecretValue::new(token).map_err(map_secret_error)?;
     state.secrets().set_secret(HF_TOKEN_KEY, &value)?;
+    state.apply_huggingface_settings(&state.settings())?;
     Ok(SecretStatus { configured: true })
 }
 
 /// Remove the HuggingFace token.
 pub fn hf_token_clear(state: &AppState) -> Result<SecretStatus, AppError> {
     state.secrets().delete_secret(HF_TOKEN_KEY)?;
+    state.apply_huggingface_settings(&state.settings())?;
     Ok(SecretStatus { configured: false })
 }
 
@@ -279,6 +281,7 @@ pub fn proxy_credentials_save(
     let secrets = state.secrets();
     secrets.set_secret(PROXY_USERNAME_KEY, &username)?;
     secrets.set_secret(PROXY_PASSWORD_KEY, &password)?;
+    state.reapply_proxy_settings(&state.settings())?;
     Ok(SecretStatus { configured: true })
 }
 
@@ -287,6 +290,7 @@ pub fn proxy_credentials_clear(state: &AppState) -> Result<SecretStatus, AppErro
     let secrets = state.secrets();
     secrets.delete_secret(PROXY_USERNAME_KEY)?;
     secrets.delete_secret(PROXY_PASSWORD_KEY)?;
+    state.reapply_proxy_settings(&state.settings())?;
     Ok(SecretStatus { configured: false })
 }
 

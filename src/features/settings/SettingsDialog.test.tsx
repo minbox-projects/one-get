@@ -399,11 +399,8 @@ describe("SettingsDialog", () => {
     const { onSaved } = renderDialog();
     await screen.findByLabelText(/language/i);
 
-    expect(
-      screen.getByText(
-        /(tasks started|started|start).*(after|new).*(sav|start)|after (you )?sav/i,
-      ),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/global rate limit apply immediately/i)).toBeInTheDocument();
+    expect(screen.getByText(/per-task rate limits stay/i)).toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText(/language/i), "zh-CN");
     await user.selectOptions(screen.getByLabelText(/theme/i), "dark");
@@ -767,20 +764,22 @@ describe("SettingsDialog", () => {
     });
   });
 
-  it("rejects an empty User-Agent without saving, then saves once fixed", async () => {
+  it("saves a cleared User-Agent as null without validation error (E6)", async () => {
     const user = userEvent.setup();
-    mockIpc();
+    let saved: Settings | null = null;
+    mockIpc({
+      initial: settings({ userAgent: "OneGet-Test/1.0" }),
+      save: (next) => {
+        saved = next;
+        return { ok: true, data: next };
+      },
+    });
     renderDialog();
 
     const userAgent = await screen.findByLabelText(/user.?agent/i);
+    expect(userAgent).toHaveValue("OneGet-Test/1.0");
     await user.clear(userAgent);
 
-    await user.click(screen.getByRole("button", { name: en["settings.save"] }));
-
-    expectNoSave();
-    expectLocalizedFieldError(/user.?agent/i);
-
-    await user.type(userAgent, "OneGet-Test/2.0");
     await user.click(screen.getByRole("button", { name: en["settings.save"] }));
 
     await waitFor(() => {
@@ -790,6 +789,9 @@ describe("SettingsDialog", () => {
         ),
       ).toBe(true);
     });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(saved).not.toBeNull();
+    expect((saved as unknown as { userAgent: string | null }).userAgent).toBeNull();
   });
 
   it("rejects a User-Agent with line breaks without saving, then saves once fixed", async () => {

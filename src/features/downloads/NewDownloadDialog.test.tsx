@@ -446,6 +446,36 @@ describe("NewDownloadDialog", () => {
     );
   });
 
+
+  it("sends the prefill cookie handle in downloads_add (E4)", async () => {
+    const user = userEvent.setup();
+    const url = "https://files.example.test/media/stream-cookie";
+    const prefill = {
+      url,
+      filename: "captured-cookie.mp4",
+      headers: [],
+      cookieHandle: "cookie-handle-e4",
+    } as BrowserPrefill & { cookieHandle: string };
+
+    render(<DialogHarness prefill={prefill} />);
+    const container = dialog();
+
+    expect(within(container).getByLabelText(/^url$/i)).toHaveValue(url);
+    await waitFor(() => {
+      expect(probeDownload).toHaveBeenCalled();
+    });
+
+    await user.click(submitButton(container));
+
+    await waitFor(() => {
+      expect(addDownload).toHaveBeenCalledTimes(1);
+    });
+    const request = addDownload.mock.calls[0][0] as AddDownloadRequest & {
+      cookieHandle?: string | null;
+    };
+    expect(request.cookieHandle).toBe("cookie-handle-e4");
+  });
+
   it("prefills captured browser metadata, probes, and sends it only after submit", async () => {
     const user = userEvent.setup();
     const url = "https://files.example.test/media/stream";

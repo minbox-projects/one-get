@@ -29,6 +29,8 @@ export interface BrowserPrefill {
   url: string;
   filename: string | null;
   headers: HeaderPair[];
+  /** Opaque handle for cookies captured with this item, never a cookie value. */
+  cookieHandle?: string | null;
 }
 
 export interface NewDownloadDialogProps {
@@ -153,6 +155,9 @@ export function NewDownloadDialog({
   const { state: probeState, probe, reset: resetProbe } = useProbe();
   const { settings: dialogSettings, loadSettings } = useLoadedSettings();
   const parsingVideoRef = useRef(false);
+  // A captured-cookie handle is single-use: take it for the one add request
+  // that submits this prefill, then never send it again.
+  const cookieHandleRef = useRef<string | null>(prefill?.cookieHandle ?? null);
 
   const defaultDestination = defaults?.destination ?? "";
   const defaultConnections = defaults?.connections ?? 8;
@@ -345,6 +350,11 @@ export function NewDownloadDialog({
       allowHtml,
       headers: normalizedHeaders,
     });
+    if (prefill !== null && destination.trim().length === 0) {
+      // A browser-captured prefill may rely on the backend's configured
+      // default destination when the settings do not name one.
+      delete formErrors.destination;
+    }
     setErrors(formErrors);
 
     if (htmlResult && !allowHtml) {
@@ -358,10 +368,13 @@ export function NewDownloadDialog({
     }
 
     setSubmitting(true);
+    const cookieHandle = cookieHandleRef.current;
+    cookieHandleRef.current = null;
     const result = await addDownload({
       url: url.trim(),
       filename: filename.trim(),
-      destination: destination.trim(),
+      destination:
+        destination.trim().length === 0 ? null : destination.trim(),
       connections: rangePinned ? 1 : Number(connections),
       rateLimit: rateLimit.trim().length === 0 ? null : Number(rateLimit),
       expectedSha256:
@@ -370,6 +383,7 @@ export function NewDownloadDialog({
       extraHeaders: normalizedHeaders,
       cookiesFile:
         cookiesFile.trim().length === 0 ? null : cookiesFile.trim(),
+      cookieHandle,
     });
     setSubmitting(false);
 

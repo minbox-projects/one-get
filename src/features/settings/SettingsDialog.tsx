@@ -150,9 +150,6 @@ function SettingsFormPanel({
       ? translate("en-US", "settings.save")
       : null;
   const [errors, setErrors] = useState<SettingsFormErrors>({});
-  const [userAgentTouched, setUserAgentTouched] = useState(false);
-  const userAgentLoaded =
-    settings.userAgent !== null && settings.userAgent !== undefined;
 
   const updateGeneral = (patch: Partial<GeneralSettingsValue>) => {
     setForm((current) => ({ ...current, ...patch }));
@@ -166,9 +163,6 @@ function SettingsFormPanel({
 
   const updateForm = (patch: Partial<SettingsForm>) => {
     setForm((current) => ({ ...current, ...patch }));
-    if (patch.userAgent !== undefined) {
-      setUserAgentTouched(true);
-    }
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -217,10 +211,7 @@ function SettingsFormPanel({
       nextErrors.retryAttempts = "validation.retry_attempts_range";
     }
     const trimmedUserAgent = form.userAgent.trim();
-    if (
-      (trimmedUserAgent.length === 0 && (userAgentTouched || userAgentLoaded)) ||
-      /[\r\n]/.test(form.userAgent)
-    ) {
+    if (/[\r\n]/.test(form.userAgent)) {
       nextErrors.userAgent = "validation.user_agent_invalid";
     }
     setErrors(nextErrors);
