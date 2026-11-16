@@ -732,7 +732,7 @@ Frontend, extension, and Playwright commands ran from the worktree root; Rust co
 | `cargo fmt -- --check` | Passed: exit 0. |
 | `cargo check --locked` | Passed: exit 0. |
 | `cargo clippy --all-targets -- -D warnings` | Passed: exit 0. |
-| `cargo test --locked` | Passed: 386 tests across all suites with 1 ignored long soak. |
+| `cargo test --locked` | Passed: 387 tests across all suites with 1 ignored long soak. |
 
 No npm or Rust dependency was added for this revision apart from enabling the already pinned `reqwest` `socks` feature. Every Rust gate uses `--locked` against the committed lockfile, and no automated layer contacts a public host or a real credential.
 
