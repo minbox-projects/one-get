@@ -73,6 +73,13 @@ pub struct HfFixtureConfig {
     pub cdn_forbidden_after_successes: Option<usize>,
     /// All CDN requests return 403.
     pub cdn_persistent_403: bool,
+    /// When set, after resolver has issued this many fresh redirects (resolver_counter >= value),
+    /// all CDN requests return 403. This models "persistent 403 after N refreshes" in terms of
+    /// refresh attempts observed by the resolver side.
+    pub cdn_persistent_403_after_resolver_redirects: Option<usize>,
+    /// Reject CDN requests (403) while resolver redirect count is less than this value.
+    /// Example: value 4 means allow CDN only after >= 4 resolver redirects have been issued.
+    pub cdn_allow_after_resolver_redirects_ge: Option<usize>,
     /// Serve 429 with this Retry-After value once, then succeed normally.
     pub cdn_429_retry_after_once: Option<String>,
 }
@@ -88,6 +95,8 @@ impl Default for HfFixtureConfig {
             cdn_range_mode: CdnRangeMode::Honor,
             cdn_forbidden_after_successes: None,
             cdn_persistent_403: false,
+            cdn_persistent_403_after_resolver_redirects: None,
+            cdn_allow_after_resolver_redirects_ge: None,
             cdn_429_retry_after_once: None,
         }
     }
@@ -444,6 +453,21 @@ fn respond_cdn(
 ) -> (std::io::Result<()>, bool) {
     if config.cdn_persistent_403 {
         return (write_simple(stream, 403, "Forbidden", b"forbidden"), false);
+    }
+    if let Some(threshold) = config.cdn_allow_after_resolver_redirects_ge {
+        let redirects = runtime.resolver_counter.load(Ordering::SeqCst);
+        if redirects < threshold {
+            return (write_simple(stream, 403, "Forbidden", b"not ready"), false);
+        }
+    }
+    if let Some(limit) = config.cdn_persistent_403_after_resolver_redirects {
+        let redirects = runtime.resolver_counter.load(Ordering::SeqCst);
+        if redirects >= limit {
+            return (
+                write_simple(stream, 403, "Forbidden", b"signature expired"),
+                false,
+            );
+        }
     }
     if let Some(limit) = config.cdn_forbidden_after_successes {
         let successes = runtime.cdn_success_responses.load(Ordering::SeqCst);

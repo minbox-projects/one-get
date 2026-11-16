@@ -22,11 +22,12 @@ use super::error::EngineError;
 use super::http::{check_redirect, validate_url};
 use super::retry::classify_reqwest_error;
 
-/// Resolver contacts one task may make, including the initial resolution.
+/// Signature refreshes one task may consume after its initial resolution.
 ///
-/// The first contact resolves the signed URL and each following contact is one
-/// signature refresh, so this bound also limits the persisted refresh count.
-const MAX_RESOLVER_CONTACTS: u32 = 3;
+/// The initial resolution, including its single 401 retry, is separate from
+/// this bound. Each CDN rejection may trigger one refresh, and the persisted
+/// refresh count counts those refreshes only.
+const MAX_SIGNATURE_REFRESHES: u32 = 3;
 
 /// Maximum resolver redirects followed while resolving a signed URL.
 const MAX_RESOLVER_REDIRECTS: usize = 10;
@@ -103,7 +104,6 @@ pub(crate) fn signature_error() -> EngineError {
 pub(crate) struct HfDownload {
     resolver_url: String,
     signed_url: RwLock<String>,
-    resolver_contacts: AtomicU32,
     refresh_count: AtomicU32,
     downgraded: AtomicBool,
     reduced: AtomicBool,
@@ -124,13 +124,12 @@ impl HfDownload {
         base: HfMetadata,
         metadata: Option<Arc<HfMetadataStore>>,
     ) -> Result<Self, EngineError> {
-        let (signed_url, contacts) =
+        let signed_url =
             resolve_with_auth_refresh(client, resolver_url, token.as_ref(), cookies, extra_headers)
                 .await?;
         Ok(Self {
             resolver_url: resolver_url.to_string(),
             signed_url: RwLock::new(signed_url),
-            resolver_contacts: AtomicU32::new(contacts),
             refresh_count: AtomicU32::new(0),
             downgraded: AtomicBool::new(false),
             reduced: AtomicBool::new(false),
@@ -170,8 +169,10 @@ impl HfDownload {
 
     /// Re-resolve after a CDN rejection and atomically publish the fresh URL.
     ///
-    /// A worker that observed an already-replaced URL does no extra network
-    /// work, so concurrent rejections consume one refresh between them.
+    /// A task may consume up to [`MAX_SIGNATURE_REFRESHES`] refreshes after its
+    /// initial resolution; each successful one increments the persisted refresh
+    /// count. A worker that observed an already-replaced URL does no extra
+    /// network work, so concurrent rejections consume one refresh between them.
     pub(crate) async fn refresh(
         &self,
         observed_url: &str,
@@ -183,7 +184,7 @@ impl HfDownload {
         if self.current_url() != observed_url {
             return Ok(());
         }
-        if self.resolver_contacts.load(Ordering::SeqCst) >= MAX_RESOLVER_CONTACTS {
+        if self.refresh_count.load(Ordering::SeqCst) >= MAX_SIGNATURE_REFRESHES {
             return Err(signature_error());
         }
         let signed_url = match resolve_signed_url(
@@ -199,7 +200,6 @@ impl HfDownload {
             Err(error) if error.code() == "HF_AUTH" => return Err(auth_error()),
             Err(error) => return Err(error),
         };
-        self.resolver_contacts.fetch_add(1, Ordering::SeqCst);
         self.refresh_count.fetch_add(1, Ordering::SeqCst);
         *self
             .signed_url
@@ -234,18 +234,21 @@ impl HfDownload {
 }
 
 /// Resolve once and retry a single time when the resolver reports unauthorized.
+///
+/// The retry belongs to the initial resolution and never consumes a signature
+/// refresh.
 async fn resolve_with_auth_refresh(
     client: &Client,
     resolver_url: &str,
     token: Option<&SecretValue>,
     cookies: Option<&CookieJar>,
     extra_headers: &[(String, String)],
-) -> Result<(String, u32), EngineError> {
+) -> Result<String, EngineError> {
     match resolve_signed_url(client, resolver_url, token, cookies, extra_headers).await {
-        Ok(url) => Ok((url, 1)),
+        Ok(url) => Ok(url),
         Err(error) if error.code() == "HF_AUTH" => {
             match resolve_signed_url(client, resolver_url, token, cookies, extra_headers).await {
-                Ok(url) => Ok((url, 2)),
+                Ok(url) => Ok(url),
                 Err(error) if error.code() == "HF_AUTH" => Err(auth_error()),
                 Err(error) => Err(error),
             }

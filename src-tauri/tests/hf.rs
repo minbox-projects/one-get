@@ -760,12 +760,17 @@ async fn persistent_cdn_403_fails_with_hf_signature_preserves_part_and_bounds_re
     let server = HfFixtureServer::start(HfFixtureConfig {
         resolver_behavior: ResolverBehavior::RedirectToFreshCdn(cdn_base.to_string()),
         cdn_body: body.clone(),
+        // Reject every CDN request from the start so the task must exhaust the
+        // bounded initial resolve + up to three refresh attempts.
         cdn_persistent_403: true,
         ..Default::default()
     });
 
     let dest = tempdir().expect("dest");
     let store_dir = tempdir().expect("store");
+    let meta_dir = tempdir().expect("meta");
+    let hf_store = HfMetadataStore::open(meta_dir.path().join("hf.db")).expect("open hf store");
+
     let engine = Engine::new(
         open_store_in(&store_dir),
         dest.path().to_path_buf(),
@@ -775,7 +780,11 @@ async fn persistent_cdn_403_fails_with_hf_signature_preserves_part_and_bounds_re
         .set_proxy(Some(hf_proxy(&server)))
         .expect("set proxy");
     engine
-        .set_huggingface_options(hf_options(4, Some("hf_token"), None))
+        .set_huggingface_options(HuggingFaceOptions {
+            token: Some(SecretValue::new("hf_token".to_string()).expect("secret")),
+            connection_cap: 4,
+            metadata: Some(Arc::new(hf_store.clone())),
+        })
         .expect("set hf options");
 
     let spec = make_spec(
@@ -815,9 +824,19 @@ async fn persistent_cdn_403_fails_with_hf_signature_preserves_part_and_bounds_re
     );
 
     let resolves = server.resolver_requests().len();
-    assert!(
-        resolves <= 3,
-        "the number of resolves must stay at most the documented refresh limit (3 per task), got {resolves}"
+    assert_eq!(
+        resolves, 4,
+        "fixture must observe exactly 4 resolver requests (initial + 3 refreshes) with no further loop, got {resolves}"
+    );
+
+    let meta = hf_store
+        .get(&id)
+        .expect("get hf metadata")
+        .expect("hf metadata exists");
+    assert_eq!(
+        meta.refresh_count, 3,
+        "persisted refresh count must be 3 after exhausting refreshes, got {}",
+        meta.refresh_count
     );
 }
 
@@ -871,6 +890,87 @@ async fn resolver_always_401_triggers_exactly_one_refresh_then_fails_hf_auth() {
         resolves, 2,
         "exactly one refresh attempt is allowed after the initial resolve (total 2), got {resolves}"
     );
+}
+
+// Success case: needs exactly three refreshes before the CDN serves the file.
+
+#[tokio::test]
+async fn hf_download_succeeds_after_exactly_three_refreshes() {
+    let body = (0..(256 * 1024u32))
+        .map(|i| (i % 251) as u8)
+        .collect::<Vec<_>>();
+    let expected_hash = sha256_hex(&body);
+    let cdn_base = "http://cdn-lfs.huggingface.co/repos/fixture/three_refreshes.bin";
+    let server = HfFixtureServer::start(HfFixtureConfig {
+        resolver_behavior: ResolverBehavior::RedirectToFreshCdn(cdn_base.to_string()),
+        cdn_body: body.clone(),
+        // Allow CDN only after >= 4 resolver redirects issued (initial gives 1, then 3 refreshes => 4).
+        cdn_allow_after_resolver_redirects_ge: Some(4),
+        ..Default::default()
+    });
+
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let meta_dir = tempdir().expect("meta");
+    let hf_store = HfMetadataStore::open(meta_dir.path().join("hf.db")).expect("open hf store");
+
+    let engine = Engine::new(
+        open_store_in(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 2 },
+    );
+    engine
+        .set_proxy(Some(hf_proxy(&server)))
+        .expect("set proxy");
+    engine
+        .set_huggingface_options(HuggingFaceOptions {
+            token: Some(SecretValue::new("hf_token".to_string()).expect("secret")),
+            connection_cap: 4,
+            metadata: Some(Arc::new(hf_store.clone())),
+        })
+        .expect("set hf options");
+
+    let spec = DownloadSpec {
+        expected_sha256: Some(expected_hash.clone()),
+        ..make_spec(
+            "http://huggingface.co/gpt2/resolve/main/three_refreshes.bin".to_string(),
+            "three_refreshes.bin",
+            4,
+        )
+    };
+    let id = engine.add_task(spec).expect("add hf task");
+    let state = run_engine_to_terminal(&engine, &id).await;
+    assert_eq!(
+        state,
+        TaskState::Completed,
+        "task must complete after exactly three refreshes"
+    );
+
+    let final_bytes =
+        std::fs::read(dest.path().join("three_refreshes.bin")).expect("read final file");
+    assert_eq!(final_bytes, body, "final bytes must match CDN fixture");
+    assert_eq!(sha256_hex(&final_bytes), expected_hash);
+
+    let resolves = server.resolver_requests().len();
+    assert_eq!(
+        resolves, 4,
+        "fixture must observe exactly 4 resolver requests (initial + 3 refreshes), got {resolves}"
+    );
+
+    let meta = hf_store
+        .get(&id)
+        .expect("get hf metadata")
+        .expect("hf metadata exists");
+    assert_eq!(
+        meta.refresh_count, 3,
+        "persisted refresh count must be 3, got {}",
+        meta.refresh_count
+    );
+
+    // Ensure no re-download of already-completed bytes by checking that CDN
+    // was not hit with requests starting at 0 after the first signed URL beyond
+    // the normal flow is not asserted here; the key assertion is completion with
+    // correct hash and refresh_count==3.
 }
 
 // --- AC-014: 429 with Retry-After honored and concurrency reduced ---
