@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  collectSendCookiesSetting,
   languageFromNavigator,
+  pairingUpdateGuidanceView,
   pairingView,
   resourceView,
+  sendCookiesToggleView,
   takeoverFailureView,
 } from "../../popup/popup";
 import type { TakeoverFailure } from "../../shared/background";
@@ -136,6 +139,26 @@ describe("popup pairing view", () => {
   });
 });
 
+describe("popup settings view", () => {
+  it("renders a localized send-cookies-with-capture toggle default off", () => {
+    const zh = sendCookiesToggleView(undefined, "zh-CN");
+    const en = sendCookiesToggleView(undefined, "en-US");
+
+    expect(zh.checked).toBe(false);
+    expect(en.checked).toBe(false);
+    expect(zh.label).toBe(translateExtension("zh-CN", "popup.sendCookiesWithCapture"));
+    expect(en.label).toBe(translateExtension("en-US", "popup.sendCookiesWithCapture"));
+    expect(zh.label).not.toBe(en.label);
+  });
+
+  it("reflects and persists send-cookies toggle changes through settings collection", () => {
+    expect(sendCookiesToggleView(true, "en-US").checked).toBe(true);
+    expect(collectSendCookiesSetting({ checked: true })).toBe(true);
+    expect(collectSendCookiesSetting({ checked: false })).toBe(false);
+    expect(collectSendCookiesSetting({ checked: "yes" })).toBe(false);
+  });
+});
+
 describe("popup language selection", () => {
   it("follows Chinese and English navigator languages and falls back to English", () => {
     expect(languageFromNavigator("zh-CN")).toBe("zh-CN");
@@ -149,7 +172,6 @@ describe("popup language selection", () => {
 });
 
 describe("popup takeover failure view", () => {
-  // AC-016: a failed takeover offers a localized retry over a redacted URL.
   it("localizes each failure reason and redacts the display URL in both languages", () => {
     const reasons: TakeoverFailure["reason"][] = [
       "capture_failed",
@@ -185,5 +207,27 @@ describe("popup takeover failure view", () => {
       expect(zh.action).toMatch(/retry|again|try|send|重试|再次|重新/i);
       expect(en.action).toMatch(/retry|again|try|send|重试|再次|重新/i);
     }
+  });
+
+  it("shows localized update guidance for PROTOCOL_MISMATCH in the takeover failure banner and settings/pairing area", () => {
+    const mismatch: TakeoverFailure = {
+      downloadId: 7,
+      url: "https://cdn.test/files/movie.mp4",
+      filename: "movie.mp4",
+      reason: "update_required",
+    };
+
+    for (const language of LANGUAGES) {
+      const banner = takeoverFailureView(mismatch, language);
+      expect(banner.message).toContain(translateExtension(language, "popup.updateRequired"));
+
+      const pairing = pairingUpdateGuidanceView("PROTOCOL_MISMATCH", language);
+      expect(pairing.visible).toBe(true);
+      expect(pairing.message).toBe(translateExtension(language, "popup.updateRequired"));
+    }
+
+    expect(pairingUpdateGuidanceView("PROTOCOL_MISMATCH", "zh-CN").message).not.toBe(
+      pairingUpdateGuidanceView("PROTOCOL_MISMATCH", "en-US").message,
+    );
   });
 });

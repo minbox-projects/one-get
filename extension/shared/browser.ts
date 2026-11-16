@@ -47,6 +47,43 @@ interface TabsLike {
   ) => MaybePromise<BrowserTab[]>;
 }
 
+export interface BrowserCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  secure: boolean;
+  expires?: number;
+  httpOnly?: boolean;
+  session?: boolean;
+  expirationDate?: number;
+}
+
+export interface CookieQueryResult {
+  cookies: BrowserCookie[];
+  permissionMissing: boolean;
+  error: boolean;
+}
+
+export type CookieQueryLog = (event: string, fields?: Record<string, unknown>) => void;
+
+interface RawBrowserCookie {
+  name?: unknown;
+  value?: unknown;
+  domain?: unknown;
+  path?: unknown;
+  secure?: unknown;
+  session?: unknown;
+  expirationDate?: unknown;
+}
+
+interface CookiesLike {
+  getAll?: (
+    details: { url: string },
+    callback?: Callback<RawBrowserCookie[]>,
+  ) => MaybePromise<RawBrowserCookie[]> | void;
+}
+
 interface StorageAreaLike {
   get?: (
     keys: string | string[] | null,
@@ -65,6 +102,7 @@ interface StorageAreaLike {
 export interface BrowserApi {
   runtime?: RuntimeLike;
   tabs?: TabsLike;
+  cookies?: CookiesLike;
   storage?: {
     local?: StorageAreaLike;
     session?: StorageAreaLike;
@@ -86,6 +124,7 @@ export interface BrowserAdapter {
     headers: readonly BrowserResponseHeader[] | undefined,
     name: string,
   ): string | null;
+  getCookiesForUrl(url: string, log?: CookieQueryLog): Promise<CookieQueryResult>;
 }
 
 // Callback-style APIs declare at least a value plus a completion callback, so
@@ -243,11 +282,90 @@ export function createBrowserAdapter(
     return null;
   }
 
+  function normalizeCookie(raw: RawBrowserCookie): BrowserCookie | null {
+    if (typeof raw.name !== "string" || raw.name.length === 0) {
+      return null;
+    }
+    if (typeof raw.value !== "string") {
+      return null;
+    }
+    const expires =
+      raw.session === true
+        ? undefined
+        : typeof raw.expirationDate === "number" && Number.isFinite(raw.expirationDate)
+          ? raw.expirationDate
+          : undefined;
+    return {
+      name: raw.name,
+      value: raw.value,
+      domain: typeof raw.domain === "string" ? raw.domain : "",
+      path: typeof raw.path === "string" ? raw.path : "/",
+      secure: raw.secure === true,
+      expires,
+    };
+  }
+
+  function permissionFailure(message: string | null): boolean {
+    return message !== null && /permission|not\s+allowed/i.test(message);
+  }
+
+  async function getCookiesForUrl(
+    url: string,
+    report?: CookieQueryLog,
+  ): Promise<CookieQueryResult> {
+    const getAll = api.cookies?.getAll;
+    if (typeof getAll !== "function") {
+      report?.("cookies.permission_missing", { reason: "api_unavailable" });
+      return { cookies: [], permissionMissing: true, error: false };
+    }
+
+    try {
+      let rawCookies: RawBrowserCookie[] | undefined;
+      if (takesCallback(getAll)) {
+        rawCookies = await new Promise<RawBrowserCookie[]>((resolve, reject) => {
+          try {
+            getAll({ url }, (cookies) => {
+              const failure = lastErrorMessage(runtime);
+              if (failure !== null) {
+                reject(new Error(failure));
+                return;
+              }
+              resolve(Array.isArray(cookies) ? cookies : []);
+            });
+          } catch (error) {
+            reject(error);
+          }
+        });
+      } else {
+        const result = await getAll({ url });
+        rawCookies = Array.isArray(result) ? result : [];
+      }
+
+      const cookies: BrowserCookie[] = [];
+      for (const raw of Array.isArray(rawCookies) ? rawCookies : []) {
+        const cookie = normalizeCookie(raw);
+        if (cookie !== null) {
+          cookies.push(cookie);
+        }
+      }
+      return { cookies, permissionMissing: false, error: false };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : null;
+      if (permissionFailure(message)) {
+        report?.("cookies.permission_missing", { reason: "permission_denied" });
+        return { cookies: [], permissionMissing: true, error: false };
+      }
+      report?.("cookies.query_failed", { reason: "query_failed" });
+      return { cookies: [], permissionMissing: false, error: true };
+    }
+  }
+
   return {
     sendMessage,
     getActiveTab,
     storage: (area) => storageArea(area === "local" ? api.storage?.local : api.storage?.session),
     onMessage,
     responseHeader,
+    getCookiesForUrl,
   };
 }

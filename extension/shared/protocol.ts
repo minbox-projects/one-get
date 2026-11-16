@@ -1,4 +1,6 @@
-export const API_PROTOCOL_VERSION = 1;
+export const API_PROTOCOL_VERSION = 2;
+
+const SUPPORTED_PROTOCOL_VERSIONS = [1, 2] as const;
 
 export const API_HOST = "127.0.0.1";
 
@@ -30,11 +32,40 @@ export function apiOrigin(port: number = API_PORT): string {
 }
 
 export function isProtocolCompatible(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const version = (value as { protocolVersion?: unknown }).protocolVersion;
   return (
-    typeof value === "object" &&
-    value !== null &&
-    (value as { protocolVersion?: unknown }).protocolVersion === API_PROTOCOL_VERSION
+    typeof version === "number" &&
+    (SUPPORTED_PROTOCOL_VERSIONS as readonly number[]).includes(version)
   );
+}
+
+export interface ProtocolMismatchGuidance {
+  reason: "update_required";
+  messageKey: "popup.updateRequired";
+  code: "PROTOCOL_MISMATCH";
+}
+
+const PROTOCOL_MISMATCH_GUIDANCE: ProtocolMismatchGuidance = {
+  reason: "update_required",
+  messageKey: "popup.updateRequired",
+  code: "PROTOCOL_MISMATCH",
+};
+
+export function isProtocolMismatchResult(result: ApiResult<unknown>): boolean {
+  return (
+    result.ok === false &&
+    result.status === 409 &&
+    result.error.code === PROTOCOL_MISMATCH_GUIDANCE.code
+  );
+}
+
+export function protocolMismatchGuidance(
+  result: ApiResult<unknown>,
+): ProtocolMismatchGuidance | null {
+  return isProtocolMismatchResult(result) ? { ...PROTOCOL_MISMATCH_GUIDANCE } : null;
 }
 
 function isJsonContentType(value: string | null): boolean {

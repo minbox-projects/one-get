@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createBrowserAdapter } from "../../shared/browser";
-import type { BrowserApi } from "../../shared/browser";
+import type { BrowserApi, BrowserCookie } from "../../shared/browser";
 
 const TOKEN_A = "0123456789abcdef".repeat(4);
 
@@ -13,6 +13,9 @@ interface ChromiumMockOptions {
   tabs?: Array<{ id?: number; url?: string }>;
   storage?: Record<string, unknown>;
   session?: Record<string, unknown>;
+  cookies?: {
+    getAll?: (details: { url: string }, callback: (cookies: BrowserCookie[]) => void) => void;
+  };
 }
 
 function chromiumArea(store: Record<string, unknown>) {
@@ -72,6 +75,7 @@ function chromiumApi(options: ChromiumMockOptions = {}) {
       local: chromiumArea(local),
       session: chromiumArea(session),
     },
+    cookies: options.cookies,
   };
   return { api, listeners, local, session };
 }
@@ -81,6 +85,9 @@ interface FirefoxMockOptions {
   tabs?: Array<{ id?: number; url?: string }>;
   storage?: Record<string, unknown>;
   session?: Record<string, unknown>;
+  cookies?: {
+    getAll?: (details: { url: string }) => Promise<BrowserCookie[]>;
+  };
 }
 
 function firefoxArea(store: Record<string, unknown>) {
@@ -124,6 +131,7 @@ function firefoxApi(options: FirefoxMockOptions = {}) {
       local: firefoxArea(local),
       session: firefoxArea(session),
     },
+    cookies: options.cookies,
   };
   return { api, listeners, local, session };
 }
@@ -273,5 +281,151 @@ describe("browser adapter", () => {
     expect(adapter.responseHeader(headers, "x-empty")).toBeNull();
     expect(adapter.responseHeader(headers, "missing")).toBeNull();
     expect(adapter.responseHeader(undefined, "content-type")).toBeNull();
+  });
+
+  it("normalizes callback-style cookie queries for a URL", async () => {
+    const logs: Array<{ event: string; fields?: Record<string, unknown> }> = [];
+    const { api } = chromiumApi({
+      cookies: {
+        getAll(details, callback) {
+          expect(details).toEqual({ url: "https://cdn.test/files/movie.mp4" });
+          callback([
+            {
+              name: "sid",
+              value: "secret-sid",
+              domain: ".cdn.test",
+              path: "/files",
+              secure: true,
+              expirationDate: 2_000_000_000,
+            },
+            {
+              name: "session",
+              value: "secret-session",
+              domain: "cdn.test",
+              path: "/",
+              secure: false,
+              session: true,
+            },
+          ]);
+        },
+      },
+    });
+    const adapter = adapterFor(api);
+    if (typeof adapter.getCookiesForUrl !== "function") {
+      throw new Error("adapter.getCookiesForUrl is required for GREEN cookie query behavior");
+    }
+
+    const result = await adapter.getCookiesForUrl("https://cdn.test/files/movie.mp4", (event, fields) =>
+      logs.push({ event, fields }),
+    );
+
+    expect(result).toEqual({
+      cookies: [
+        {
+          name: "sid",
+          value: "secret-sid",
+          domain: ".cdn.test",
+          path: "/files",
+          secure: true,
+          expires: 2_000_000_000,
+        },
+        {
+          name: "session",
+          value: "secret-session",
+          domain: "cdn.test",
+          path: "/",
+          secure: false,
+          expires: undefined,
+        },
+      ],
+      permissionMissing: false,
+      error: false,
+    });
+    expect(logs).toEqual([]);
+  });
+
+  it("normalizes promise-style cookie queries and propagates errors without throwing unbounded", async () => {
+    const logs: Array<{ event: string; fields?: Record<string, unknown> }> = [];
+    const ok = adapterFor(
+      firefoxApi({
+        cookies: {
+          async getAll(details) {
+            expect(details).toEqual({ url: "https://cdn.test/files/movie.mp4" });
+            return [
+              {
+                name: "sid",
+                value: "secret-sid",
+                domain: ".cdn.test",
+                path: "/files",
+                secure: true,
+                expirationDate: 1_700_000_000,
+              },
+            ];
+          },
+        },
+      }).api,
+    );
+    if (typeof ok.getCookiesForUrl !== "function") {
+      throw new Error("adapter.getCookiesForUrl is required for GREEN cookie query behavior");
+    }
+    await expect(
+      ok.getCookiesForUrl("https://cdn.test/files/movie.mp4", (event, fields) => logs.push({ event, fields })),
+    ).resolves.toEqual({
+      cookies: [
+        {
+          name: "sid",
+          value: "secret-sid",
+          domain: ".cdn.test",
+          path: "/files",
+          secure: true,
+          expires: 1_700_000_000,
+        },
+      ],
+      permissionMissing: false,
+      error: false,
+    });
+
+    const failing = adapterFor(
+      firefoxApi({
+        cookies: {
+          async getAll() {
+            throw new Error("cookie store unavailable");
+          },
+        },
+      }).api,
+    );
+    if (typeof failing.getCookiesForUrl !== "function") {
+      throw new Error("adapter.getCookiesForUrl is required for GREEN cookie query behavior");
+    }
+    let pending: Promise<unknown> | undefined;
+    expect(() => {
+      pending = failing.getCookiesForUrl("https://cdn.test/files/movie.mp4", (event, fields) =>
+        logs.push({ event, fields }),
+      );
+    }).not.toThrow();
+    await expect(pending).resolves.toEqual({
+      cookies: [],
+      permissionMissing: false,
+      error: true,
+    });
+    expect(logs.some((entry) => entry.event.includes("cookie"))).toBe(true);
+    expect(JSON.stringify(logs)).not.toContain("secret-sid");
+  });
+
+  it("returns an empty list and a logged reason when the cookies permission or API is absent", async () => {
+    const logs: Array<{ event: string; fields?: Record<string, unknown> }> = [];
+    const adapter = adapterFor(chromiumApi().api);
+    if (typeof adapter.getCookiesForUrl !== "function") {
+      throw new Error("adapter.getCookiesForUrl is required for GREEN cookie query behavior");
+    }
+
+    await expect(
+      adapter.getCookiesForUrl("https://cdn.test/files/movie.mp4", (event, fields) => logs.push({ event, fields })),
+    ).resolves.toEqual({
+      cookies: [],
+      permissionMissing: true,
+      error: false,
+    });
+    expect(logs.some((entry) => entry.event.includes("cookie"))).toBe(true);
   });
 });

@@ -59,6 +59,7 @@
         <button id="unpair-button" type="button" class="secondary" hidden data-i18n="popup.unpair">
           Unpair
         </button>
+        <p id="pairing-update-required" class="hint" role="status" hidden></p>
       </section>
 
       <section class="panel" aria-labelledby="settings-heading">
@@ -67,6 +68,11 @@
           <label class="toggle">
             <input id="takeover-enabled" type="checkbox" />
             <span data-i18n="popup.takeoverEnabled">Take over browser downloads</span>
+          </label>
+
+          <label class="toggle">
+            <input id="send-cookies" type="checkbox" />
+            <span data-i18n="popup.sendCookiesWithCapture">Send cookies with capture</span>
           </label>
 
           <fieldset class="categories">

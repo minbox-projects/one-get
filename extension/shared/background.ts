@@ -1,8 +1,9 @@
 import { classifyResource } from "./classify";
+import type { BrowserCookie } from "./browser";
 import { decideTakeover } from "./filter";
 import type { TakeoverCandidate } from "./filter";
 import { ResourceStore } from "./pageStore";
-import { API_PROTOCOL_VERSION, requestJson } from "./protocol";
+import { API_PROTOCOL_VERSION, protocolMismatchGuidance, requestJson } from "./protocol";
 import type { ApiErrorBody, ApiResult } from "./protocol";
 import { normalizeSettings } from "./settings";
 import type { ExtensionSettings } from "./settings";
@@ -73,6 +74,12 @@ export interface TakeoverFailure {
   reason: TakeoverFailureReason;
 }
 
+/**
+ * A listed resource keeps the stored entry shape and is also readable as a
+ * plain record because callers only ever see metadata, never cookie values.
+ */
+export type ListedResource = ResourceEntry & Record<string, unknown>;
+
 export interface RuntimeMessage {
   type?: unknown;
   [key: string]: unknown;
@@ -89,6 +96,14 @@ export interface DownloadControl {
   erase(query: { id: number }): Promise<void>;
 }
 
+export interface CookieQueryOutcome {
+  cookies: BrowserCookie[];
+  permissionMissing?: boolean;
+  error?: boolean;
+}
+
+export type CookieQuery = (url: string) => Promise<CookieQueryOutcome>;
+
 export interface BackgroundDependencies {
   storage: StorageArea;
   session: StorageArea;
@@ -97,6 +112,7 @@ export interface BackgroundDependencies {
   now: () => number;
   downloads: DownloadControl;
   pairLabel?: string;
+  getCookiesForUrl?: CookieQuery;
   /**
    * Persist the bounded takeover-failure record in session storage so it can be
    * rehydrated after the background context restarts. Chromium keeps it in
@@ -112,7 +128,7 @@ export interface BackgroundController {
   handleNavigation(tabId: number, frameId: number, pageUrl: string): Promise<void>;
   handleTabRemoved(tabId: number): Promise<void>;
   observeResource(input: ResourceInput): Promise<ResourceEntry | null>;
-  listResources(tabId: number): Promise<ResourceEntry[]>;
+  listResources(tabId: number): Promise<ListedResource[]>;
   getSettings(): Promise<ExtensionSettings>;
   saveSettings(settings: ExtensionSettings): Promise<ExtensionSettings>;
   pair(code: string): Promise<PairOutcome>;
@@ -164,6 +180,58 @@ function nullableNumber(value: unknown): number | null {
 
 function sizeOfDownload(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function domainMatches(host: string, domain: string): boolean {
+  if (domain.length === 0) {
+    return false;
+  }
+  const normalized = domain.startsWith(".") ? domain.slice(1) : domain;
+  return host === normalized || host.endsWith(`.${normalized}`);
+}
+
+function pathMatches(pathname: string, cookiePath: string): boolean {
+  if (cookiePath.length === 0 || cookiePath === "/") {
+    return true;
+  }
+  if (pathname === cookiePath) {
+    return true;
+  }
+  return pathname.startsWith(cookiePath.endsWith("/") ? cookiePath : `${cookiePath}/`);
+}
+
+function filterCookiesForUrl(
+  cookies: BrowserCookie[],
+  url: string,
+  nowMs: number,
+): BrowserCookie[] {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return [];
+  }
+  const host = parsed.hostname.toLowerCase();
+  const pathname = parsed.pathname.length > 0 ? parsed.pathname : "/";
+  return cookies.filter((cookie) => {
+    if (!domainMatches(host, cookie.domain.toLowerCase())) {
+      return false;
+    }
+    if (!pathMatches(pathname, cookie.path)) {
+      return false;
+    }
+    if (cookie.secure && parsed.protocol !== "https:") {
+      return false;
+    }
+    if (
+      typeof cookie.expires === "number" &&
+      cookie.expires > 0 &&
+      cookie.expires * 1000 <= nowMs
+    ) {
+      return false;
+    }
+    return true;
+  });
 }
 
 function serializeResources(entries: ResourceEntry[]): StoredResource[] {
@@ -343,6 +411,30 @@ export function createBackgroundController(
     return normalizeSettings(document);
   }
 
+  async function cookiesForCapture(
+    url: string,
+    settings: ExtensionSettings,
+    intent: "takeover" | "prefill",
+  ): Promise<BrowserCookie[] | undefined> {
+    if (!settings.sendCookies || dependencies.getCookiesForUrl === undefined) {
+      return undefined;
+    }
+    try {
+      const outcome = await dependencies.getCookiesForUrl(url);
+      const matched = filterCookiesForUrl(outcome.cookies, url, dependencies.now());
+      log("capture.cookies", {
+        intent,
+        count: matched.length,
+        permissionMissing: outcome.permissionMissing === true,
+        error: outcome.error === true,
+      });
+      return matched.length > 0 ? matched : undefined;
+    } catch {
+      log("capture.cookies", { intent, count: 0, error: true });
+      return undefined;
+    }
+  }
+
   async function observeResource(input: ResourceInput): Promise<ResourceEntry | null> {
     const store = await loadStore();
     const entry = store.add(input);
@@ -353,9 +445,9 @@ export function createBackgroundController(
     return entry;
   }
 
-  async function listResources(tabId: number): Promise<ResourceEntry[]> {
+  async function listResources(tabId: number): Promise<ListedResource[]> {
     const store = await loadStore();
-    return store.list(tabId);
+    return store.list(tabId).map((entry) => entry as ListedResource);
   }
 
   function safeHeaders(referer: string | undefined): Array<{ name: string; value: string }> {
@@ -422,6 +514,7 @@ export function createBackgroundController(
       return { action: "allow", reason: "duplicate", taskId: existingTask };
     }
 
+    const cookies = await cookiesForCapture(download.url, settings, "takeover");
     const item: CaptureDraftItem = {
       url: download.url,
       filename: download.filename,
@@ -430,6 +523,7 @@ export function createBackgroundController(
       size: sizeOfDownload(download.totalBytes),
       kind: "file",
       headers: safeHeaders(download.referer),
+      ...(cookies === undefined ? {} : { cookies }),
     };
     const result = await sendCapture(token, "takeover", `takeover:${download.id}`, [item]);
 
@@ -441,8 +535,12 @@ export function createBackgroundController(
         return { action: "allow", reason: "token_revoked" };
       }
       if (result.status === 409) {
+        const guidance = protocolMismatchGuidance(result);
         await rememberTakeoverFailure(download, "update_required");
-        log("capture.update_required", { intent: "takeover" });
+        log("capture.update_required", {
+          intent: "takeover",
+          code: guidance?.code ?? result.error.code,
+        });
         return { action: "allow", reason: "update_required" };
       }
       await rememberTakeoverFailure(download, "capture_failed");
@@ -588,6 +686,8 @@ export function createBackgroundController(
 
     const tabId = numberOr(message.tabId ?? sender?.tabId, -1);
     const pageUrl = stringOr(resource?.pageUrl ?? sender?.pageUrl, "");
+    const settings = await currentSettings();
+    const cookies = await cookiesForCapture(url, settings, "prefill");
     const item: CaptureDraftItem = {
       url,
       filename: stringOr(resource?.filename, ""),
@@ -596,6 +696,7 @@ export function createBackgroundController(
       size: nullableNumber(resource?.size),
       kind: "file",
       headers: safeHeaders(pageUrl.length > 0 ? pageUrl : undefined),
+      ...(cookies === undefined ? {} : { cookies }),
     };
     prefillSequence += 1;
     const sourceId = `prefill:${tabId}:${dependencies.now()}:${prefillSequence}`;
@@ -608,7 +709,11 @@ export function createBackgroundController(
         return { ok: false, error: result.error, reason: "token_revoked" };
       }
       if (result.status === 409) {
-        log("capture.update_required", { intent: "prefill" });
+        const guidance = protocolMismatchGuidance(result);
+        log("capture.update_required", {
+          intent: "prefill",
+          code: guidance?.code ?? result.error.code,
+        });
         return { ok: false, error: result.error, reason: "update_required" };
       }
       log("capture.failed", { intent: "prefill", status: result.status, code: result.error.code });

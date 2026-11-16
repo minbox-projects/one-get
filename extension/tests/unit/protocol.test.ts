@@ -6,6 +6,8 @@ import {
   API_PROTOCOL_VERSION,
   apiOrigin,
   isProtocolCompatible,
+  isProtocolMismatchResult,
+  protocolMismatchGuidance,
   requestJson,
 } from "../../shared/protocol";
 
@@ -28,27 +30,28 @@ function captureFetch(response: Response) {
   return { fetchImpl, calls };
 }
 
-describe("capture API constants", () => {
-  it("pins protocol version 1 and the loopback authority", () => {
-    expect(API_PROTOCOL_VERSION).toBe(1);
+describe("capture API constants and protocol compatibility", () => {
+  it("pins protocol version 2 and the loopback authority", () => {
+    expect(API_PROTOCOL_VERSION).toBe(2);
     expect(API_HOST).toBe("127.0.0.1");
     expect(API_PORT).toBe(37652);
     expect(apiOrigin()).toBe("http://127.0.0.1:37652");
     expect(apiOrigin(4000)).toBe("http://127.0.0.1:4000");
   });
 
-  it("accepts only the compatible protocol version", () => {
+  it("accepts version 1 peers and version 2 as compatible for the extension client", () => {
     expect(isProtocolCompatible({ protocolVersion: 1 })).toBe(true);
-    expect(isProtocolCompatible({ protocolVersion: 2 })).toBe(false);
+    expect(isProtocolCompatible({ protocolVersion: 2 })).toBe(true);
     expect(isProtocolCompatible({ protocolVersion: "1" })).toBe(false);
+    expect(isProtocolCompatible({ protocolVersion: "2" })).toBe(false);
     expect(isProtocolCompatible({})).toBe(false);
   });
 });
 
 describe("capture API requests", () => {
-  it("sends a JSON POST with accept, bearer, and an omitted cookie jar", async () => {
+  it("sends request bodies carrying protocolVersion 2", async () => {
     const { fetchImpl, calls } = captureFetch(jsonResponse({ accepted: 1 }));
-    const body = { protocolVersion: 1, intent: "prefill", items: [] };
+    const body = { protocolVersion: 2, intent: "prefill", items: [] };
 
     const result = await requestJson<{ accepted: number }>({
       origin: apiOrigin(),
@@ -67,6 +70,7 @@ describe("capture API requests", () => {
     expect(init?.method).toBe("POST");
     expect(init?.credentials).toBe("omit");
     expect(init?.body).toBe(JSON.stringify(body));
+    expect(JSON.parse(String(init?.body))).toMatchObject({ protocolVersion: 2 });
     expect(headers.get("content-type")).toBe("application/json");
     expect(headers.get("accept")).toBe("application/json");
     expect(headers.get("authorization")).toBe("Bearer abc123");
@@ -147,7 +151,7 @@ describe("capture API requests", () => {
       origin: apiOrigin(),
       path: "/capture",
       method: "POST",
-      body: {},
+      body: { protocolVersion: 2 },
       fetchImpl,
     });
 
@@ -165,7 +169,7 @@ describe("capture API requests", () => {
       origin: apiOrigin(),
       path: "/capture",
       method: "POST",
-      body: {},
+      body: { protocolVersion: 2 },
       fetchImpl,
     });
 
@@ -176,7 +180,7 @@ describe("capture API requests", () => {
     }
   });
 
-  it("propagates a protocol mismatch from a 409 response", async () => {
+  it("yields a typed protocol-mismatch result with update-required guidance for a version-1-only peer", async () => {
     const { fetchImpl } = captureFetch(
       jsonResponse({ code: "PROTOCOL_MISMATCH", message: "update OneGet" }, 409),
     );
@@ -185,14 +189,20 @@ describe("capture API requests", () => {
       origin: apiOrigin(),
       path: "/capture",
       method: "POST",
-      body: { protocolVersion: 2 },
+      body: { protocolVersion: 2, intent: "prefill", items: [] },
       fetchImpl,
     });
 
     expect(result.ok).toBe(false);
+    expect(isProtocolMismatchResult(result)).toBe(true);
     if (!result.ok) {
       expect(result.status).toBe(409);
       expect(result.error.code).toBe("PROTOCOL_MISMATCH");
     }
+    expect(protocolMismatchGuidance(result)).toEqual({
+      reason: "update_required",
+      messageKey: "popup.updateRequired",
+      code: "PROTOCOL_MISMATCH",
+    });
   });
 });

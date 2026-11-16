@@ -49,6 +49,17 @@ interface PopupState {
 
 interface RuntimeResult {
   ok?: boolean;
+  error?: { code?: string };
+}
+
+export interface SendCookiesToggleView {
+  checked: boolean;
+  label: string;
+}
+
+export interface PairingUpdateGuidanceView {
+  visible: boolean;
+  message: string;
 }
 
 export function languageFromNavigator(
@@ -112,6 +123,33 @@ export function pairingView(paired: boolean, language: ExtensionLanguage): Pairi
       ? translateExtension(language, "popup.pairedWith", { name: "OneGet" })
       : translateExtension(language, "popup.unpaired"),
     action: translateExtension(language, paired ? "popup.unpair" : "popup.pair"),
+  };
+}
+
+export function sendCookiesToggleView(
+  value: unknown,
+  language: ExtensionLanguage,
+): SendCookiesToggleView {
+  return {
+    checked: value === true,
+    label: translateExtension(language, "popup.sendCookiesWithCapture"),
+  };
+}
+
+export function collectSendCookiesSetting(input: {
+  checked?: unknown;
+}): boolean {
+  return input.checked === true;
+}
+
+export function pairingUpdateGuidanceView(
+  code: string | null | undefined,
+  language: ExtensionLanguage,
+): PairingUpdateGuidanceView {
+  const visible = code === "PROTOCOL_MISMATCH";
+  return {
+    visible,
+    message: visible ? translateExtension(language, "popup.updateRequired") : "",
   };
 }
 
@@ -343,10 +381,31 @@ function renderSettings(settings: ExtensionSettings): void {
   if (blacklist !== null) {
     blacklist.value = settings.blacklistHosts.join("\n");
   }
+  const sendCookies = byId<HTMLInputElement>("send-cookies");
+  if (sendCookies !== null) {
+    sendCookies.checked = settings.sendCookies === true;
+  }
+}
+
+function renderPairingGuidance(
+  language: ExtensionLanguage,
+  code: string | null | undefined,
+): void {
+  const guidance = pairingUpdateGuidanceView(code, language);
+  const element = byId("pairing-update-required");
+  if (element === null) {
+    return;
+  }
+  element.textContent = guidance.message;
+  element.hidden = !guidance.visible;
 }
 
 function renderState(language: ExtensionLanguage, state: PopupState): void {
   renderTakeoverError(language, state.takeoverError);
+  renderPairingGuidance(
+    language,
+    state.takeoverError?.reason === "update_required" ? "PROTOCOL_MISMATCH" : undefined,
+  );
   renderResources(language, state.resources);
   renderPairing(language, state.paired);
   renderSettings(state.settings);
@@ -380,6 +439,7 @@ function collectSettings(): {
 } {
   let valid = true;
   const takeover = byId<HTMLInputElement>("takeover-enabled");
+  const sendCookies = byId<HTMLInputElement>("send-cookies");
   const minimum = byId<HTMLInputElement>("minimum-size");
   const blacklist = byId<HTMLTextAreaElement>("blacklist");
 
@@ -404,6 +464,7 @@ function collectSettings(): {
     categories,
     minimumSizeBytes: Number.isFinite(parsedMinimum) && parsedMinimum >= 0 ? parsedMinimum : 0,
     blacklistHosts: hosts,
+    sendCookies: collectSendCookiesSetting({ checked: sendCookies?.checked }),
   });
   return { settings, valid };
 }
@@ -426,6 +487,7 @@ function wireEvents(language: ExtensionLanguage): void {
           }
           await loadState(language);
         } else {
+          renderPairingGuidance(language, result?.error?.code);
           showNotice(translateExtension(language, "popup.pairingFailed"));
         }
       })();
