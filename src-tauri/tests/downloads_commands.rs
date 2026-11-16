@@ -207,6 +207,7 @@ fn add_download(url: String, filename: &str, connections: u32) -> AddDownload {
         expected_sha256: None,
         allow_html: false,
         extra_headers: Vec::new(),
+        cookies_file: None,
     }
 }
 
@@ -220,6 +221,7 @@ fn add_request(url: String, filename: &str, connections: u32) -> AddDownloadRequ
         expected_sha256: None,
         allow_html: false,
         extra_headers: Vec::new(),
+        cookies_file: None,
         cookie_handle: None,
     }
 }

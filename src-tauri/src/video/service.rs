@@ -176,7 +176,19 @@ impl VideoService {
 
     /// Persist one video task and return its identifier.
     pub fn add(&self, request: StartVideoRequest) -> Result<String, VideoError> {
-        self.call(move |reply| Command::Add(request, reply), expect_id)
+        self.add_with_connections(request, None)
+    }
+
+    /// Persist one video task with its requested connection count.
+    pub fn add_with_connections(
+        &self,
+        request: StartVideoRequest,
+        connections: Option<u32>,
+    ) -> Result<String, VideoError> {
+        self.call(
+            move |reply| Command::Add(request, connections, reply),
+            expect_id,
+        )
     }
 
     /// Pause a running, queued, or already-paused video task.
@@ -277,7 +289,7 @@ impl VideoRuntime {
 }
 
 enum Command {
-    Add(StartVideoRequest, ReplySender),
+    Add(StartVideoRequest, Option<u32>, ReplySender),
     Probe(String, Option<PathBuf>, Option<String>, ReplySender),
     Pause(String, ReplySender),
     Resume(String, ReplySender),
@@ -491,8 +503,8 @@ async fn handle_active_command(
 
 fn handle_idle_command(runtime: &Rc<VideoRuntime>, command: Command, want_run: &mut bool) -> bool {
     match command {
-        Command::Add(request, reply) => {
-            let result = add_request(runtime, request);
+        Command::Add(request, connections, reply) => {
+            let result = add_request(runtime, request, connections);
             if result.is_ok() {
                 *want_run = true;
             }
@@ -583,6 +595,7 @@ async fn settle_interrupted(
 fn add_request(
     runtime: &Rc<VideoRuntime>,
     request: StartVideoRequest,
+    connections: Option<u32>,
 ) -> Result<String, VideoError> {
     validate_per_video_proxy(request.proxy_url.as_deref())?;
 
@@ -639,6 +652,13 @@ fn add_request(
     if let Err(error) = runtime.config.store.patch_video_json(&id, &patch) {
         let _ = runtime.config.store.delete_task(&id);
         return Err(store_error(error));
+    }
+
+    if let Some(connections) = connections {
+        if let Err(error) = runtime.config.store.record_connections(&id, connections) {
+            let _ = runtime.config.store.delete_task(&id);
+            return Err(store_error(error));
+        }
     }
 
     runtime

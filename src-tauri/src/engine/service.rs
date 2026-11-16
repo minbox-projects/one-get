@@ -54,6 +54,8 @@ pub struct AddDownload {
     pub allow_html: bool,
     /// Additional request headers.
     pub extra_headers: Vec<(String, String)>,
+    /// Optional per-task Netscape cookies file.
+    pub cookies_file: Option<PathBuf>,
 }
 
 /// A probe request accepted by the engine service.
@@ -573,6 +575,7 @@ fn add_request(
         expected_sha256,
         allow_html,
         extra_headers,
+        cookies_file,
     } = request;
 
     let url = http::validate_url(&url)?;
@@ -584,6 +587,7 @@ fn add_request(
         ));
     }
 
+    let source = resolve_cookie_source(source, cookies_file);
     let spec = DownloadSpec {
         url,
         filename,
@@ -601,6 +605,23 @@ fn add_request(
         engine.set_task_rate_limit(&id, rate_limit);
     }
     Ok(id)
+}
+
+/// Pick the one cookie source for a new task without merging sources.
+///
+/// A caller-supplied file source wins, then a request-level cookies file, then
+/// a caller-supplied browser source, then no cookies.
+fn resolve_cookie_source(
+    source: Option<CookieSource>,
+    cookies_file: Option<PathBuf>,
+) -> Option<CookieSource> {
+    match source {
+        Some(source @ CookieSource::File(_)) => Some(source),
+        other => match cookies_file {
+            Some(path) => Some(CookieSource::File(path)),
+            None => other,
+        },
+    }
 }
 
 async fn probe_request(client: Client, request: ProbeRequest) -> Result<ProbeOutcome, EngineError> {

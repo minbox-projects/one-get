@@ -1786,6 +1786,7 @@ async fn engine_service_hf_task_resumes_after_restart_with_re_resolve_and_preser
                 expected_sha256: None,
                 allow_html: false,
                 extra_headers: Vec::new(),
+                cookies_file: None,
             })
             .expect("add hf task");
 

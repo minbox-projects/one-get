@@ -37,6 +37,9 @@ pub struct AddDownloadRequest {
     pub allow_html: bool,
     /// Additional request headers.
     pub extra_headers: Vec<(String, String)>,
+    /// Optional per-task Netscape cookies file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookies_file: Option<PathBuf>,
     /// Opaque handle for memory-only cookies captured with a prefill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cookie_handle: Option<String>,
@@ -352,6 +355,7 @@ pub fn downloads_add(state: &AppState, request: AddDownloadRequest) -> Result<St
         expected_sha256: request.expected_sha256,
         allow_html: request.allow_html,
         extra_headers: request.extra_headers,
+        cookies_file: request.cookies_file,
     };
     match source {
         Some(source) => engine.add_with_cookies(download, source),

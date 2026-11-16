@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
 import { Button } from "../../components/ui/Button";
@@ -8,17 +8,17 @@ import { Input } from "../../components/ui/Input";
 import { useI18n } from "../../i18n";
 import { pickDirectory } from "../../lib/dialog";
 import { addDownload } from "../../lib/downloads";
-import { probeVideo } from "../../lib/video";
-import type { AppError } from "../../types/app";
+import { probeVideo, startVideoDownload } from "../../lib/video";
+import type { AppError, VideoQualityPreference } from "../../types/app";
 import type { HeaderPair, ProbeResult } from "../../types/downloads";
-import type { VideoProbeResult } from "../../types/video";
+import type { VideoChoice, VideoProbeResult } from "../../types/video";
 import { MissingComponentAction } from "../kernel/MissingComponentAction";
 import { VideoQualityDialog } from "../video/VideoQualityDialog";
 
 import { errorMessageKey, requiresComponentInstall } from "./errorMessages";
 import type { DownloadFormErrors } from "./downloadValidation";
 import { validateDownloadForm, validateUrl } from "./downloadValidation";
-import { useProbe } from "./useProbe";
+import { useLoadedSettings, useProbe } from "./useProbe";
 
 export interface DownloadDefaults {
   destination: string;
@@ -47,6 +47,22 @@ function suggestedVideoFilename(title: string, fallback: string): string {
     .trim()
     .slice(0, 120);
   return `${stem.length > 0 ? stem : fallback}.mp4`;
+}
+
+/**
+ * Picks the preferred video choice from an ordered probe result. The highest
+ * preference uses the first choice, while the MP4 preference uses the first
+ * MP4-compatible choice and falls back to the highest available one.
+ */
+function preferredVideoChoice(
+  probe: VideoProbeResult,
+  preference: VideoQualityPreference | undefined,
+): VideoChoice | null {
+  const highest = probe.video[0] ?? null;
+  if (preference !== "highest") {
+    return probe.video.find((choice) => choice.mp4Compatible) ?? highest;
+  }
+  return highest;
 }
 
 export interface HeaderEditorProps {
@@ -135,6 +151,8 @@ export function NewDownloadDialog({
 }: NewDownloadDialogProps) {
   const { t, formatBytes } = useI18n();
   const { state: probeState, probe, reset: resetProbe } = useProbe();
+  const { settings: dialogSettings, loadSettings } = useLoadedSettings();
+  const parsingVideoRef = useRef(false);
 
   const defaultDestination = defaults?.destination ?? "";
   const defaultConnections = defaults?.connections ?? 8;
@@ -153,10 +171,26 @@ export function NewDownloadDialog({
   const connections = connectionsOverride ?? String(defaultConnections);
   const [rateLimit, setRateLimit] = useState("");
   const [expectedSha256, setExpectedSha256] = useState("");
-  const [headers, setHeaders] = useState<HeaderPair[]>(
+  const [headerEntries, setHeaderEntries] = useState<HeaderPair[]>(
     () => prefill?.headers ?? [],
   );
-  const [cookiesFile, setCookiesFile] = useState("");
+  const [headersTouched, setHeadersTouched] = useState(false);
+  const headers = useMemo(() => {
+    const agent = dialogSettings?.userAgent?.trim() ?? "";
+    if (
+      headersTouched ||
+      agent.length === 0 ||
+      headerEntries.some(
+        ([name]) => name.trim().toLowerCase() === "user-agent",
+      )
+    ) {
+      return headerEntries;
+    }
+    return [...headerEntries, ["User-Agent", agent] as HeaderPair];
+  }, [dialogSettings, headerEntries, headersTouched]);
+  const [cookiesOverride, setCookiesOverride] = useState<string | null>(null);
+  const cookiesFile =
+    cookiesOverride ?? (dialogSettings?.defaultCookiesFile?.trim() ?? "");
   const [proxyUrl, setProxyUrl] = useState("");
   const [parsingVideo, setParsingVideo] = useState(false);
   const [videoProbe, setVideoProbe] = useState<VideoProbeResult | null>(null);
@@ -204,6 +238,10 @@ export function NewDownloadDialog({
   };
 
   const handleParseVideo = async () => {
+    if (parsingVideoRef.current) {
+      return;
+    }
+
     setVideoError(null);
     const urlError = validateUrl(url);
     if (urlError !== null) {
@@ -212,19 +250,67 @@ export function NewDownloadDialog({
     }
 
     setErrors((current) => ({ ...current, url: undefined }));
+    parsingVideoRef.current = true;
     setParsingVideo(true);
     const result = await probeVideo({
       url: url.trim(),
       cookiesFile: cookiesFile.trim().length === 0 ? null : cookiesFile.trim(),
       proxyUrl: proxyUrl.trim().length === 0 ? null : proxyUrl.trim(),
     });
+
+    if (!result.ok) {
+      parsingVideoRef.current = false;
+      setParsingVideo(false);
+      setVideoError(result.error);
+      return;
+    }
+
+    const settings = dialogSettings ?? (await loadSettings());
+    const alwaysAsk = settings?.alwaysAskQuality ?? true;
+    if (alwaysAsk) {
+      parsingVideoRef.current = false;
+      setParsingVideo(false);
+      setVideoProbe(result.data);
+      return;
+    }
+
+    const choice = preferredVideoChoice(
+      result.data,
+      settings?.videoQualityPreference,
+    );
+    if (choice === null) {
+      parsingVideoRef.current = false;
+      setParsingVideo(false);
+      setVideoProbe(result.data);
+      return;
+    }
+
+    const started = await startVideoDownload({
+      url: url.trim(),
+      filename: videoFilename,
+      destination: destination.trim(),
+      formatSelector: choice.formatSelector,
+      audioOnly: false,
+      connections: Number(connections),
+      metadata: {
+        title: result.data.title,
+        durationSecs: result.data.durationSecs,
+        uploader: result.data.uploader,
+        quality: choice.label,
+      },
+      cookiesFile: cookiesFile.trim().length === 0 ? null : cookiesFile.trim(),
+      proxyUrl: proxyUrl.trim().length === 0 ? null : proxyUrl.trim(),
+    });
+    parsingVideoRef.current = false;
     setParsingVideo(false);
 
-    if (result.ok) {
-      setVideoProbe(result.data);
-    } else {
-      setVideoError(result.error);
+    if (!started.ok) {
+      setVideoError(started.error);
+      return;
     }
+
+    onAdded?.();
+    onOpenChange(false);
   };
 
   const openComponents = onOpenComponents ?? (() => undefined);
@@ -282,14 +368,19 @@ export function NewDownloadDialog({
         expectedSha256.trim().length === 0 ? null : expectedSha256.trim(),
       allowHtml,
       extraHeaders: normalizedHeaders,
+      cookiesFile:
+        cookiesFile.trim().length === 0 ? null : cookiesFile.trim(),
     });
     setSubmitting(false);
 
     if (!result.ok) {
+      const key = errorMessageKey(result.error.code);
       setSubmitError(
         result.error.code === "INVALID_DESTINATION"
           ? t("error.INVALID_DESTINATION")
-          : t("download.addFailed"),
+          : key === "error.generic"
+            ? t("download.addFailed")
+            : t(key),
       );
       return;
     }
@@ -342,7 +433,7 @@ export function NewDownloadDialog({
           label={t("download.cookiesFile")}
           value={cookiesFile}
           autoComplete="off"
-          onChange={(event) => setCookiesFile(event.target.value)}
+          onChange={(event) => setCookiesOverride(event.target.value)}
         />
 
         <Input
@@ -492,7 +583,13 @@ export function NewDownloadDialog({
           </>
         ) : null}
 
-        <HeaderEditor headers={headers} onChange={setHeaders} />
+        <HeaderEditor
+          headers={headers}
+          onChange={(next) => {
+            setHeadersTouched(true);
+            setHeaderEntries(next);
+          }}
+        />
 
         {errors.headers ? (
           <p className="og-field__error" role="alert">

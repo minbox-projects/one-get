@@ -351,12 +351,22 @@ impl Engine {
     /// Create a queued task with exactly one memory-only cookie source.
     ///
     /// The source is retained for this process only; a captured browser cookie
-    /// list is never written to the store and so cannot survive a restart.
+    /// list is never written to the store and so cannot survive a restart. A
+    /// file source must be absolute, because a relative path would otherwise be
+    /// resolved against the process working directory.
     pub fn add_task_with_cookies(
         &self,
         spec: DownloadSpec,
         source: CookieSource,
     ) -> Result<String, EngineError> {
+        if let CookieSource::File(path) = &source {
+            if !path.is_absolute() {
+                return Err(EngineError::new(
+                    "INVALID_COOKIES_FILE",
+                    "the cookies file path must be absolute",
+                ));
+            }
+        }
         let id = self.add_task(spec)?;
         self.task_cookie_sources
             .lock()

@@ -113,6 +113,22 @@ const enUS = {
     "The cookies file is missing or cannot be read.",
   "error.INVALID_PROXY_URL":
     "Enter a valid credential-free HTTP proxy URL.",
+  "error.HF_NOT_A_FILE":
+    "This Hugging Face URL does not point to a downloadable file.",
+  "error.HF_AUTH":
+    "The Hugging Face request requires a token. Open Settings > Hugging Face, add an access token, and try again.",
+  "error.HF_SIGNATURE":
+    "The Hugging Face download link could not be verified. Refresh the task and try again.",
+  "error.COOKIE_FILE_ERROR":
+    "The cookies file is missing or cannot be read.",
+  "error.COOKIE_SCOPE":
+    "Some cookies do not match the download host and were not applied.",
+  "error.COOKIE_LIMIT":
+    "Too many cookies were provided for one download. Reduce the cookie scope and try again.",
+  "error.INVALID_COOKIE_HANDLE":
+    "The captured browser cookies are no longer available. Capture the download again.",
+  "error.PROXY_AUTH_REQUIRED":
+    "The proxy requires credentials. Open Settings > Network and set the proxy credentials.",
   "error.COMPONENT_MISSING":
     "A required component is not installed. Install it from Components and try again.",
   "error.COMPONENT_HASH":
@@ -218,6 +234,17 @@ const enUS = {
   "details.connections": "Connections",
   "details.createdAt": "Created",
   "details.completedAt": "Completed",
+  "details.cookies": "Cookies",
+  "details.cookieSource.file": "File",
+  "details.cookieSource.browser": "Browser",
+  "details.huggingface": "Hugging Face",
+  "details.hfRepoId": "Repository",
+  "details.hfFilePath": "File path",
+  "details.hfRevision": "Revision",
+  "details.hfEffectiveConnections": "Effective connections",
+  "details.hfRefreshCount": "Refreshes",
+  "details.hfDowngradedLabel": "Connection mode",
+  "details.hfDowngraded": "Downgraded",
   "details.error": "Error",
   "details.segments": "Segments",
   "details.segment": "Segment {index}",

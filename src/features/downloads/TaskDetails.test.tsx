@@ -114,6 +114,8 @@ interface Handlers {
   onCopyUrl?: Mock<(task: DownloadSummary | string) => void>;
   onClose?: Mock<() => void>;
   onOpenComponents?: Mock<() => void>;
+  onDeleteRecord?: Mock<(task: DownloadSummary) => void>;
+  onDeleteFile?: Mock<(task: DownloadSummary) => void>;
   segmentsLoading?: boolean;
   segmentsError?: { code: string; message: string } | null;
   speed?: number | null;
@@ -133,6 +135,10 @@ function renderDetails(
   const onClose = handlers.onClose ?? vi.fn<() => void>();
   const onOpenComponents =
     handlers.onOpenComponents ?? vi.fn<() => void>();
+  const onDeleteRecord =
+    handlers.onDeleteRecord ?? vi.fn<(task: DownloadSummary) => void>();
+  const onDeleteFile =
+    handlers.onDeleteFile ?? vi.fn<(task: DownloadSummary) => void>();
   const view = render(
     <I18nProvider language="en-US">
       <TaskDetails
@@ -146,10 +152,12 @@ function renderDetails(
         onCopyUrl={onCopyUrl}
         onClose={onClose}
         onOpenComponents={onOpenComponents}
+        onDeleteRecord={onDeleteRecord}
+        onDeleteFile={onDeleteFile}
       />
     </I18nProvider>,
   );
-  return { ...view, onOpenFile, onOpenFolder, onCopyUrl, onClose, onOpenComponents, current };
+  return { ...view, onOpenFile, onOpenFolder, onCopyUrl, onClose, onOpenComponents, onDeleteRecord, onDeleteFile, current };
 }
 
 function expectTextOrValue(value: string): void {
@@ -473,6 +481,232 @@ describe("TaskDetails", () => {
       expect(onOpenComponents).toHaveBeenCalledTimes(1);
       unmount();
     }
+  });
+
+  const NEW_ERROR_CODES = [
+    "HF_NOT_A_FILE",
+    "HF_AUTH",
+    "HF_SIGNATURE",
+    "COOKIE_FILE_ERROR",
+    "COOKIE_SCOPE",
+    "COOKIE_LIMIT",
+    "INVALID_COOKIE_HANDLE",
+    "PROXY_AUTH_REQUIRED",
+    "AUTH_REQUIRED",
+  ] as const;
+
+  it.each(["en-US", "zh-CN"] as const)(
+    "maps the new engine error codes to localized text instead of raw prose in %s",
+    (language) => {
+      const dictionary = dictionaries[language];
+      for (const code of NEW_ERROR_CODES) {
+        expect(dictionary[`error.${code}`], `${language} error.${code}`).toBeTruthy();
+      }
+
+      for (const code of NEW_ERROR_CODES) {
+        const raw = "Raw engine prose that must not be shown to the user.";
+        const { unmount } = render(
+          <I18nProvider language={language}>
+            <TaskDetails
+              task={task(
+                "failed",
+                {
+                  errorCode: code,
+                  errorMessage: raw,
+                },
+              )}
+              segments={[]}
+              segmentsLoading={false}
+              segmentsError={null}
+              speed={null}
+              onOpenFile={vi.fn()}
+              onOpenFolder={vi.fn()}
+              onCopyUrl={vi.fn()}
+              onClose={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+
+        expect(
+          screen.getByText(dictionaries[language][`error.${code}`]),
+        ).toBeInTheDocument();
+        expect(screen.queryByText(raw)).not.toBeInTheDocument();
+        unmount();
+      }
+    },
+  );
+
+  it("shows the cookie source and applicable count without any cookie value", () => {
+    const { unmount } = renderDetails(
+      task(
+        "completed",
+        {
+          errorCode: null,
+          errorMessage: null,
+          cookieSource: "file",
+          cookieCount: 3,
+        } as Partial<DownloadSummary>,
+      ),
+    );
+
+    const matches = screen.queryAllByText(/cookies?/i);
+    expect(matches.length).toBeGreaterThan(0);
+    const row = matches[0].closest(".og-details__row");
+    expect(row).not.toBeNull();
+    expect(row).toHaveTextContent(/file/i);
+    expect(row).toHaveTextContent("3");
+    // The props carry no cookie value, so a source=value pair must never render.
+    expect(row?.textContent ?? "").not.toMatch(/=/);
+    unmount();
+
+    const browser = renderDetails(
+      task(
+        "completed",
+        {
+          errorCode: null,
+          errorMessage: null,
+          cookieSource: "browser",
+          cookieCount: 12,
+        } as Partial<DownloadSummary>,
+      ),
+    );
+    const browserMatches = screen.queryAllByText(/cookies?/i);
+    expect(browserMatches.length).toBeGreaterThan(0);
+    const browserRow = browserMatches[0].closest(".og-details__row");
+    expect(browserRow).not.toBeNull();
+    expect(browserRow).toHaveTextContent(/browser/i);
+    expect(browserRow).toHaveTextContent("12");
+    expect(browserRow?.textContent ?? "").not.toMatch(/=/);
+    browser.unmount();
+  });
+
+  it("renders no cookies row when a task has no cookie source", () => {
+    renderDetails(
+      task(
+        "completed",
+        {
+          errorCode: null,
+          errorMessage: null,
+          cookieSource: null,
+        } as Partial<DownloadSummary>,
+      ),
+    );
+
+    expect(screen.queryByText(/cookies?/i)).toBeNull();
+    expect(
+      screen.getByText(en["details.connections"]),
+    ).toBeInTheDocument();
+  });
+
+  function huggingface(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      repoId: "org/model-name",
+      filePath: "weights/model-00001-of-00002.safetensors",
+      revision: "abc1234def5678",
+      effectiveConnections: 4,
+      refreshCount: 2,
+      downgraded: true,
+      ...overrides,
+    };
+  }
+
+  function huggingfaceBlock(): HTMLElement {
+    const anchor = screen.getByText("org/model-name");
+    const block = anchor.closest("section") ?? anchor.closest("dl");
+    if (!block) {
+      throw new Error("The HuggingFace section was not found.");
+    }
+    return block;
+  }
+
+  it("shows the HuggingFace repository, file, revision, effective connections, refresh count and downgrade marker", () => {
+    renderDetails(
+      task(
+        "downloading",
+        {
+          errorCode: null,
+          errorMessage: null,
+          completedAtMs: null,
+          huggingface: huggingface(),
+        } as Partial<DownloadSummary>,
+      ),
+    );
+
+    expect(screen.getByText("org/model-name")).toBeInTheDocument();
+    expect(document.body).toHaveTextContent(
+      "weights/model-00001-of-00002.safetensors",
+    );
+    expect(document.body).toHaveTextContent("abc1234def5678");
+
+    const block = huggingfaceBlock();
+    expect(block).toHaveTextContent(/\b4\b/);
+    expect(block).toHaveTextContent(/\b2\b/);
+    expect(block.textContent ?? "").toMatch(/downgrad/i);
+  });
+
+  it("renders no HuggingFace section for a task without HuggingFace metadata", () => {
+    const { unmount } = renderDetails(
+      task(
+        "completed",
+        {
+          errorCode: null,
+          errorMessage: null,
+          huggingface: null,
+        } as Partial<DownloadSummary>,
+      ),
+    );
+
+    expect(screen.queryByText("org/model-name")).toBeNull();
+    expect(document.body.textContent ?? "").not.toMatch(/downgrad/i);
+    expect(
+      screen.getByText(en["details.connections"]),
+    ).toBeInTheDocument();
+    unmount();
+
+    const withoutField = renderDetails(
+      task(
+        "completed",
+        {
+          errorCode: null,
+          errorMessage: null,
+        },
+      ),
+    );
+    expect(screen.queryByText("org/model-name")).toBeNull();
+    expect(
+      screen.getByText(en["details.connections"]),
+    ).toBeInTheDocument();
+    withoutField.unmount();
+  });
+
+  it("keeps the delete actions wired to their callbacks", async () => {
+    const user = userEvent.setup();
+    const onDeleteRecord = vi.fn<(task: DownloadSummary) => void>();
+    const onDeleteFile = vi.fn<(task: DownloadSummary) => void>();
+    const { current } = renderDetails(
+      task(
+        "completed",
+        {
+          errorCode: null,
+          errorMessage: null,
+        },
+      ),
+      { onDeleteRecord, onDeleteFile },
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: en["delete.recordConfirm"] }),
+    );
+    expect(onDeleteRecord).toHaveBeenCalledTimes(1);
+    expect(onDeleteRecord.mock.calls[0][0]).toBe(current);
+
+    await user.click(
+      screen.getByRole("button", { name: en["delete.fileConfirm"] }),
+    );
+    expect(onDeleteFile).toHaveBeenCalledTimes(1);
+    expect(onDeleteFile.mock.calls[0][0]).toBe(current);
   });
 
   it("http_details_remain_unchanged", () => {

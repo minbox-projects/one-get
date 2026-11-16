@@ -5,11 +5,53 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { dictionaries, I18nProvider } from "../../i18n";
 import type { AddDownloadRequest } from "../../types/downloads";
 
-const { addDownload } = vi.hoisted(() => ({ addDownload: vi.fn() }));
+const { addDownload, invokeCommand } = vi.hoisted(() => ({
+  addDownload: vi.fn(),
+  invokeCommand: vi.fn(),
+}));
 
 vi.mock("../../lib/downloads", () => ({ addDownload }));
+vi.mock("../../lib/tauri", () => ({
+  invokeCommand,
+  isTauriRuntime: () => true,
+}));
 
 import { BatchDownloadDialog, parseBatchUrls } from "./BatchDownloadDialog";
+
+type SettingsOverrides = Partial<Record<string, unknown>>;
+
+/** Routes the settings commands to a deterministic document; anything else is an error. */
+function mockSettings(overrides: SettingsOverrides = {}) {
+  invokeCommand.mockImplementation(async (command: string) => {
+    if (command === "settings_get") {
+      return {
+        ok: true as const,
+        data: {
+          schemaVersion: 2,
+          language: "en-US",
+          theme: "system",
+          closeBehavior: "tray",
+          defaultDirectory: null,
+          defaultConnections: 8,
+          maxConcurrentTasks: 3,
+          globalRateLimit: null,
+          logLevel: "info",
+          ...overrides,
+        },
+      };
+    }
+    if (command === "settings_status") {
+      return {
+        ok: true as const,
+        data: { readOnly: false, recovered: false },
+      };
+    }
+    return {
+      ok: false as const,
+      error: { code: "unexpected_command", message: command },
+    };
+  });
+}
 
 const en = dictionaries["en-US"];
 const zh = dictionaries["zh-CN"];
@@ -123,6 +165,8 @@ describe("parseBatchUrls", () => {
 describe("BatchDownloadDialog", () => {
   beforeEach(() => {
     addDownload.mockReset();
+    invokeCommand.mockReset();
+    mockSettings();
     addDownload.mockResolvedValue({ ok: true, data: "task-batch" });
   });
 
@@ -268,5 +312,84 @@ describe("BatchDownloadDialog", () => {
     for (const request of requests) {
       expect(request.extraHeaders).toEqual([]);
     }
+  });
+
+  it("prefills the global cookies file from settings, stays editable, and applies to added tasks", async () => {
+    const user = userEvent.setup();
+    mockSettings({ defaultCookiesFile: "/tmp/settings-cookies.txt" });
+
+    render(
+      <I18nProvider language="en-US">
+        <BatchDownloadDialog
+          open
+          onOpenChange={() => undefined}
+          defaults={{ destination: "/tmp/batch", connections: 6 }}
+        />
+      </I18nProvider>,
+    );
+
+    const container = screen.getByRole("dialog", { name: /batch/i });
+    const cookies = await within(container).findByLabelText(/cookies/i);
+    await waitFor(() => {
+      expect(cookies).toHaveValue("/tmp/settings-cookies.txt");
+    });
+
+    await setField(user, cookies, "/tmp/task-cookies.txt");
+
+    await user.type(
+      within(container).getByLabelText(/urls|one url per line/i),
+      "https://good.test/a.bin\nhttps://good.test/b.bin",
+    );
+    await user.click(submitButton(container));
+
+    await waitFor(() => {
+      expect(addDownload).toHaveBeenCalledTimes(2);
+    });
+
+    const requests = addDownload.mock.calls.map(
+      ([request]) =>
+        request as AddDownloadRequest & { cookiesFile?: string | null },
+    );
+    for (const request of requests) {
+      expect(request.cookiesFile).toBe("/tmp/task-cookies.txt");
+    }
+  });
+
+  it("sends a null cookies file for an added task when the prefilled path was cleared", async () => {
+    const user = userEvent.setup();
+    mockSettings({ defaultCookiesFile: "/tmp/settings-cookies.txt" });
+
+    render(
+      <I18nProvider language="en-US">
+        <BatchDownloadDialog
+          open
+          onOpenChange={() => undefined}
+          defaults={{ destination: "/tmp/batch", connections: 6 }}
+        />
+      </I18nProvider>,
+    );
+
+    const container = screen.getByRole("dialog", { name: /batch/i });
+    const cookies = await within(container).findByLabelText(/cookies/i);
+    await waitFor(() => {
+      expect(cookies).toHaveValue("/tmp/settings-cookies.txt");
+    });
+
+    await setField(user, cookies, "");
+
+    await user.type(
+      within(container).getByLabelText(/urls|one url per line/i),
+      "https://good.test/a.bin",
+    );
+    await user.click(submitButton(container));
+
+    await waitFor(() => {
+      expect(addDownload).toHaveBeenCalledTimes(1);
+    });
+
+    const request = addDownload.mock.calls[0][0] as AddDownloadRequest & {
+      cookiesFile?: string | null;
+    };
+    expect(request.cookiesFile).toBeNull();
   });
 });

@@ -87,6 +87,8 @@ export function TaskDetails({
   const eta = formatEta(remainingSeconds(task, speed));
   const completedAt =
     task.completedAtMs === null ? null : formatDate(task.completedAtMs);
+  const cookieSource = task.cookieSource ?? null;
+  const huggingface = task.huggingface ?? null;
 
   return (
     <div className="og-details__body">
@@ -125,6 +127,14 @@ export function TaskDetails({
         <DetailRow label={t("details.connections")}>
           {formatNumber(task.connections) ?? unknown}{" "}
         </DetailRow>
+        {cookieSource ? (
+          <DetailRow label={t("details.cookies")}>
+            {t(`details.cookieSource.${cookieSource}`)}
+            {task.cookieCount === undefined
+              ? null
+              : ` · ${formatNumber(task.cookieCount) ?? task.cookieCount}`}
+          </DetailRow>
+        ) : null}
         <DetailRow label={t("details.createdAt")}>
           {formatDate(task.createdAtMs) ?? unknown}
         </DetailRow>
@@ -153,6 +163,39 @@ export function TaskDetails({
             <DetailRow label={t("details.finalFile")}>
               {task.filename}
             </DetailRow>
+          </dl>
+        </section>
+      ) : null}
+
+      {huggingface ? (
+        <section
+          className="og-details__huggingface"
+          aria-label={t("details.huggingface")}
+        >
+          <h3 className="og-details__section-title">
+            {t("details.huggingface")}
+          </h3>
+          <dl className="og-details__grid">
+            <DetailRow label={t("details.hfRepoId")}>
+              {huggingface.repoId ?? unknown}
+            </DetailRow>
+            <DetailRow label={t("details.hfFilePath")}>
+              {huggingface.filePath ?? unknown}
+            </DetailRow>
+            <DetailRow label={t("details.hfRevision")}>
+              {huggingface.revision ?? unknown}
+            </DetailRow>
+            <DetailRow label={t("details.hfEffectiveConnections")}>
+              {formatNumber(huggingface.effectiveConnections) ?? unknown}{" "}
+            </DetailRow>
+            <DetailRow label={t("details.hfRefreshCount")}>
+              {formatNumber(huggingface.refreshCount) ?? unknown}{" "}
+            </DetailRow>
+            {huggingface.downgraded ? (
+              <DetailRow label={t("details.hfDowngradedLabel")}>
+                {t("details.hfDowngraded")}
+              </DetailRow>
+            ) : null}
           </dl>
         </section>
       ) : null}

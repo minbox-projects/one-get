@@ -76,6 +76,8 @@ export async function installMockIpc(
         downloadedBytes: 25 * 1024 * 1024,
         totalBytes: 100 * 1024 * 1024,
         connections: 8,
+        cookieSource: "browser",
+        cookieCount: 12,
         createdAtMs: baseTime,
         updatedAtMs: baseTime,
         completedAtMs: null,
@@ -92,6 +94,16 @@ export async function installMockIpc(
         downloadedBytes: 2048,
         totalBytes: 2048,
         connections: 1,
+        cookieSource: "file",
+        cookieCount: 3,
+        huggingface: {
+          repoId: "fixture/model",
+          filePath: "weights/model.bin",
+          revision: "main",
+          effectiveConnections: 4,
+          refreshCount: 0,
+          downgraded: false,
+        },
         createdAtMs: baseTime + 100_000,
         updatedAtMs: baseTime + 200_000,
         completedAtMs: baseTime + 200_000,
@@ -199,6 +211,12 @@ export async function installMockIpc(
       maxConcurrentTasks: 3,
       globalRateLimit: null,
       logLevel: "info",
+      proxyMode: "direct",
+      defaultCookiesFile: null,
+      userAgent: null,
+      hfConnectionCap: 8,
+      alwaysAskQuality: true,
+      videoQualityPreference: "mp4Compatible",
       ...config.settings,
     };
 
@@ -328,6 +346,18 @@ export async function installMockIpc(
           return { ...state.settings };
         case "settings_status":
           return { ...state.status };
+        case "hf_token_status":
+          return { configured: false };
+        case "hf_token_save":
+          return { configured: true };
+        case "hf_token_clear":
+          return { configured: false };
+        case "proxy_credentials_status":
+          return { configured: false };
+        case "proxy_credentials_save":
+          return { configured: true };
+        case "proxy_credentials_clear":
+          return { configured: false };
         case "pairing_take_pending_prefill":
           return state.pendingPrefills.shift() ?? null;
         case "pairing_status":
@@ -433,7 +463,9 @@ export async function installMockIpc(
           }
           return defaultVideoProbe();
         case "video_start": {
-          const request = args.request as VideoStartRequest | undefined;
+          const request = args.request as
+            | (VideoStartRequest & { connections?: number })
+            | undefined;
           if (request === undefined) {
             throw { code: "invalid_argument", message: "Missing video request." };
           }
@@ -456,7 +488,7 @@ export async function installMockIpc(
             state: "downloading",
             downloadedBytes: 0,
             totalBytes: 42 * 1024 * 1024,
-            connections: 1,
+            connections: request.connections ?? 1,
             createdAtMs: baseTime + 1_000_000 + state.counter,
             updatedAtMs: baseTime + 1_000_000 + state.counter,
             completedAtMs: null,
@@ -472,10 +504,12 @@ export async function installMockIpc(
                 filename?: string;
                 destination?: string | null;
                 connections?: number;
+                cookiesFile?: string | null;
               }
             | undefined;
           state.counter += 1;
           const id = `task-added-${state.counter}`;
+          const cookiesFile = request?.cookiesFile ?? null;
           state.tasks.push({
             id,
             kind: "http",
@@ -486,6 +520,8 @@ export async function installMockIpc(
             downloadedBytes: 0,
             totalBytes: 5 * 1024 * 1024,
             connections: request?.connections ?? 8,
+            cookieSource: cookiesFile === null ? null : "file",
+            cookieCount: cookiesFile === null ? 0 : 1,
             createdAtMs: baseTime + 1_000_000 + state.counter,
             updatedAtMs: baseTime + 1_000_000 + state.counter,
             completedAtMs: null,

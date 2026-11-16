@@ -3522,6 +3522,7 @@ fn add_request(url: String, filename: &str) -> AddDownload {
         expected_sha256: None,
         allow_html: false,
         extra_headers: Vec::new(),
+        cookies_file: None,
     }
 }
 
@@ -3847,4 +3848,104 @@ async fn captured_cookie_task_after_restart_sends_no_browser_cookies_and_fails_a
     assert!(!dump.contains(browser_secret));
     assert!(!logs.contains(browser_secret));
     assert!(!summary_json.contains(browser_secret));
+}
+
+#[tokio::test]
+async fn request_level_absolute_cookies_file_is_used_by_the_task() {
+    let body = non_periodic_bytes(128 * 1024);
+    let fixture = RangeServer::start(FixtureConfig {
+        body,
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+    let cookie_dir = tempdir().expect("cookies");
+    let cookie_name = "request_cookie";
+    let cookie_secret = "request-cookie-value";
+    let cookie_path = write_cookie_file(
+        cookie_dir.path(),
+        &[NetscapeCookie {
+            domain: "127.0.0.1".to_string(),
+            include_subdomains: false,
+            path: "/".to_string(),
+            secure: false,
+            expires: future_expiry(),
+            name: cookie_name.to_string(),
+            value: cookie_secret.to_string(),
+        }],
+    );
+
+    let service = EngineService::start(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    )
+    .expect("start service");
+
+    let mut request = add_request(
+        fixture.url("/cookies/request-level.bin"),
+        "request-level.bin",
+    );
+    request.cookies_file = Some(cookie_path);
+
+    let id = service
+        .add(request)
+        .expect("add task with request-level cookies file");
+    let state = wait_service_terminal(&service, &id, WAIT_TIMEOUT).await;
+    assert_eq!(state, TaskState::Completed);
+
+    let requests = fixture.requests();
+    assert!(!requests.is_empty(), "fixture must receive requests");
+    for request in &requests {
+        let names = cookie_names(&request.headers);
+        assert!(
+            names.contains(cookie_name),
+            "request-level cookies file must be sent, got {names:?}"
+        );
+        assert_eq!(
+            cookie_value(&request.headers, cookie_name).as_deref(),
+            Some(cookie_secret)
+        );
+    }
+}
+
+#[tokio::test]
+async fn request_level_relative_cookies_file_is_rejected_before_task_creation() {
+    let body = non_periodic_bytes(64 * 1024);
+    let fixture = RangeServer::start(FixtureConfig {
+        body,
+        range_mode: RangeMode::HonorRange,
+        ..Default::default()
+    });
+    let dest = tempdir().expect("dest");
+    let store_dir = tempdir().expect("store");
+
+    let service = EngineService::start(
+        open_store(&store_dir),
+        dest.path().to_path_buf(),
+        EngineOptions { max_concurrent: 1 },
+    )
+    .expect("start service");
+
+    let mut request = add_request(
+        fixture.url("/cookies/relative-rejected.bin"),
+        "relative-rejected.bin",
+    );
+    request.cookies_file = Some(PathBuf::from("relative/cookies.txt"));
+
+    let error = service
+        .add(request)
+        .expect_err("relative cookies file must be rejected");
+    assert_eq!(error.code(), "INVALID_COOKIES_FILE");
+
+    let tasks = service.list().expect("list tasks");
+    assert!(
+        tasks.is_empty(),
+        "no task may be created for a rejected cookies file path"
+    );
+    assert!(
+        fixture.requests().is_empty(),
+        "a rejected cookies file path must not produce any request"
+    );
 }

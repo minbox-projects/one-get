@@ -22,6 +22,7 @@ import {
 } from "./downloadValidation";
 import type { DownloadDefaults } from "./NewDownloadDialog";
 import { HeaderEditor } from "./NewDownloadDialog";
+import { useLoadedSettings } from "./useProbe";
 
 export interface BatchEntry {
   line: number;
@@ -113,6 +114,7 @@ export function BatchDownloadDialog({
 }: BatchDownloadDialogProps) {
   const { t } = useI18n();
   const textareaId = useId();
+  const { settings: dialogSettings } = useLoadedSettings();
 
   const defaultDestination = defaults?.destination ?? "";
   const defaultConnections = defaults?.connections ?? 8;
@@ -121,6 +123,9 @@ export function BatchDownloadDialog({
   const [destination, setDestination] = useState(defaultDestination);
   const [connections, setConnections] = useState(String(defaultConnections));
   const [rateLimit, setRateLimit] = useState("");
+  const [cookiesOverride, setCookiesOverride] = useState<string | null>(null);
+  const cookiesFile =
+    cookiesOverride ?? (dialogSettings?.defaultCookiesFile?.trim() ?? "");
   const [headers, setHeaders] = useState<HeaderPair[]>([]);
   const [errors, setErrors] = useState<DownloadFormErrors>({});
   const [parsed, setParsed] = useState<BatchParseResult | null>(null);
@@ -193,6 +198,8 @@ export function BatchDownloadDialog({
         expectedSha256: null,
         allowHtml: false,
         extraHeaders: normalizedHeaders,
+        cookiesFile:
+          cookiesFile.trim().length === 0 ? null : cookiesFile.trim(),
       });
       if (added.ok) {
         accepted += 1;
@@ -282,6 +289,13 @@ export function BatchDownloadDialog({
             errors.rateLimit ? t(`validation.${errors.rateLimit}`) : undefined
           }
           onChange={(event) => setRateLimit(event.target.value)}
+        />
+
+        <Input
+          label={t("download.cookiesFile")}
+          value={cookiesFile}
+          autoComplete="off"
+          onChange={(event) => setCookiesOverride(event.target.value)}
         />
 
         <HeaderEditor headers={headers} onChange={setHeaders} />

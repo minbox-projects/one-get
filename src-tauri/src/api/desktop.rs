@@ -102,6 +102,7 @@ impl DesktopBridge for TauriDesktopBridge {
             expected_sha256: None,
             allow_html: false,
             extra_headers,
+            cookies_file: None,
         };
         let result = if item.cookies.is_empty() {
             engine.add(request)

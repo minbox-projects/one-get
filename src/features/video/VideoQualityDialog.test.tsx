@@ -246,6 +246,17 @@ describe("VideoQualityDialog", () => {
     invalidDestination.unmount();
   });
 
+  it("quality_dialog_stays_unmounted_and_starts_nothing_when_closed", () => {
+    const view = renderDialog({ open: false });
+
+    expect(
+      screen.queryByRole("dialog", { name: /video quality/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Sample Video Title")).not.toBeInTheDocument();
+    expect(startVideoDownload).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
   it("quality_dialog_missing_component_shows_install_entry", async () => {
     const user = userEvent.setup();
 
