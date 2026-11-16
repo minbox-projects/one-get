@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 
+import { OneGetMark } from "../components/OneGetMark";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
@@ -647,7 +648,10 @@ export function AppShell() {
   return (
     <main className="og-app">
       <header className="og-app__header">
-        <h1 className="og-app__title">{t("app.title")}</h1>
+        <h1 className="og-app__title">
+          <OneGetMark className="og-app__mark" />
+          <span>{t("app.title")}</span>
+        </h1>
       </header>
 
       <div className="og-app__body">
