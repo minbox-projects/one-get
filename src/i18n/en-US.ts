@@ -170,6 +170,19 @@ const enUS = {
   "validation.filename_reserved": "That filename is reserved by Windows.",
   "validation.destination_required": "Choose a destination folder.",
   "validation.connections_range": "Connections must be a whole number from 1 to 64.",
+  "validation.proxy_host_required": "Enter a proxy host for manual mode.",
+  "validation.proxy_port_range":
+    "The proxy port must be a whole number from 1 to 65535.",
+  "validation.hf_connection_cap_range":
+    "The Hugging Face connection cap must be a whole number from 1 to 64.",
+  "validation.connect_timeout_range":
+    "The connect timeout must be a whole number from 5 to 120 seconds.",
+  "validation.read_timeout_range":
+    "The read timeout must be a whole number from 5 to 300 seconds.",
+  "validation.retry_attempts_range":
+    "Retry attempts must be a whole number from 1 to 10.",
+  "validation.user_agent_invalid":
+    "Enter a User-Agent without line breaks.",
   "validation.rate_limit_positive": "The rate limit must be a positive whole number or left empty.",
   "validation.rate_limit_range":
     "The rate limit must not exceed 18,446,744,073,709,551,615 bytes per second.",
@@ -271,7 +284,59 @@ const enUS = {
   "settings.logLevel.trace": "Trace",
   "settings.defaultConnections": "Default connections",
   "settings.maxConcurrentTasks": "Maximum concurrent tasks",
-  "settings.globalRateLimit": "Global rate limit (bytes per second)",
+  "settings.globalRateLimit":
+    "Global rate limit for HTTP and Hugging Face (bytes per second)",
+  "settings.network.proxyMode": "Proxy mode",
+  "settings.network.proxyMode.direct": "Direct",
+  "settings.network.proxyMode.system": "System proxy",
+  "settings.network.proxyMode.manual": "Manual",
+  "settings.network.proxyType": "Proxy type",
+  "settings.network.proxyType.http": "HTTP",
+  "settings.network.proxyType.https": "HTTPS",
+  "settings.network.proxyType.socks5": "SOCKS5",
+  "settings.network.proxyHost": "Proxy host",
+  "settings.network.proxyPort": "Proxy port",
+  "settings.network.username": "Username",
+  "settings.network.password": "Password",
+  "settings.network.credentialsConfigured": "Proxy credentials configured",
+  "settings.network.credentialsNotConfigured":
+    "Proxy credentials not configured",
+  "settings.network.credentialsSave": "Set or replace credentials",
+  "settings.network.credentialsReplace": "Replace credentials",
+  "settings.network.credentialsClear": "Clear credentials",
+  "settings.network.credentialsFailed":
+    "The proxy credentials could not be updated. Try again.",
+  "settings.network.defaultCookiesFile": "Default cookies file",
+  "settings.network.rateLimitScope":
+    "Applies only to HTTP and Hugging Face downloads.",
+  "settings.network.connectTimeout": "Connect timeout (seconds)",
+  "settings.network.readTimeout": "Read timeout (seconds)",
+  "settings.network.retryAttempts": "Retry attempts",
+  "settings.network.userAgent": "User-Agent",
+  "settings.network.systemProxyUnavailable":
+    "The system proxy is unavailable, so OneGet connects directly. Choose Direct or Manual to configure a proxy.",
+  "settings.huggingFace": "Hugging Face",
+  "settings.huggingFace.description":
+    "A Hugging Face token lets OneGet download gated and private files. It is stored in the operating system credential store and never shown again.",
+  "settings.huggingFace.token": "Access token",
+  "settings.huggingFace.tokenConfigured": "Token configured",
+  "settings.huggingFace.tokenNotConfigured": "Token not configured",
+  "settings.huggingFace.saveToken": "Set or replace token",
+  "settings.huggingFace.replaceToken": "Replace token",
+  "settings.huggingFace.clearToken": "Clear token",
+  "settings.huggingFace.tokenFailed":
+    "The token could not be updated. Try again.",
+  "settings.huggingFace.connectionCap": "Connection cap",
+  "settings.video": "Video",
+  "settings.video.alwaysAsk": "Always ask quality",
+  "settings.video.qualityPreference": "Preferred quality",
+  "settings.video.qualityPreference.mp4Compatible": "Prefer MP4-compatible",
+  "settings.video.qualityPreference.highest": "Highest quality",
+  "settings.video.note":
+    "When quality asking is off, a parsed video starts with the preferred quality.",
+  "settings.extension": "Extension",
+  "settings.extension.takeoverRules":
+    "Takeover rules live in the browser extension popup. Pair a browser there to let OneGet capture downloads.",
   "settings.capturedAtStart":
     "Concurrency and global rate limits apply to new tasks after you save. Running downloads keep the limits captured when they started.",
   "settings.readOnly":

@@ -6,17 +6,28 @@ import { Dialog } from "../../components/ui/Dialog";
 import { translate, useI18n } from "../../i18n";
 import type { Settings, Theme } from "../../types/app";
 import { ComponentsSection } from "../kernel/ComponentsSection";
-import { PairingSettings } from "../pairing/PairingSettings";
 
 import { DownloadSettings } from "./DownloadSettings";
 import type {
   DownloadSettingsErrors,
   DownloadSettingsValue,
 } from "./DownloadSettings";
+import { ExtensionSettings } from "./ExtensionSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import type { GeneralSettingsValue } from "./GeneralSettings";
-import { NetworkPlaceholder } from "./NetworkPlaceholder";
+import { HuggingFaceSettings } from "./HuggingFaceSettings";
+import type {
+  HuggingFaceSettingsErrors,
+  HuggingFaceSettingsValue,
+} from "./HuggingFaceSettings";
+import { NetworkSettings } from "./NetworkSettings";
+import type {
+  NetworkSettingsErrors,
+  NetworkSettingsValue,
+} from "./NetworkSettings";
 import { useSettings } from "./useSettings";
+import { VideoSettings } from "./VideoSettings";
+import type { VideoSettingsValue } from "./VideoSettings";
 
 export interface SettingsDialogProps {
   open: boolean;
@@ -24,12 +35,23 @@ export interface SettingsDialogProps {
   onSaved?: (settings: Settings) => void;
 }
 
-interface SettingsForm extends GeneralSettingsValue, DownloadSettingsValue {}
+interface SettingsForm
+  extends GeneralSettingsValue,
+    DownloadSettingsValue,
+    NetworkSettingsValue,
+    HuggingFaceSettingsValue,
+    VideoSettingsValue {}
+
+interface SettingsFormErrors
+  extends DownloadSettingsErrors,
+    NetworkSettingsErrors,
+    HuggingFaceSettingsErrors {}
 
 interface SettingsFormPanelProps {
   settings: Settings;
   readOnly: boolean;
   saving: boolean;
+  proxyUnavailableReason?: string | null;
   save: (next: Settings) => Promise<boolean>;
   onOpenChange: (open: boolean) => void;
   onSaved?: (settings: Settings) => void;
@@ -51,6 +73,7 @@ function resolveTheme(theme: Theme): "light" | "dark" {
 
 const MAX_CONNECTIONS = 64n;
 const MAX_U32 = 4_294_967_295n;
+const MAX_PROXY_PORT = 65_535n;
 /** Largest rate limit that survives the IPC boundary without rounding. */
 const MAX_RATE_LIMIT = BigInt(Number.MAX_SAFE_INTEGER);
 
@@ -60,6 +83,11 @@ function wholeNumberInRange(value: string, min: bigint, max?: bigint): boolean {
   }
   const parsed = BigInt(value);
   return parsed >= min && (max === undefined || parsed <= max);
+}
+
+function optionalWholeNumber(value: string): number | null {
+  const trimmed = value.trim();
+  return /^\d+$/.test(trimmed) ? Number(trimmed) : null;
 }
 
 function formFromSettings(settings: Settings): SettingsForm {
@@ -73,13 +101,40 @@ function formFromSettings(settings: Settings): SettingsForm {
     maxConcurrentTasks: String(settings.maxConcurrentTasks),
     globalRateLimit:
       settings.globalRateLimit === null ? "" : String(settings.globalRateLimit),
+    proxyMode: settings.proxyMode ?? "direct",
+    proxyType: settings.proxyType ?? "http",
+    proxyHost: settings.proxyHost ?? "",
+    proxyPort:
+      settings.proxyPort === null || settings.proxyPort === undefined
+        ? ""
+        : String(settings.proxyPort),
+    defaultCookiesFile: settings.defaultCookiesFile ?? "",
+    userAgent: settings.userAgent ?? "",
+    connectTimeoutSecs: String(settings.connectTimeoutSecs ?? 15),
+    readTimeoutSecs: String(settings.readTimeoutSecs ?? 30),
+    retryAttempts: String(settings.retryAttempts ?? 5),
+    hfConnectionCap: String(settings.hfConnectionCap ?? 8),
+    alwaysAskQuality: settings.alwaysAskQuality ?? true,
+    videoQualityPreference:
+      settings.videoQualityPreference ?? "mp4Compatible",
   };
+}
+
+function hasNonLanguageChanges(
+  form: SettingsForm,
+  settings: Settings,
+): boolean {
+  const initial = formFromSettings(settings);
+  return (Object.keys(form) as (keyof SettingsForm)[]).some(
+    (key) => key !== "language" && form[key] !== initial[key],
+  );
 }
 
 function SettingsFormPanel({
   settings,
   readOnly,
   saving,
+  proxyUnavailableReason,
   save,
   onOpenChange,
   onSaved,
@@ -89,10 +144,15 @@ function SettingsFormPanel({
     formFromSettings(settings),
   );
   const saveAlias =
-    form.language !== settings.language && language !== "en-US"
+    form.language !== settings.language &&
+    language !== "en-US" &&
+    hasNonLanguageChanges(form, settings)
       ? translate("en-US", "settings.save")
       : null;
-  const [errors, setErrors] = useState<DownloadSettingsErrors>({});
+  const [errors, setErrors] = useState<SettingsFormErrors>({});
+  const [userAgentTouched, setUserAgentTouched] = useState(false);
+  const userAgentLoaded =
+    settings.userAgent !== null && settings.userAgent !== undefined;
 
   const updateGeneral = (patch: Partial<GeneralSettingsValue>) => {
     setForm((current) => ({ ...current, ...patch }));
@@ -104,8 +164,11 @@ function SettingsFormPanel({
     }
   };
 
-  const updateDownload = (patch: Partial<DownloadSettingsValue>) => {
+  const updateForm = (patch: Partial<SettingsForm>) => {
     setForm((current) => ({ ...current, ...patch }));
+    if (patch.userAgent !== undefined) {
+      setUserAgentTouched(true);
+    }
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -114,10 +177,8 @@ function SettingsFormPanel({
       return;
     }
 
-    const nextErrors: DownloadSettingsErrors = {};
-    if (!/^\d+$/.test(form.defaultConnections.trim())) {
-      nextErrors.defaultConnections = "validation.connections_range";
-    } else if (!wholeNumberInRange(form.defaultConnections, 1n, MAX_CONNECTIONS)) {
+    const nextErrors: SettingsFormErrors = {};
+    if (!wholeNumberInRange(form.defaultConnections.trim(), 1n, MAX_CONNECTIONS)) {
       nextErrors.defaultConnections = "validation.connections_range";
     }
     const maxTasks = form.maxConcurrentTasks.trim();
@@ -134,12 +195,41 @@ function SettingsFormPanel({
         nextErrors.globalRateLimit = "validation.rate_limit_range";
       }
     }
+    const trimmedProxyHost = form.proxyHost.trim();
+    if (form.proxyMode === "manual") {
+      if (trimmedProxyHost.length === 0) {
+        nextErrors.proxyHost = "validation.proxy_host_required";
+      }
+      if (!wholeNumberInRange(form.proxyPort.trim(), 1n, MAX_PROXY_PORT)) {
+        nextErrors.proxyPort = "validation.proxy_port_range";
+      }
+    }
+    if (!wholeNumberInRange(form.hfConnectionCap.trim(), 1n, 64n)) {
+      nextErrors.hfConnectionCap = "validation.hf_connection_cap_range";
+    }
+    if (!wholeNumberInRange(form.connectTimeoutSecs.trim(), 5n, 120n)) {
+      nextErrors.connectTimeoutSecs = "validation.connect_timeout_range";
+    }
+    if (!wholeNumberInRange(form.readTimeoutSecs.trim(), 5n, 300n)) {
+      nextErrors.readTimeoutSecs = "validation.read_timeout_range";
+    }
+    if (!wholeNumberInRange(form.retryAttempts.trim(), 1n, 10n)) {
+      nextErrors.retryAttempts = "validation.retry_attempts_range";
+    }
+    const trimmedUserAgent = form.userAgent.trim();
+    if (
+      (trimmedUserAgent.length === 0 && (userAgentTouched || userAgentLoaded)) ||
+      /[\r\n]/.test(form.userAgent)
+    ) {
+      nextErrors.userAgent = "validation.user_agent_invalid";
+    }
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) {
       return;
     }
 
     const trimmedDirectory = form.defaultDirectory.trim();
+    const trimmedCookies = form.defaultCookiesFile.trim();
     const next: Settings = {
       ...settings,
       schemaVersion: 2,
@@ -151,6 +241,19 @@ function SettingsFormPanel({
       maxConcurrentTasks: Number(form.maxConcurrentTasks),
       globalRateLimit: trimmedRate.length > 0 ? Number(trimmedRate) : null,
       logLevel: form.logLevel,
+      proxyMode: form.proxyMode,
+      proxyType: form.proxyType,
+      proxyHost: trimmedProxyHost.length > 0 ? trimmedProxyHost : null,
+      proxyPort: optionalWholeNumber(form.proxyPort),
+      defaultCookiesFile:
+        trimmedCookies.length > 0 ? trimmedCookies : null,
+      userAgent: trimmedUserAgent.length > 0 ? trimmedUserAgent : null,
+      connectTimeoutSecs: Number(form.connectTimeoutSecs),
+      readTimeoutSecs: Number(form.readTimeoutSecs),
+      retryAttempts: Number(form.retryAttempts),
+      hfConnectionCap: Number(form.hfConnectionCap),
+      alwaysAskQuality: form.alwaysAskQuality,
+      videoQualityPreference: form.videoQualityPreference,
     };
 
     const saved = await save(next);
@@ -166,8 +269,20 @@ function SettingsFormPanel({
   return (
     <form className="og-settings" noValidate onSubmit={handleSubmit}>
       <GeneralSettings value={form} onChange={updateGeneral} />
-      <DownloadSettings value={form} errors={errors} onChange={updateDownload} />
-      <NetworkPlaceholder />
+      <DownloadSettings value={form} errors={errors} onChange={updateForm} />
+      <NetworkSettings
+        value={form}
+        errors={errors}
+        proxyUnavailableReason={proxyUnavailableReason}
+        onChange={updateForm}
+      />
+      <HuggingFaceSettings
+        value={form}
+        errors={errors}
+        onChange={updateForm}
+      />
+      <VideoSettings value={form} onChange={updateForm} />
+      <ExtensionSettings />
       <div className="og-dialog__actions">
         <Button variant="secondary" onClick={() => onOpenChange(false)}>
           {t("common.cancel")}
@@ -228,11 +343,11 @@ export function SettingsDialog({
             settings={settings}
             readOnly={readOnly}
             saving={saving}
+            proxyUnavailableReason={status?.proxyUnavailableReason}
             save={save}
             onOpenChange={onOpenChange}
             onSaved={onSaved}
           />
-          <PairingSettings />
           <ComponentsSection />
         </>
       )}

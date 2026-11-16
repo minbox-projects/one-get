@@ -9,7 +9,11 @@ vi.mock("../../lib/tauri", () => ({ invokeCommand }));
 
 import { useSettings } from "./useSettings";
 
-const status = { readOnly: false, recovered: false };
+const status = {
+  readOnly: false,
+  recovered: false,
+  proxyUnavailableReason: null as string | null,
+};
 
 function settings(overrides: Partial<Settings> = {}): Settings {
   return {
@@ -22,6 +26,18 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     maxConcurrentTasks: 3,
     globalRateLimit: null,
     logLevel: "info",
+    proxyMode: "direct",
+    proxyType: "http",
+    proxyHost: null,
+    proxyPort: null,
+    defaultCookiesFile: null,
+    userAgent: "OneGet-Test/1.0",
+    connectTimeoutSecs: 15,
+    readTimeoutSecs: 30,
+    retryAttempts: 5,
+    hfConnectionCap: 8,
+    alwaysAskQuality: true,
+    videoQualityPreference: "mp4Compatible",
     ...overrides,
   };
 }
@@ -213,5 +229,117 @@ describe("useSettings", () => {
     });
     expect(result.current.settings).toBeNull();
     expect(result.current.error).toEqual(failure);
+  });
+
+  it("loads the system-proxy unavailable reason reported by settings_status", async () => {
+    const value = settings();
+    const withReason = {
+      readOnly: false,
+      recovered: false,
+      proxyUnavailableReason: "SYSTEM_PROXY_PAC_ONLY",
+    };
+    loadSettings(value, withReason);
+
+    const { result } = renderHook(() => useSettings());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    expect(result.current.status).toEqual(withReason);
+    expect(result.current.settings).toEqual(value);
+    expect(result.current.error).toBeNull();
+  });
+
+  it("keeps read-only and recovered state when status fails without crashing", async () => {
+    const failure: AppError = {
+      code: "settings_status_failed",
+      message: "Settings status could not be read.",
+    };
+    invokeCommand.mockImplementation(async (command: string) => {
+      if (command === "settings_get") {
+        return { ok: true as const, data: settings() };
+      }
+      if (command === "settings_status") {
+        return { ok: false as const, error: failure };
+      }
+      return {
+        ok: false as const,
+        error: { code: "unexpected_command", message: command },
+      };
+    });
+
+    const { result } = renderHook(() => useSettings());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    expect(result.current.settings).not.toBeNull();
+    expect(result.current.status).toBeNull();
+  });
+
+  it("returns the backend document from save and keeps live language and theme unchanged", async () => {
+    const initial = settings({ theme: "system", language: "en-US" });
+    const backendDocument = settings({
+      theme: "dark",
+      language: "zh-CN",
+      proxyMode: "manual",
+      proxyType: "socks5",
+      proxyHost: "proxy.example.com",
+      proxyPort: 1080,
+      defaultCookiesFile: "/tmp/oneget-cookies.txt",
+      userAgent: "OneGet-Test/9.9",
+      connectTimeoutSecs: 30,
+      readTimeoutSecs: 120,
+      retryAttempts: 7,
+      hfConnectionCap: 16,
+      alwaysAskQuality: false,
+      videoQualityPreference: "highest",
+      customField: "kept",
+    });
+    invokeCommand.mockImplementation(async (command: string) => {
+      if (command === "settings_get") {
+        return { ok: true as const, data: initial };
+      }
+      if (command === "settings_status") {
+        return {
+          ok: true as const,
+          data: { readOnly: true, recovered: true, proxyUnavailableReason: null },
+        };
+      }
+      if (command === "settings_save") {
+        return { ok: true as const, data: backendDocument };
+      }
+      return {
+        ok: false as const,
+        error: { code: "unexpected_command", message: command },
+      };
+    });
+
+    const { result } = renderHook(() => useSettings());
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    let outcome = false;
+    await act(async () => {
+      outcome = await result.current.save(
+        settings({ theme: "dark", language: "zh-CN" }),
+      );
+    });
+
+    expect(outcome).toBe(true);
+    expect(result.current.settings).toEqual(backendDocument);
+    expect(result.current.settings).toMatchObject({
+      language: "zh-CN",
+      theme: "dark",
+      proxyMode: "manual",
+      videoQualityPreference: "highest",
+      customField: "kept",
+    });
+    expect(result.current.status).toEqual({
+      readOnly: true,
+      recovered: true,
+      proxyUnavailableReason: null,
+    });
   });
 });

@@ -4,20 +4,16 @@ import { translate, useI18n } from "../../i18n";
 export interface DownloadSettingsValue {
   defaultConnections: string;
   maxConcurrentTasks: string;
-  globalRateLimit: string;
 }
 
 export type DownloadSettingsErrorKey =
   | "validation.connections_range"
   | "validation.concurrency_positive"
-  | "validation.concurrency_range"
-  | "validation.rate_limit_positive"
-  | "validation.rate_limit_range";
+  | "validation.concurrency_range";
 
 export interface DownloadSettingsErrors {
   defaultConnections?: DownloadSettingsErrorKey;
   maxConcurrentTasks?: DownloadSettingsErrorKey;
-  globalRateLimit?: DownloadSettingsErrorKey;
 }
 
 export interface DownloadSettingsProps {
@@ -62,16 +58,6 @@ export function DownloadSettings({
         onChange={(event) =>
           onChange({ maxConcurrentTasks: event.target.value })
         }
-      />
-      <Input
-        label={t("settings.globalRateLimit")}
-        labelAlias={alias("settings.globalRateLimit")}
-        name="globalRateLimit"
-        type="number"
-        min={1}
-        value={value.globalRateLimit}
-        error={errors?.globalRateLimit ? t(errors.globalRateLimit) : undefined}
-        onChange={(event) => onChange({ globalRateLimit: event.target.value })}
       />
       <p className="og-probe">{t("settings.capturedAtStart")}</p>
     </section>
